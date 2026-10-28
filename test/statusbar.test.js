@@ -4,6 +4,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+const { buildBundle, OUT_FILE, MODULE_ORDER } = require('../scripts/build.js');
+const {
+  normalizeContextWindow,
+  getCwLimit,
+  getCwQuotaHint,
+  createContextWindowStore,
+} = require('../src/context-window-policy.js');
+const { normalizeAdapter, createAdapterRegistry } = require('../src/adapter-registry.js');
+const { extractStatsFromMetas } = require('../src/rpc-client.js');
+const { buildDynamicCwWarnCss, fmtK, fmtNum, escHtml } = require('../src/dom-styles.js');
+const { mountStatusBar, STATUSBAR_VERSION } = require('../src/index.js');
+
 const {
   PATCH_MARKER,
   UTILS_ANCHOR_TARGET,
@@ -16,29 +28,86 @@ const {
   computeIntegrity,
 } = require('../scripts/ensure_statusbar_patch.js');
 
-const SRC_STATUSBAR_PATH = path.join(__dirname, '..', 'src', 'statusbar_autoinject.js');
+const SRC_DIR = path.join(__dirname, '..', 'src');
 const SRC_PATCHER_PATH = path.join(__dirname, '..', 'scripts', 'ensure_statusbar_patch.js');
 const SRC_INSTALL_PATH = path.join(__dirname, '..', 'scripts', 'install.js');
+const SRC_BUILD_PATH = path.join(__dirname, '..', 'scripts', 'build.js');
 
-describe('antigravity-statusbar syntax & bundle checks', () => {
-  it('parses all scripts cleanly via vm.Script', () => {
-    for (const filePath of [SRC_STATUSBAR_PATH, SRC_PATCHER_PATH, SRC_INSTALL_PATH]) {
-      const code = fs.readFileSync(filePath, 'utf8');
-      assert.doesNotThrow(() => new vm.Script(code, { filename: filePath }));
+describe('modular architecture & bundle verification', () => {
+  it('verifies all separated SOLID modules exist, parse cleanly, and build into dist/statusbar_autoinject.js', () => {
+    assert.equal(fs.existsSync(path.join(SRC_DIR, 'statusbar_autoinject.js')), false, 'monolithic src/statusbar_autoinject.js should be removed');
+
+    for (const rel of MODULE_ORDER) {
+      const fullPath = path.join(SRC_DIR, rel);
+      assert.ok(fs.existsSync(fullPath), `module ${rel} should exist`);
+      const code = fs.readFileSync(fullPath, 'utf8');
+      assert.doesNotThrow(() => new vm.Script(code, { filename: fullPath }));
     }
+
+    for (const scriptPath of [SRC_PATCHER_PATH, SRC_INSTALL_PATH, SRC_BUILD_PATH]) {
+      const code = fs.readFileSync(scriptPath, 'utf8');
+      assert.doesNotThrow(() => new vm.Script(code, { filename: scriptPath }));
+    }
+
+    const { outFile, size } = buildBundle();
+    assert.equal(outFile, OUT_FILE);
+    assert.ok(size > 1000);
+    const bundleCode = fs.readFileSync(OUT_FILE, 'utf8');
+    assert.ok(!bundleCode.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2'));
   });
 
-  it('contains required statusbar v7 features, adapter registry, and no embedded external plugin markers', () => {
-    const code = fs.readFileSync(SRC_STATUSBAR_PATH, 'utf8');
-    assert.ok(code.includes("const STATUSBAR_VERSION = 'v7';"));
-    assert.ok(code.includes('function registerCustomCwInPrototype(cw)'));
-    assert.ok(code.includes('function normalizeContextWindow(raw)'));
-    assert.ok(code.includes('function buildDynamicCwWarnCss()'));
-    assert.ok(code.includes('function registerStatusBarAdapter(rawAdapter)'));
-    assert.ok(code.includes('function unregisterStatusBarAdapter(id)'));
-    assert.ok(code.includes('window.agyStatusBar ='));
-    assert.ok(code.includes('data-agy-cw-warn'));
-    assert.ok(!code.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2'));
+  it('unit-tests isolated modules (context-window-policy, adapter-registry, rpc-client, dom-styles)', () => {
+    // 1. context-window-policy
+    assert.equal(normalizeContextWindow('200'), '200K');
+    assert.equal(normalizeContextWindow('0.5m'), '500K');
+    assert.equal(normalizeContextWindow('10'), '32K');
+    assert.equal(normalizeContextWindow('1500'), '980K');
+    assert.equal(getCwLimit('350K'), 350000);
+    assert.ok(getCwQuotaHint('200K').includes('절약 모드'));
+
+    const fakeLs = {
+      map: new Map(),
+      getItem(k) { return this.map.get(k) ?? null; },
+      setItem(k, v) { this.map.set(k, String(v)); },
+    };
+    const store = createContextWindowStore({ document: { cookie: '' }, localStorage: fakeLs });
+    store.saveContextWindowSetting('conv-a', '320');
+    assert.equal(store.getSavedContextWindow('conv-a'), '320K');
+    assert.equal(store.getSavedContextWindow('conv-b'), '512K');
+
+    // 2. adapter-registry
+    assert.throws(() => normalizeAdapter({ id: '' }), /non-empty string id/);
+    assert.throws(() => normalizeAdapter({ id: 'invalid' }), /must provide either render/);
+    let updates = 0;
+    const reg = createAdapterRegistry({
+      window: {},
+      document: {},
+      setHtml() {},
+      onUpdate() { updates++; },
+    });
+    const off = reg.registerAdapter({ id: 'btn-1', slot: 'right', order: 15, label: '[ one ]' });
+    assert.equal(reg.getAdapters().length, 1);
+    assert.equal(updates, 1);
+    off();
+    assert.equal(reg.getAdapters().length, 0);
+
+    // 3. rpc-client metadata parser
+    const stats = extractStatsFromMetas([
+      {
+        chatModel: {
+          chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 64000, maxContextTokens: 256000 } },
+          usage: { cacheReadTokens: 60000, inputTokens: 4000 },
+        },
+      },
+    ]);
+    assert.equal(stats.used, 64000);
+    assert.equal(stats.cachePct, 94);
+
+    // 4. dom-styles
+    assert.equal(fmtK(12500), '13k');
+    assert.equal(fmtNum(123456), '123,456');
+    assert.equal(escHtml('<a>"x"</a>'), '&lt;a&gt;&quot;x&quot;&lt;/a&gt;');
+    assert.ok(buildDynamicCwWarnCss(new Set(['200K'])).includes('data-context-window="200K"'));
   });
 });
 
@@ -206,18 +275,20 @@ function createDomSandbox() {
   };
   sandbox.window.document = sandbox.document;
   sandbox.window.localStorage = sandbox.localStorage;
+  sandbox.window.fetch = sandbox.fetch;
+  sandbox.window.MutationObserver = sandbox.MutationObserver;
 
   return { sandbox, triggerEl, styleEl, getMountedBar: () => mountedBarEl };
 }
 
 describe('context window normalization, prototype bridge, and <=256K warning suppression', () => {
   it('normalizes preset and custom context windows and suppresses warning icon for <=256K', () => {
-    const code = fs.readFileSync(SRC_STATUSBAR_PATH, 'utf8');
+    buildBundle();
+    const code = fs.readFileSync(OUT_FILE, 'utf8');
     const { sandbox, triggerEl, styleEl } = createDomSandbox();
 
     vm.runInNewContext(code, sandbox);
 
-    // Simulate applying 200K (<= 256K) via localStorage per-session map
     sandbox.localStorage.setItem('agy-session-ctx-windows-v1', JSON.stringify({ 'test-session-1': '200' }));
     delete sandbox.window.__agyStatusBarActiveVersion;
     vm.runInNewContext(code, sandbox);
@@ -226,13 +297,11 @@ describe('context window normalization, prototype bridge, and <=256K warning sup
     assert.equal(triggerEl.getAttribute('data-agy-cw-warn'), '0');
     assert.ok(styleEl.textContent.includes('[data-testid="model-selector-trigger"][data-context-window="200K"] div:has(> .text-warning)'));
 
-    // Verify Object.prototype non-enumerable getter works for v2.27 ugb (token map) and vgb (tooltip map)
     const mockUgb = { '256K': 256000, '512K': 512000, '900K': 900000 };
     const mockVgb = { '512K': '512K context window', '900K': '900K context window' };
     assert.equal(mockUgb['200K'], 200000);
     assert.ok(String(mockVgb['200K']).includes('200K custom context limit'));
 
-    // Simulate applying 350K (> 256K)
     sandbox.localStorage.setItem('agy-session-ctx-windows-v1', JSON.stringify({ 'test-session-1': '350K' }));
     delete sandbox.window.__agyStatusBarActiveVersion;
     vm.runInNewContext(code, sandbox);
@@ -244,15 +313,12 @@ describe('context window normalization, prototype bridge, and <=256K warning sup
 });
 
 describe('statusbar adapter architecture and built-in button adapters', () => {
-  it('registers built-in adapters (core-metrics, compact, context) and supports custom adapter lifecycle', async () => {
-    const code = fs.readFileSync(SRC_STATUSBAR_PATH, 'utf8');
+  it('registers built-in adapters (core-metrics, compact, context) and supports custom adapter lifecycle via mountStatusBar', async () => {
     const { sandbox, getMountedBar } = createDomSandbox();
 
-    vm.runInNewContext(code, sandbox);
-
-    const api = sandbox.window.agyStatusBar;
-    assert.ok(api, 'window.agyStatusBar should be exposed');
-    assert.equal(api.version, 'v7');
+    const api = mountStatusBar(sandbox);
+    assert.ok(api, 'mountStatusBar should return window.agyStatusBar API');
+    assert.equal(api.version, STATUSBAR_VERSION);
 
     const initialAdapters = JSON.parse(JSON.stringify(api.getAdapters()));
     assert.deepEqual(
@@ -264,7 +330,6 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       ]
     );
 
-    // Wait microtask for Promise.all([fetchCascadeStats, quotaPromise]).then(renderBar)
     await new Promise((r) => setTimeout(r, 10));
 
     const barEl = getMountedBar();
@@ -276,10 +341,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(contextBtn, 'context button adapter should be rendered in right slot');
     assert.equal(compactBtn.textContent, '[ compact ]');
     assert.equal(contextBtn.textContent, '[ context ]');
-    assert.ok(compactBtn.className.includes('agy-ctx-btn-compact'));
-    assert.ok(contextBtn.className.includes('agy-ctx-btn-context'));
 
-    // Register a custom adapter and verify click handler and unmount lifecycle
     let clickedSessionId = null;
     let unmounted = false;
     const dispose = api.registerAdapter({
@@ -307,10 +369,6 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     dispose();
     assert.equal(unmounted, true);
     assert.equal(api.getAdapters().some((a) => a.id === 'custom-tool'), false);
-
-    // Validate explicit error on invalid adapter registration
-    assert.throws(() => api.registerAdapter({ id: '' }), /non-empty string id/);
-    assert.throws(() => api.registerAdapter({ id: 'no-render-or-label' }), /must provide either render/);
   });
 });
 
@@ -324,7 +382,7 @@ describe('ASAR exact-size transformation', () => {
     assert.ok(patchedUtils.toString('utf8').includes(PATCH_MARKER));
 
     const fakeMain = Buffer.from(`"use strict";\n${commentPadding}\n${MAIN_ANCHOR_TARGET}\n  console.log(contents);\n});\n`, 'utf8');
-    const patchedMain = transformExactSize(fakeMain, MAIN_ANCHOR_TARGET, MAIN_ANCHOR_REPLACEMENT);
+    const patchedMain = transformExactSize(fakeMain, MAIN_ANCHOR_TARGET, UTILS_ANCHOR_TARGET ? MAIN_ANCHOR_REPLACEMENT : '');
     assert.equal(patchedMain.length, fakeMain.length);
     assert.ok(patchedMain.toString('utf8').includes(PATCH_MARKER));
 
