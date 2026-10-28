@@ -1,8 +1,8 @@
 # Antigravity Custom Statusbar (`antigravity-statusbar`)
 
-Google Antigravity 2.0 전용 **커스텀 컨텍스트·쿼터 상태바 및 자동 복구 패치(`v6` / `ASAR v5`)**입니다.
+Google Antigravity 2.0 전용 **커스텀 컨텍스트·쿼터 상태바 및 자동 복구 패치(`v7` / `ASAR v5`)**입니다.
 
-채팅 입력창 하단에 실시간 컨텍스트 사용량, 프롬프트 캐시 적중률, 5시간/주간 쿼터 잔여량을 표시하고, **세션별(`cascadeId`) 독립 컨텍스트 한도 설정(프리셋 및 `32K`~`980K` 직접 입력)**과 **앱 업데이트 시 자동 복구**를 지원합니다.
+채팅 입력창 하단에 실시간 컨텍스트 사용량, 프롬프트 캐시 적중률, 5시간/주간 쿼터 잔여량을 표시하고, **어댑터(`StatusBarAdapter`) 기반 확장 구조**, **세션별(`cascadeId`) 독립 컨텍스트 한도 설정(프리셋 및 `32K`~`980K` 직접 입력)**, **앱 업데이트 시 자동 복구**를 지원합니다.
 
 ---
 
@@ -21,9 +21,25 @@ Google Antigravity 2.0 전용 **커스텀 컨텍스트·쿼터 상태바 및 자
 3. **모델 선택기 버튼(`ModelSelectorButton`) 주의 아이콘(`⚠️`) 스마트 제어**
    - Antigravity 기본 UI가 `256K`가 아닌 모든 컨텍스트 값에 노란색 주의 아이콘(`⚠️`)을 표시하는 문제를 해결하여, 기본 한도(`256K`) 이하(`32K`~`256K`)로 설정했을 때는 `· 200K` 텍스트 배지는 그대로 유지하면서 불필요한 노란색 주의 아이콘만 숨깁니다 (`256K` 초과 시에만 주의 아이콘 표시).
 
-4. **원클릭 `[ compact ]` 및 `[ context ]` 디버그 모달**
-   - `[ compact ]`: Lexical 에디터에 `/compact` 시스템 슬래시 명령과 구조화된 요약 프롬프트를 자동 삽입·전송합니다.
-   - `[ context ]`: 현재 세션의 Token Breakdown, Prompt Sections, 최근 Generator 턴별 토큰 사용량(`Est. Ctx`, `Cache Read`, `Fresh Input`, `Output (+Think)`)을 보여주는 상세 모달을 엽니다.
+4. **어댑터(`StatusBarAdapter`) 아키텍처 및 기본 액션 버튼 어댑터 (`compact`, `context`)**
+   - 하단바 코어 레이아웃(`.agy-ctx-left`, `.agy-ctx-right`)과 개별 기능을 분리하여 `window.agyStatusBar.registerAdapter(adapter)` / `unregisterAdapter(id)` 계약으로 기능을 동적으로 추가·교체·제거할 수 있습니다.
+   - 기본 우측 버튼 두 개(`[ compact ]`, `[ context ]`)와 좌측 지표(`core-metrics`) 모두 이 어댑터 계약으로 등록되어 동작합니다:
+     - `compact` 어댑터 (`slot: 'right'`, `order: 10`): Lexical 에디터에 `/compact` 시스템 슬래시 명령과 구조화된 요약 프롬프트를 자동 삽입·전송합니다.
+     - `context` 어댑터 (`slot: 'right'`, `order: 20`): 현재 세션의 Token Breakdown, Prompt Sections, 최근 Generator 턴별 토큰 사용량(`Est. Ctx`, `Cache Read`, `Fresh Input`, `Output (+Think)`)을 보여주는 상세 모달을 엽니다.
+
+```js
+// 커스텀 하단바 버튼 어댑터 등록 예시
+const dispose = window.agyStatusBar.registerAdapter({
+  id: 'my-custom-action',
+  slot: 'right',
+  order: 30,
+  label: '[ custom ]',
+  title: '사용자 정의 액션 실행',
+  onClick({ cascadeId, view, inputBox }) {
+    console.log('Clicked on session:', cascadeId);
+  }
+});
+```
 
 5. **Antigravity 업데이트 후 무결성 보존 자동 복구 (`ensure_statusbar_patch.js`)**
    - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`를 **원본 바이트 크기·파일 오프셋 100% 일치(`0` offset drift)** 방식으로 패치하고 `%APPDATA%\Antigravity\app_storage.json`과 동기화하여, 트레이 상주 상태에서 새 창을 열거나 앱이 업데이트된 뒤에도 자동으로 상태바를 복구합니다.

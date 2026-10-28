@@ -1,5 +1,5 @@
 (() => {
-  const STATUSBAR_VERSION = 'v6';
+  const STATUSBAR_VERSION = 'v7';
   if (window.__agyStatusBarActiveVersion === STATUSBAR_VERSION && window.__agyStatusBarCleanup) {
     return;
   }
@@ -1362,105 +1362,314 @@
     barEl.appendChild(menu);
   }
 
-  function ensureBarStructure(barEl, view, inputBox) {
-    let leftEl = barEl.querySelector('.agy-ctx-left');
-    let rightEl = barEl.querySelector('.agy-ctx-right');
-    if (!leftEl || !rightEl || !rightEl.querySelector('.agy-ctx-btn-compact')) {
-      setHtml(barEl, `
-        <div class="agy-ctx-left"></div>
-        <div class="agy-ctx-right">
-          <button type="button" class="agy-ctx-btn agy-ctx-btn-compact" title="지정된 요약 프롬프트로 시스템 /compact 즉시 실행">[ compact ]</button>
-          <button type="button" class="agy-ctx-btn agy-ctx-btn-context" title="상세 컨텍스트 디버그 창 열기/닫기">[ context ]</button>
-        </div>
-      `);
-      leftEl = barEl.querySelector('.agy-ctx-left');
-      const compactBtn = barEl.querySelector('.agy-ctx-btn-compact');
-      if (compactBtn) {
-        compactBtn.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          runCompactForInputBox(inputBox);
-        };
-      }
-      const ctxBtn = barEl.querySelector('.agy-ctx-btn-context');
-      if (ctxBtn) {
-        ctxBtn.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          openOrToggleDebugModal(view, inputBox);
-        };
+  // StatusBar Adapter Registry (SOLID / OCP / DIP extension boundary)
+  // Allows adding, replacing, or removing statusbar items/buttons in 'left' or 'right' slots without modifying core layout logic.
+  const adapterRegistry = new Map();
+  if (!window.__agyCustomStatusBarAdapters || !(window.__agyCustomStatusBarAdapters instanceof Map)) {
+    window.__agyCustomStatusBarAdapters = new Map();
+  }
+
+  function normalizeAdapter(adapter) {
+    if (!adapter || typeof adapter !== 'object') {
+      throw new TypeError('StatusBarAdapter must be an object');
+    }
+    const id = typeof adapter.id === 'string' ? adapter.id.trim() : '';
+    if (!id) {
+      throw new TypeError('StatusBarAdapter requires a non-empty string id');
+    }
+    const slot = adapter.slot === 'left' ? 'left' : 'right';
+    const order = typeof adapter.order === 'number' && !isNaN(adapter.order) ? adapter.order : 100;
+    const hasRender = typeof adapter.render === 'function';
+    const hasButton = typeof adapter.onClick === 'function' || adapter.label !== undefined;
+    if (!hasRender && !hasButton) {
+      throw new TypeError(`StatusBarAdapter "${id}" must provide either render(el, ctx) or label/onClick`);
+    }
+    return {
+      ...adapter,
+      id,
+      slot,
+      order,
+      builtin: Boolean(adapter.builtin),
+    };
+  }
+
+  function removeAdapterDomElements(id) {
+    const bars = document.querySelectorAll('.agy-ctx-statusbar');
+    for (const bar of bars) {
+      const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
+      for (const node of nodes) {
+        try { node.remove(); } catch (e) {}
       }
     }
-    return leftEl;
+  }
+
+  function getSortedAdapters(slotName) {
+    const list = [];
+    for (const adapter of adapterRegistry.values()) {
+      if (!slotName || adapter.slot === slotName) {
+        list.push(adapter);
+      }
+    }
+    list.sort((a, b) => {
+      if (a.slot !== b.slot) return a.slot === 'left' ? -1 : 1;
+      return (a.order - b.order) || a.id.localeCompare(b.id);
+    });
+    return list;
+  }
+
+  function registerStatusBarAdapter(rawAdapter) {
+    const adapter = normalizeAdapter(rawAdapter);
+    if (adapterRegistry.has(adapter.id)) {
+      const prev = adapterRegistry.get(adapter.id);
+      if (prev && typeof prev.unmount === 'function') {
+        try { prev.unmount(); } catch (e) {}
+      }
+      removeAdapterDomElements(adapter.id);
+    }
+    adapterRegistry.set(adapter.id, adapter);
+    if (!adapter.builtin) {
+      window.__agyCustomStatusBarAdapters.set(adapter.id, adapter);
+    }
+    updateAll();
+    return () => unregisterStatusBarAdapter(adapter.id);
+  }
+
+  function unregisterStatusBarAdapter(id) {
+    const key = typeof id === 'string' ? id.trim() : '';
+    if (!key || !adapterRegistry.has(key)) return false;
+    const adapter = adapterRegistry.get(key);
+    adapterRegistry.delete(key);
+    window.__agyCustomStatusBarAdapters.delete(key);
+    if (adapter && typeof adapter.unmount === 'function') {
+      try { adapter.unmount(); } catch (e) {}
+    }
+    removeAdapterDomElements(key);
+    updateAll();
+    return true;
+  }
+
+  function ensureBarStructure(barEl) {
+    let leftEl = barEl.querySelector('.agy-ctx-left');
+    let rightEl = barEl.querySelector('.agy-ctx-right');
+    if (!leftEl || !rightEl) {
+      setHtml(barEl, `
+        <div class="agy-ctx-left"></div>
+        <div class="agy-ctx-right"></div>
+      `);
+      leftEl = barEl.querySelector('.agy-ctx-left');
+      rightEl = barEl.querySelector('.agy-ctx-right');
+    }
+    return { leftEl, rightEl };
+  }
+
+  function renderSlotAdapters(slotEl, slotName, ctx) {
+    if (!slotEl) return;
+    const adapters = getSortedAdapters(slotName);
+    const activeIds = new Set(adapters.map((a) => a.id));
+
+    // Remove stale adapter nodes in this slot
+    if (slotEl.querySelectorAll) {
+      const existingNodes = slotEl.querySelectorAll('[data-agy-adapter-id]');
+      for (const node of existingNodes) {
+        const nodeId = node.getAttribute('data-agy-adapter-id');
+        if (nodeId && !activeIds.has(nodeId)) {
+          try { node.remove(); } catch (e) {}
+        }
+      }
+    }
+
+    for (const adapter of adapters) {
+      let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
+      if (typeof adapter.render === 'function') {
+        if (!itemEl) {
+          itemEl = document.createElement(adapter.tagName || 'span');
+          itemEl.setAttribute('data-agy-adapter-id', adapter.id);
+          if (adapter.className) itemEl.className = adapter.className;
+          slotEl.appendChild(itemEl);
+        }
+        adapter.render(itemEl, ctx);
+      } else {
+        if (!itemEl) {
+          itemEl = document.createElement('button');
+          itemEl.type = 'button';
+          itemEl.setAttribute('data-agy-adapter-id', adapter.id);
+          itemEl.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const latestCtx = itemEl.__agyAdapterCtx || ctx;
+            if (typeof adapter.onClick === 'function') {
+              adapter.onClick(latestCtx, e);
+            }
+          };
+          slotEl.appendChild(itemEl);
+        }
+        itemEl.__agyAdapterCtx = ctx;
+        const resolvedClass = typeof adapter.className === 'function'
+          ? adapter.className(ctx)
+          : (adapter.className || 'agy-ctx-btn');
+        const finalClass = resolvedClass.includes('agy-ctx-btn') ? resolvedClass : `agy-ctx-btn ${resolvedClass}`.trim();
+        if (itemEl.className !== finalClass) {
+          itemEl.className = finalClass;
+        }
+        const resolvedLabel = typeof adapter.label === 'function' ? adapter.label(ctx) : String(adapter.label ?? '');
+        if (itemEl.textContent !== resolvedLabel) {
+          itemEl.textContent = resolvedLabel;
+        }
+        const resolvedTitle = typeof adapter.title === 'function' ? adapter.title(ctx) : String(adapter.title ?? '');
+        if (resolvedTitle && itemEl.getAttribute('title') !== resolvedTitle) {
+          itemEl.setAttribute('title', resolvedTitle);
+          itemEl.title = resolvedTitle;
+        }
+      }
+    }
+  }
+
+  // Built-in Left Adapter: Core Context / Cache / Quota Metrics
+  const coreMetricsAdapter = {
+    id: 'core-metrics',
+    slot: 'left',
+    order: 10,
+    builtin: true,
+    tagName: 'span',
+    className: 'agy-ctx-left',
+    render(containerEl, ctx) {
+      const { barEl, view, cascadeId, stats, quota } = ctx;
+      const currentCw = getConversationContextWindow(view, cascadeId);
+      const maxLimit = getCwLimit(currentCw);
+      const used = stats ? stats.used : 0;
+      const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
+      const usedStr = stats ? fmtK(used) : '…';
+      const cachePct = stats ? stats.cachePct : 0;
+
+      const colorClass = pct >= 85 ? 'agy-ctx-crit' : pct >= 65 ? 'agy-ctx-warn' : 'agy-ctx-ok';
+      const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
+
+      const limitModClass = maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : (maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '');
+      const limitTitle = `이 세션(${cascadeId ? cascadeId.slice(0, 8) : '현재'})의 컨텍스트 한도: ${currentCw} (${getCwQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
+
+      let quotaHtml = '';
+      if (quota) {
+        const qParts = [];
+        if (quota.pct5h !== null) {
+          qParts.push(`5h <strong class="agy-ctx-quota">${quota.pct5h}%</strong> left${quota.rst5h ? ' ' + quota.rst5h : ''}`);
+        }
+        if (quota.pct7d !== null) {
+          qParts.push(`7d <strong class="agy-ctx-quota">${quota.pct7d}%</strong> left`);
+        }
+        if (qParts.length) {
+          quotaHtml = `<span class="agy-ctx-sep">|</span><span>${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
+        }
+      }
+
+      const html = `
+        <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
+        <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${limitTitle}">[ ${currentCw.toLowerCase()} ▾ ]</button></span>
+        <span class="agy-ctx-sep">·</span>
+        <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
+        ${quotaHtml}
+      `;
+
+      if (containerEl.__lastHtml !== html) {
+        containerEl.__lastHtml = html;
+        try {
+          containerEl.innerHTML = html;
+        } catch (e) {
+          setHtml(containerEl, html);
+        }
+
+        const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
+        if (limitBtn) {
+          limitBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.shiftKey) {
+              cycleConversationContextWindow(view, cascadeId);
+              updateAll();
+            } else {
+              showContextMenu(barEl, view, cascadeId, limitBtn);
+            }
+          };
+          limitBtn.oncontextmenu = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showContextMenu(barEl, view, cascadeId, limitBtn);
+          };
+        }
+      }
+    }
+  };
+
+  // Built-in Right Button Adapter 1: [ compact ]
+  const compactButtonAdapter = {
+    id: 'compact',
+    slot: 'right',
+    order: 10,
+    builtin: true,
+    className: 'agy-ctx-btn agy-ctx-btn-compact',
+    label: '[ compact ]',
+    title: '지정된 요약 프롬프트로 시스템 /compact 즉시 실행',
+    onClick({ inputBox }) {
+      runCompactForInputBox(inputBox);
+    }
+  };
+
+  // Built-in Right Button Adapter 2: [ context ]
+  const contextButtonAdapter = {
+    id: 'context',
+    slot: 'right',
+    order: 20,
+    builtin: true,
+    className: 'agy-ctx-btn agy-ctx-btn-context',
+    label: '[ context ]',
+    title: '상세 컨텍스트 디버그 창 열기/닫기',
+    onClick({ view, inputBox }) {
+      openOrToggleDebugModal(view, inputBox);
+    }
+  };
+
+  // Register built-in adapters and restore any previously registered external adapters
+  adapterRegistry.set(coreMetricsAdapter.id, normalizeAdapter(coreMetricsAdapter));
+  adapterRegistry.set(compactButtonAdapter.id, normalizeAdapter(compactButtonAdapter));
+  adapterRegistry.set(contextButtonAdapter.id, normalizeAdapter(contextButtonAdapter));
+  for (const [, extAdapter] of window.__agyCustomStatusBarAdapters.entries()) {
+    try {
+      const normalized = normalizeAdapter(extAdapter);
+      adapterRegistry.set(normalized.id, normalized);
+    } catch (e) {}
   }
 
   function renderBar(barEl, view, inputBox, stats, quota) {
     const cascadeId = view.getAttribute('data-cascade-id');
-    const leftEl = ensureBarStructure(barEl, view, inputBox);
-
-    const currentCw = getConversationContextWindow(view, cascadeId);
-    const maxLimit = getCwLimit(currentCw);
-    const used = stats ? stats.used : 0;
-    const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
-    const usedStr = stats ? fmtK(used) : '…';
-    const cachePct = stats ? stats.cachePct : 0;
-
-    const colorClass = pct >= 85 ? 'agy-ctx-crit' : pct >= 65 ? 'agy-ctx-warn' : 'agy-ctx-ok';
-    const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
-
-    const limitModClass = maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : (maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '');
-    const limitTitle = `이 세션(${cascadeId ? cascadeId.slice(0, 8) : '현재'})의 컨텍스트 한도: ${currentCw} (${getCwQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
-
-    let quotaHtml = '';
-    if (quota) {
-      const qParts = [];
-      if (quota.pct5h !== null) {
-        qParts.push(`5h <strong class="agy-ctx-quota">${quota.pct5h}%</strong> left${quota.rst5h ? ' ' + quota.rst5h : ''}`);
-      }
-      if (quota.pct7d !== null) {
-        qParts.push(`7d <strong class="agy-ctx-quota">${quota.pct7d}%</strong> left`);
-      }
-      if (qParts.length) {
-        quotaHtml = `<span class="agy-ctx-sep">|</span><span>${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
-      }
-    }
-
-    const html = `
-      <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-      <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${limitTitle}">[ ${currentCw.toLowerCase()} ▾ ]</button></span>
-      <span class="agy-ctx-sep">·</span>
-      <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
-      ${quotaHtml}
-    `;
-
-    if (leftEl.__lastHtml !== html) {
-      leftEl.__lastHtml = html;
-      try {
-        leftEl.innerHTML = html;
-      } catch (e) {
-        setHtml(leftEl, html);
-      }
-
-      const limitBtn = leftEl.querySelector('.agy-ctx-btn-limit');
-      if (limitBtn) {
-        limitBtn.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (e.shiftKey) {
-            cycleConversationContextWindow(view, cascadeId);
-            updateAll();
-          } else {
-            showContextMenu(barEl, view, cascadeId, limitBtn);
-          }
-        };
-        limitBtn.oncontextmenu = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          showContextMenu(barEl, view, cascadeId, limitBtn);
-        };
-      }
-    }
+    const { leftEl, rightEl } = ensureBarStructure(barEl);
+    const ctx = {
+      barEl,
+      view,
+      inputBox,
+      cascadeId,
+      stats,
+      quota,
+      updateAll,
+      getConversationContextWindow: () => getConversationContextWindow(view, cascadeId),
+      setConversationContextWindow: (cw) => setConversationContextWindow(view, cascadeId, cw),
+    };
+    renderSlotAdapters(leftEl, 'left', ctx);
+    renderSlotAdapters(rightEl, 'right', ctx);
   }
+
+  window.agyStatusBar = {
+    version: STATUSBAR_VERSION,
+    registerAdapter: registerStatusBarAdapter,
+    unregisterAdapter: unregisterStatusBarAdapter,
+    getAdapters: () => getSortedAdapters().map((a) => ({
+      id: a.id,
+      slot: a.slot,
+      order: a.order,
+      builtin: Boolean(a.builtin),
+    })),
+    updateAll,
+    getConversationContextWindow,
+    setConversationContextWindow,
+  };
 
   // PERF-CACHE-003 & CONC-FENCE-002: Single-render non-blocking update after stats resolution
   function updateAll() {
