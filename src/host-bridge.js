@@ -279,7 +279,7 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
 
     const fiberKey = Object.keys(editable).find((k) => k.startsWith('__reactFiber$'));
     let curr = fiberKey ? editable[fiberKey] : null;
-    while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter === 'function' === false)) {
+    while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter !== 'function')) {
       curr = curr.return;
     }
     if (curr && curr.memoizedProps && typeof curr.memoizedProps.handleEnter === 'function') {

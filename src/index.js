@@ -205,7 +205,12 @@ function mountStatusBar(env = {}) {
   });
   updateAll();
 
-  const timer = setInterval(updateAll, 3000);
+  const setIntervalFn = env.setInterval || win.setInterval || setInterval;
+  const clearIntervalFn = env.clearInterval || win.clearInterval || clearInterval;
+  const timer = setIntervalFn(updateAll, 3000);
+  if (timer && typeof timer.unref === 'function') {
+    timer.unref();
+  }
   const ObsClass = env.MutationObserver || win.MutationObserver || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
   const obs = ObsClass ? new ObsClass(() => {
     const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
@@ -257,7 +262,7 @@ function mountStatusBar(env = {}) {
 
   win.__agyStatusBarCleanup = () => {
     delete win.__agyStatusBarActiveVersion;
-    clearInterval(timer);
+    clearIntervalFn(timer);
     if (obs) obs.disconnect();
     const m = doc.getElementById('agy-ctx-debug-modal');
     if (m) m.remove();

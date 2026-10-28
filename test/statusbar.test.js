@@ -369,6 +369,10 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     dispose();
     assert.equal(unmounted, true);
     assert.equal(api.getAdapters().some((a) => a.id === 'custom-tool'), false);
+
+    assert.equal(typeof sandbox.window.__agyStatusBarCleanup, 'function');
+    sandbox.window.__agyStatusBarCleanup();
+    assert.equal(sandbox.window.__agyStatusBarActiveVersion, undefined);
   });
 });
 
