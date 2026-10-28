@@ -1,0 +1,25 @@
+{
+  "name": "antigravity-statusbar",
+  "version": "1.0.0",
+  "description": "Custom Context & Quota Status Bar with Per-Session Context Limits and ASAR Auto-Recovery for Google Antigravity 2.0",
+  "main": "scripts/ensure_statusbar_patch.js",
+  "scripts": {
+    "test": "node --test test/statusbar.test.js",
+    "install-statusbar": "node scripts/install.js",
+    "patch": "node scripts/ensure_statusbar_patch.js --worker",
+    "status": "node scripts/ensure_statusbar_patch.js --status"
+  },
+  "keywords": [
+    "antigravity",
+    "statusbar",
+    "context-window",
+    "gemini",
+    "electron",
+    "asar"
+  ],
+  "author": "jaeseongs95",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
