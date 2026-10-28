@@ -54,6 +54,11 @@ describe('modular architecture & bundle verification', () => {
     assert.ok(size > 1000);
     const bundleCode = fs.readFileSync(OUT_FILE, 'utf8');
     assert.ok(!bundleCode.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2'));
+
+    const readmeEn = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+    const readmeKo = fs.readFileSync(path.join(__dirname, '..', 'README.ko.md'), 'utf8');
+    assert.ok(readmeEn.includes('README.ko.md'), 'English README should link to Korean README');
+    assert.ok(readmeKo.includes('README.md'), 'Korean README should link to English README');
   });
 
   it('unit-tests isolated modules (context-window-policy, adapter-registry, rpc-client, dom-styles)', () => {

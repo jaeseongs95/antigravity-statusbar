@@ -1,5 +1,7 @@
 # antigravity-statusbar
 
+**Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)**
+
 Custom context window statusbar (`.agy-ctx-statusbar`), **`StatusBarAdapter` extension architecture**, per-session arbitrary token limit selector (`32K`–`980K`), and resilient zero-offset `app.asar` + live CDP auto-patcher for **Google Antigravity IDE** (`v2.26.x` / `v2.27.x+`).
 
 ---
@@ -7,7 +9,7 @@ Custom context window statusbar (`.agy-ctx-statusbar`), **`StatusBarAdapter` ext
 ## Features
 
 - **Modular SOLID Architecture (`src/`)**:
-  - Separated by single responsibility and variation axis into focused CommonJS modules under `src/` and bundled zero-dependency into `dist/statusbar_autoinject.js`.
+  - Separated by single responsibility and variation axis into 9 focused CommonJS modules under `src/` and bundled with zero external dependencies into `dist/statusbar_autoinject.js`.
 - **Pluggable `StatusBarAdapter` Architecture (`v7`)**:
   - Core layout (`.agy-ctx-left` and `.agy-ctx-right`) is decoupled from individual statusbar widgets and buttons.
   - Built-in buttons (`[ compact ]`, `[ context ]`) and left-side metrics (`core-metrics`) are implemented as independent `StatusBarAdapter` modules under `src/adapters/`.
@@ -47,6 +49,8 @@ antigravity-statusbar/
 │   └── install.js                 # Builds bundle, installs to ~/.gemini/antigravity & runs patcher
 ├── test/
 │   └── statusbar.test.js          # Module unit tests + runtime bundle integration tests
+├── README.md                      # English documentation
+├── README.ko.md                   # Korean documentation
 └── package.json
 ```
 
