@@ -91,7 +91,7 @@ function createContextButtonAdapter({
     try {
       let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
       let metas = [];
-      if (csrf && typeof fetchFn === 'function' && !window?.__APP_CONFIG__?.isRemoteControl) {
+      if (csrf && typeof fetchFn === 'function') {
         try {
           const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
             method: 'POST',

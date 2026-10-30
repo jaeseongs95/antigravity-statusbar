@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.4.0
+// @version      1.3.3
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -669,18 +669,15 @@
     }
 
     function fmtK(n) {
-      const num = Number(n);
-      if (!num || Number.isNaN(num)) return '0';
-      if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
-      if (num >= 1000) return Math.round(num / 1000) + 'k';
-      return String(num);
+      if (!n || isNaN(n)) return '0';
+      if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + 'M';
+      if (n >= 1000) return Math.round(n / 1000) + 'k';
+      return String(n);
     }
 
     function fmtNum(n) {
-      if (n === null || n === undefined) return '0';
-      const num = Number(n);
-      if (Number.isNaN(num)) return '0';
-      return num.toLocaleString('en-US');
+      if (n === null || n === undefined || isNaN(n)) return '0';
+      return Number(n).toLocaleString('en-US');
     }
 
     function escHtml(s) {
@@ -773,17 +770,13 @@
       return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, foundCtx, foundUsage };
     }
 
-    function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
+    function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
       const stateCache = new Map();
       const inFlightStats = new Map();
       const knownGenLenMap = new Map();
       let inFlightQuota = null;
       let quotaData = null;
       let lastQuotaFetch = 0;
-
-      function canUseLocalHttp(csrf) {
-        return Boolean(csrf && typeof fetchFn === 'function' && !window?.__APP_CONFIG__?.isRemoteControl);
-      }
 
       try {
         const rawCache = localStorage?.getItem(STATS_CACHE_KEY);
@@ -838,7 +831,7 @@
         inFlightQuota = (async () => {
           try {
             let j = null;
-            if (canUseLocalHttp(csrf)) {
+            if (csrf && typeof fetchFn === 'function') {
               try {
                 const r = await fetchFn('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
                   method: 'POST',
@@ -929,7 +922,7 @@
             let parsed = null;
             let discoveredGenLen = knownGenLen;
 
-            if (canUseLocalHttp(csrf)) {
+            if (csrf && typeof fetchFn === 'function') {
               try {
                 const callLocal = async (offset) => {
                   const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
@@ -1078,26 +1071,6 @@
     }
 
     function createHostBridge({ window, document, localStorage, cwStore }) {
-      try {
-        if (window && typeof window.__JETSKI_LS_CLIENT_DECORATOR__ !== 'function') {
-          const dec = function (client) {
-            window.__agyLsClient = client;
-            return client;
-          };
-          dec.__agyWrapped = true;
-          window.__JETSKI_LS_CLIENT_DECORATOR__ = dec;
-        } else if (window && typeof window.__JETSKI_LS_CLIENT_DECORATOR__ === 'function' && !window.__JETSKI_LS_CLIENT_DECORATOR__.__agyWrapped) {
-          const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
-          const wrappedDec = function (client) {
-            const res = prevDec.apply(this, arguments) || client;
-            window.__agyLsClient = res;
-            return res;
-          };
-          wrappedDec.__agyWrapped = true;
-          window.__JETSKI_LS_CLIENT_DECORATOR__ = wrappedDec;
-        }
-      } catch {}
-
       // Ensure context-window-selector flag is enabled in customFlagOverrides
       try {
         const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
@@ -1485,44 +1458,14 @@
       }
 
       function getRemoteRpcServiceForElement(el) {
-        if (
-          window?.__agyLsClient &&
-          (typeof window.__agyLsClient.retrieveUserQuotaSummary === 'function' ||
-            typeof window.__agyLsClient.getCascadeTrajectoryGeneratorMetadata === 'function')
-        ) {
-          return window.__agyLsClient;
-        }
-        const candidates = [
-          el,
-          document?.querySelector?.('[data-testid="conversation-view"]'),
-          document?.querySelector?.('#root')?.firstElementChild,
-        ].filter(Boolean);
+        const candidates = [el, document?.querySelector?.('[data-testid="conversation-view"]')].filter(Boolean);
         for (const startEl of candidates) {
           const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
           let curr = fk ? startEl[fk] : null;
           while (curr) {
             const val = curr.memoizedProps?.value;
-            if (val && typeof val === 'object') {
-              const lsClient =
-                val?.core?.projectManagementService?.lsClient ||
-                val?.projectManagementService?.lsClient ||
-                val?.lsClient;
-              if (
-                lsClient &&
-                (typeof lsClient.retrieveUserQuotaSummary === 'function' ||
-                  typeof lsClient.getCascadeTrajectoryGeneratorMetadata === 'function' ||
-                  typeof lsClient.getCascadeTrajectory === 'function')
-              ) {
-                if (window) window.__agyLsClient = lsClient;
-                return lsClient;
-              }
-              if (
-                typeof val.retrieveUserQuotaSummary === 'function' ||
-                typeof val.getCascadeTrajectoryGeneratorMetadata === 'function' ||
-                typeof val.getCascadeTrajectory === 'function'
-              ) {
-                return val;
-              }
+            if (val && typeof val === 'object' && (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function')) {
+              return val;
             }
             curr = curr.return;
           }
@@ -2277,7 +2220,7 @@
         try {
           let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
           let metas = [];
-          if (csrf && typeof fetchFn === 'function' && !window?.__APP_CONFIG__?.isRemoteControl) {
+          if (csrf && typeof fetchFn === 'function') {
             try {
               const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
                 method: 'POST',
@@ -2494,7 +2437,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v11';
+    const STATUSBAR_VERSION = 'v10';
 
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -2533,7 +2476,6 @@
       });
 
       const rpcClient = createRpcClient({
-        window: win,
         fetchFn,
         localStorage: ls,
         getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,

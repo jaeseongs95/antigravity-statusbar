@@ -430,18 +430,15 @@ function createTrustedHtmlSetter(window, document) {
 }
 
 function fmtK(n) {
-  const num = Number(n);
-  if (!num || Number.isNaN(num)) return '0';
-  if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
-  if (num >= 1000) return Math.round(num / 1000) + 'k';
-  return String(num);
+  if (!n || isNaN(n)) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'k';
+  return String(n);
 }
 
 function fmtNum(n) {
-  if (n === null || n === undefined) return '0';
-  const num = Number(n);
-  if (Number.isNaN(num)) return '0';
-  return num.toLocaleString('en-US');
+  if (n === null || n === undefined || isNaN(n)) return '0';
+  return Number(n).toLocaleString('en-US');
 }
 
 function escHtml(s) {
