@@ -5,7 +5,8 @@ const STYLE_CSS = `
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 14px;
+      row-gap: 4px;
+      column-gap: 10px;
       padding: 4px 10px 2px 10px;
       margin-top: 2px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -15,12 +16,24 @@ const STYLE_CSS = `
       user-select: none;
       flex-wrap: wrap;
       position: relative;
+      text-align: center;
     }
-    .agy-ctx-left, .agy-ctx-right {
-      display: flex;
+    .agy-ctx-left, .agy-ctx-core {
+      display: contents;
+    }
+    .agy-ctx-group {
+      display: inline-flex;
       align-items: center;
+      justify-content: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    .agy-ctx-right {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       gap: 6px;
-      flex-wrap: wrap;
+      white-space: nowrap;
     }
     .agy-ctx-sep {
       color: rgba(160, 165, 175, 0.35);
@@ -101,7 +114,7 @@ const STYLE_CSS = `
     }
     .agy-ctx-menu {
       position: absolute;
-      bottom: 24px;
+      bottom: calc(100% + 4px);
       left: 50%;
       transform: translateX(-50%);
       background: #1e1e24;
@@ -295,18 +308,64 @@ const STYLE_CSS = `
       background: #18181d;
       border-top: 1px solid rgba(128, 128, 128, 0.25);
       box-sizing: border-box;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
       z-index: 1000;
     }
     .agy-rc-host-box .agy-ctx-statusbar {
       margin-top: 0;
       padding: 5px 10px;
       justify-content: center;
-      gap: 16px;
+      row-gap: 4px;
+      column-gap: 12px;
     }
     .agy-rc-host-box .agy-ctx-menu {
       left: 50%;
       transform: translateX(-50%);
-      bottom: 28px;
+      bottom: calc(100% + 4px);
+    }
+    @media (max-width: 640px) {
+      .agy-ctx-statusbar,
+      .agy-rc-host-box .agy-ctx-statusbar {
+        padding: 4px 8px;
+        row-gap: 3px;
+        column-gap: 8px;
+        font-size: 10.5px;
+      }
+      .agy-ctx-bar-wrap {
+        width: 34px;
+      }
+      .agy-ctx-sep-pipe,
+      .agy-ctx-quota-left {
+        display: none;
+      }
+      .agy-ctx-group-ctx {
+        flex-basis: 100%;
+      }
+      .agy-ctx-modal-backdrop {
+        padding: 8px;
+      }
+      .agy-ctx-modal {
+        max-height: 90vh;
+        max-height: 90dvh;
+      }
+      .agy-ctx-modal-hdr {
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 8px 10px;
+        font-size: 11.5px;
+      }
+      .agy-ctx-modal-body {
+        padding: 10px;
+        gap: 10px;
+      }
+      .agy-ctx-card-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .agy-ctx-tbl {
+        display: block;
+        overflow-x: auto;
+      }
     }
 `;
 

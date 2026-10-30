@@ -116,7 +116,9 @@ function createCoreMetricsAdapter({
     };
     setTimeout(() => {
       document?.addEventListener('mousedown', outsideHandler, true);
-      if (inputEl && inputEl.isConnected && typeof inputEl.focus === 'function') {
+      const isCoarseOrNarrow = typeof document?.defaultView?.matchMedia === 'function'
+        && document.defaultView.matchMedia('(max-width: 640px), (pointer: coarse)').matches;
+      if (!isCoarseOrNarrow && inputEl && inputEl.isConnected && typeof inputEl.focus === 'function') {
         inputEl.focus();
         if (typeof inputEl.select === 'function') inputEl.select();
       }
@@ -130,7 +132,7 @@ function createCoreMetricsAdapter({
     order: 10,
     builtin: true,
     tagName: 'span',
-    className: 'agy-ctx-left',
+    className: 'agy-ctx-core',
     render(containerEl, ctx) {
       const { barEl, view, cascadeId, stats, quota } = ctx;
       const currentCw = getConversationContextWindow(view, cascadeId);
@@ -150,21 +152,23 @@ function createCoreMetricsAdapter({
       if (quota) {
         const qParts = [];
         if (quota.pct5h !== null) {
-          qParts.push(`5h <strong class="agy-ctx-quota">${quota.pct5h}%</strong> left${quota.rst5h ? ' ' + quota.rst5h : ''}`);
+          qParts.push(`5h <strong class="agy-ctx-quota">${quota.pct5h}%</strong><span class="agy-ctx-quota-left"> left</span>${quota.rst5h ? ' ' + quota.rst5h : ''}`);
         }
         if (quota.pct7d !== null) {
-          qParts.push(`7d <strong class="agy-ctx-quota">${quota.pct7d}%</strong> left`);
+          qParts.push(`7d <strong class="agy-ctx-quota">${quota.pct7d}%</strong><span class="agy-ctx-quota-left"> left</span>`);
         }
         if (qParts.length) {
-          quotaHtml = `<span class="agy-ctx-sep">|</span><span>${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
+          quotaHtml = `<span class="agy-ctx-sep agy-ctx-sep-pipe">|</span><span class="agy-ctx-group agy-ctx-group-quota">${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
         }
       }
 
       const html = `
-        <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-        <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${limitTitle}">[ ${currentCw.toLowerCase()} ▾ ]</button></span>
-        <span class="agy-ctx-sep">·</span>
-        <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
+        <span class="agy-ctx-group agy-ctx-group-ctx">
+          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
+          <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${limitTitle}">[ ${currentCw.toLowerCase()} ▾ ]</button></span>
+          <span class="agy-ctx-sep">·</span>
+          <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
+        </span>
         ${quotaHtml}
       `;
 
