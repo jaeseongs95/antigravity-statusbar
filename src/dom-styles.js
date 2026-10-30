@@ -4,8 +4,8 @@ const STYLE_CSS = `
     .agy-ctx-statusbar {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      justify-content: center;
+      gap: 14px;
       padding: 4px 10px 2px 10px;
       margin-top: 2px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -102,7 +102,8 @@ const STYLE_CSS = `
     .agy-ctx-menu {
       position: absolute;
       bottom: 24px;
-      left: 50px;
+      left: 50%;
+      transform: translateX(-50%);
       background: #1e1e24;
       border: 1px solid rgba(128, 128, 128, 0.35);
       border-radius: 6px;
@@ -299,9 +300,12 @@ const STYLE_CSS = `
     .agy-rc-host-box .agy-ctx-statusbar {
       margin-top: 0;
       padding: 5px 10px;
+      justify-content: center;
+      gap: 16px;
     }
     .agy-rc-host-box .agy-ctx-menu {
-      left: 10px;
+      left: 50%;
+      transform: translateX(-50%);
       bottom: 28px;
     }
 `;

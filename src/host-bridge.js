@@ -123,7 +123,7 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
 
   const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
   const PROTO_UUID_RE = /\x0a\x24([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-  const CONVO_RPC_RE = /\/(StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
+  const CONVO_RPC_RE = /\/(StreamAgentStateUpdates|RequestAgentStatePageUpdate|StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|GetCascadeModelConfigData|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
   let lastRcTrajectoryPollTs = 0;
   let rcTrajectoryPollInFlight = false;
 
@@ -355,14 +355,20 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
     }
 
     const now = Date.now();
-    const recentlySniffed = window.__agySniffedCascadeTs && (now - window.__agySniffedCascadeTs < 4000);
-    if (rcInst && !rcTrajectoryPollInFlight && !recentlySniffed && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
+    const recentlySniffed = window.__agySniffedCascadeTs && (now - window.__agySniffedCascadeTs < 15000);
+    if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
       lastRcTrajectoryPollTs = now;
       rcTrajectoryPollInFlight = true;
       createRcServiceAdapter(rcInst).getAllCascadeTrajectories().then((all) => {
         const summaries = all?.trajectorySummaries || {};
         const entries = Object.entries(summaries);
         if (!entries.length) return;
+        window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
+        for (const [id, sum] of entries) {
+          if (typeof sum?.stepCount === 'number') {
+            window.__agyRcStepCountByCascade[id] = sum.stepCount;
+          }
+        }
         entries.sort((a, b) => {
           const vA = Date.parse(a[1]?.annotations?.lastUserViewTime || 0) || 0;
           const vB = Date.parse(b[1]?.annotations?.lastUserViewTime || 0) || 0;
@@ -371,18 +377,17 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
           const mB = Date.parse(b[1]?.lastModifiedTime || 0) || 0;
           return mB - mA;
         });
-        const [latestId, latestSum] = entries[0];
+        const [latestId] = entries[0];
         if (latestId) {
-          window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
-          const prevSteps = window.__agyRcStepCountByCascade[latestId];
-          const nextSteps = latestSum?.stepCount ?? -1;
-          window.__agyRcStepCountByCascade[latestId] = nextSteps;
           const prevId = hostView.getAttribute('data-cascade-id');
-          if (!window.__agySniffedCascadeTs || (Date.now() - window.__agySniffedCascadeTs >= 4000)) {
+          if (!recentlySniffed || !window.__agySniffedCascadeId) {
             window.__agySniffedCascadeId = latestId;
           }
           const resolvedId = window.__agySniffedCascadeId || latestId;
-          if (prevId !== resolvedId || prevSteps !== nextSteps) {
+          const nextSteps = window.__agyRcStepCountByCascade[resolvedId] ?? -1;
+          const prevObservedSteps = hostView.__agyObservedStepCount;
+          hostView.__agyObservedStepCount = nextSteps;
+          if (prevId !== resolvedId || prevObservedSteps !== nextSteps) {
             hostView.setAttribute('data-cascade-id', resolvedId);
             if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
           }
@@ -398,14 +403,15 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
   function getAgentStateProviderForInputBox(inputBox) {
     const cc = getCascadeContextForElement(inputBox);
     if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
-    const cid = window?.__agySniffedCascadeId;
+    const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
     const steps = cid && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cid] : undefined;
-    if (typeof steps === 'number' && steps >= 0) {
+    const knownGenLen = cid && window?.__agyRcGenLenByCascade ? window.__agyRcGenLenByCascade[cid] : undefined;
+    if ((typeof steps === 'number' && steps >= 0) || (typeof knownGenLen === 'number' && knownGenLen >= 0)) {
       return {
         getState: () => ({
           trajectorySlice: {
-            totalGeneratorMetadataLength: steps,
-            totalStepsLength: steps,
+            totalGeneratorMetadataLength: typeof knownGenLen === 'number' ? knownGenLen : -1,
+            totalStepsLength: typeof steps === 'number' ? steps : -1,
           },
         }),
       };

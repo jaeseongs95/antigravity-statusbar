@@ -462,6 +462,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     };
 
     let sentCompactPayload = null;
+    const requestedOffsets = [];
     class FakeRemoteControlComponent {
       constructor() {
         this.destroyed = false;
@@ -473,6 +474,9 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       handleIframeMessage(ev) {
         if (ev?.data === '__agy_probe__') return;
       }
+      streamProxyCommand(rpcPath, payloadBytes) {
+        return { cancel() {} };
+      }
       async proxyCommand(rpcPath, payloadBytes) {
         const req = JSON.parse(new TextDecoder().decode(payloadBytes));
         let resObj = {};
@@ -480,9 +484,14 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
           resObj = {
             trajectorySummaries: {
               'e0b9092d-4949-4a25-9c5d-0afdfd030c10': {
-                stepCount: 42,
+                stepCount: 2612,
                 lastModifiedTime: '2026-10-30T03:00:00Z',
                 annotations: { lastUserViewTime: '2026-10-30T03:00:00Z' },
+              },
+              '1f3f7633-f0b7-4fc7-a958-9fb667c85623': {
+                stepCount: 2667,
+                lastModifiedTime: '2026-10-30T02:50:00Z',
+                annotations: { lastUserViewTime: '2026-10-30T02:50:00Z' },
               },
             },
           };
@@ -501,16 +510,23 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
             },
           };
         } else if (rpcPath.endsWith('/GetCascadeTrajectoryGeneratorMetadata')) {
-          resObj = {
-            generatorMetadata: [
-              {
+          const off = req.generatorMetadataOffset || 0;
+          requestedOffsets.push(off);
+          const actualLen = 1073;
+          if (off >= actualLen) {
+            resObj = {};
+          } else {
+            const count = actualLen - off;
+            const usedTok = req.cascadeId === '1f3f7633-f0b7-4fc7-a958-9fb667c85623' ? 245000 : 128000;
+            resObj = {
+              generatorMetadata: Array.from({ length: count }, () => ({
                 chatModel: {
-                  chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 128000, maxContextTokens: 512000 } },
+                  chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: usedTok, maxContextTokens: 512000 } },
                   usage: { cacheReadTokens: 110000, inputTokens: 18000 },
                 },
-              },
-            ],
-          };
+              })),
+            };
+          }
         } else if (rpcPath.endsWith('/SendUserCascadeMessage')) {
           sentCompactPayload = req;
           resObj = { ok: true };
@@ -589,12 +605,20 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(coreNode.innerHTML.includes('128k'));
     assert.ok(coreNode.innerHTML.includes('84%'));
     assert.ok(coreNode.innerHTML.includes('61%'));
+    assert.equal(requestedOffsets.includes(0), false, 'large trajectory should never fall back to offset 0');
+
+    // Simulate switching conversation inside iframe via StreamAgentStateUpdates binary protobuf frame
+    const protoSwitchBody = new TextEncoder().encode('\x0a\x241f3f7633-f0b7-4fc7-a958-9fb667c85623\x12\x08test-sub');
+    rcInstance.streamProxyCommand('/exa.language_server_pb.LanguageServerService/StreamAgentStateUpdates', protoSwitchBody);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(hostViewEl.getAttribute('data-cascade-id'), '1f3f7633-f0b7-4fc7-a958-9fb667c85623');
+    assert.ok(coreNode.innerHTML.includes('245k'), 'switching session via StreamAgentStateUpdates should update context stats immediately');
 
     const rightSlot = hostBarEl.querySelector('.agy-ctx-right');
     const compactBtn = rightSlot.querySelector('[data-agy-adapter-id="compact"]');
     await compactBtn.onclick({ preventDefault() {}, stopPropagation() {} });
     assert.ok(sentCompactPayload, 'clicking [ compact ] on ga-remote-control should send SendUserCascadeMessage via proxyCommand');
-    assert.equal(sentCompactPayload.cascadeId, 'e0b9092d-4949-4a25-9c5d-0afdfd030c10');
+    assert.equal(sentCompactPayload.cascadeId, '1f3f7633-f0b7-4fc7-a958-9fb667c85623');
     assert.equal(sentCompactPayload.items[0].item.slashCommand.info.name, 'compact');
 
     sandbox.window.__agyStatusBarCleanup();

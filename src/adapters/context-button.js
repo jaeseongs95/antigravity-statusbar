@@ -29,9 +29,9 @@ function createContextButtonAdapter({
     const currentCw = cwStore.getSavedContextWindow(cascadeId);
     const maxLimit = cwStore.getLimit(currentCw);
     const cc = hostBridge.getCascadeContextForElement(inputBox || view);
-    const asp = cc?.state?.agentStateProvider;
+    const asp = cc?.state?.agentStateProvider || (hostBridge.getAgentStateProviderForInputBox ? hostBridge.getAgentStateProviderForInputBox(inputBox || view) : null);
     const slice = asp?.getState?.()?.trajectorySlice;
-    const totalGenLen = slice?.totalGeneratorMetadataLength ?? 0;
+    let totalGenLen = slice?.totalGeneratorMetadataLength ?? 0;
     const totalStepsLen = slice?.totalStepsLength ?? 0;
     const trajectoryId = slice?.trajectoryId || '';
 
@@ -89,7 +89,7 @@ function createContextButtonAdapter({
     }
 
     try {
-      const fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
+      let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
       let metas = [];
       if (csrf && typeof fetchFn === 'function') {
         try {
@@ -105,11 +105,27 @@ function createContextButtonAdapter({
         } catch {}
       }
       if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+        if (totalGenLen <= 0 && totalStepsLen > 60) {
+          let cur = Math.ceil(totalStepsLen * 0.52);
+          while (cur > 0) {
+            const probe = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: cur });
+            const pm = probe?.generatorMetadata || [];
+            if (pm.length > 0) {
+              totalGenLen = cur + pm.length;
+              break;
+            }
+            cur = Math.max(0, cur - 35);
+          }
+        }
+        fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
         const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
         const allMetas = j?.generatorMetadata || [];
+        if (allMetas.length > 0 && totalGenLen <= 0) {
+          totalGenLen = fetchOffset + allMetas.length;
+        }
         metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
       }
-      if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function') {
+      if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function' && !remoteSvc.isRemoteControlHost) {
         const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
         const allMetas = t?.trajectory?.generatorMetadata || [];
         metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;

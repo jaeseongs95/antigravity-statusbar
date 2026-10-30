@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.0
+// @version      1.3.2
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -243,8 +243,8 @@
         .agy-ctx-statusbar {
           display: flex;
           align-items: center;
-          justify-content: space-between;
-          gap: 8px;
+          justify-content: center;
+          gap: 14px;
           padding: 4px 10px 2px 10px;
           margin-top: 2px;
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -341,7 +341,8 @@
         .agy-ctx-menu {
           position: absolute;
           bottom: 24px;
-          left: 50px;
+          left: 50%;
+          transform: translateX(-50%);
           background: #1e1e24;
           border: 1px solid rgba(128, 128, 128, 0.35);
           border-radius: 6px;
@@ -538,9 +539,12 @@
         .agy-rc-host-box .agy-ctx-statusbar {
           margin-top: 0;
           padding: 5px 10px;
+          justify-content: center;
+          gap: 16px;
         }
         .agy-rc-host-box .agy-ctx-menu {
-          left: 10px;
+          left: 50%;
+          transform: translateX(-50%);
           bottom: 28px;
         }
     `;
@@ -710,6 +714,7 @@
     function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
       const stateCache = new Map();
       const inFlightStats = new Map();
+      const knownGenLenMap = new Map();
       let inFlightQuota = null;
       let quotaData = null;
       let lastQuotaFetch = 0;
@@ -719,7 +724,12 @@
         if (rawCache) {
           const entries = JSON.parse(rawCache);
           if (Array.isArray(entries)) {
-            for (const [k, v] of entries) stateCache.set(k, v);
+            for (const [k, v] of entries) {
+              stateCache.set(k, v);
+              if (v && typeof v.knownGenLen === 'number' && v.knownGenLen > 0) {
+                knownGenLenMap.set(k, v.knownGenLen);
+              }
+            }
           }
         }
       } catch {}
@@ -789,6 +799,45 @@
         return inFlightQuota;
       }
 
+      async function fetchTailMetasBounded({ cascadeId, totalGenLen, totalStepsLen, cachedGenLen, tailSize = 3, callGenMeta }) {
+        let knownLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cachedGenLen || -1);
+        if (knownLen > 0) {
+          const off = Math.max(0, knownLen - tailSize);
+          const metas = await callGenMeta(off);
+          if (metas.length > 0) {
+            const nextLen = off + metas.length;
+            knownGenLenMap.set(cascadeId, nextLen);
+            return { metas, knownGenLen: nextLen };
+          }
+        }
+
+        const sc = totalStepsLen > 0 ? totalStepsLen : 40;
+        if (sc <= 60) {
+          const metas = await callGenMeta(0);
+          if (metas.length > 0) {
+            knownGenLenMap.set(cascadeId, metas.length);
+          }
+          return { metas, knownGenLen: metas.length };
+        }
+
+        let cur = Math.ceil(sc * 0.52);
+        while (cur > 0) {
+          const metas = await callGenMeta(cur);
+          if (metas.length > 0) {
+            const nextLen = cur + metas.length;
+            knownGenLenMap.set(cascadeId, nextLen);
+            return { metas, knownGenLen: nextLen };
+          }
+          cur = Math.max(0, cur - 35);
+        }
+
+        const metas0 = await callGenMeta(0);
+        if (metas0.length > 0) {
+          knownGenLenMap.set(cascadeId, metas0.length);
+        }
+        return { metas: metas0, knownGenLen: metas0.length };
+      }
+
       function fetchCascadeStats(cascadeId, csrf, inputBox) {
         if (!cascadeId || cascadeId === 'remote-session') {
           return Promise.resolve(null);
@@ -797,10 +846,11 @@
         const slice = asp?.getState?.()?.trajectorySlice;
         const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
         const totalStepsLen = slice?.totalStepsLength ?? -1;
+        const cached = stateCache.get(cascadeId);
+        const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
         const versionKey = `${totalGenLen}:${totalStepsLen}`;
 
-        const cached = stateCache.get(cascadeId);
-        if (cached && cached.versionKey === versionKey && totalGenLen >= 0 && (Date.now() - cached.ts < 30000)) {
+        if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < 30000)) {
           return Promise.resolve(cached);
         }
 
@@ -811,29 +861,36 @@
         const promise = (async () => {
           try {
             let parsed = null;
+            let discoveredGenLen = knownGenLen;
+
             if (csrf && typeof fetchFn === 'function') {
               try {
-                const tailOffset = totalGenLen > 3 ? totalGenLen - 3 : 0;
-                const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-                  body: JSON.stringify({ cascadeId, generatorMetadataOffset: tailOffset }),
-                });
-                if (r && r.ok !== false) {
-                  const j = await r.json();
-                  const metas = j.generatorMetadata || [];
-                  parsed = extractStatsFromMetas(metas);
-
-                  if (!parsed.foundCtx && tailOffset > 0) {
-                    const widerOffset = Math.max(0, totalGenLen - 15);
-                    const r2 = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
-                      method: 'POST',
-                      headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-                      body: JSON.stringify({ cascadeId, generatorMetadataOffset: widerOffset }),
-                    });
-                    const j2 = await r2.json();
-                    parsed = extractStatsFromMetas(j2.generatorMetadata || []);
+                const callLocal = async (offset) => {
+                  const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+                    body: JSON.stringify({ cascadeId, generatorMetadataOffset: offset }),
+                  });
+                  if (r && r.ok !== false) {
+                    const j = await r.json();
+                    return j?.generatorMetadata || [];
                   }
+                  return [];
+                };
+                const res = await fetchTailMetasBounded({
+                  cascadeId,
+                  totalGenLen,
+                  totalStepsLen,
+                  cachedGenLen: cached?.knownGenLen,
+                  tailSize: 2,
+                  callGenMeta: callLocal,
+                });
+                if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
+                parsed = extractStatsFromMetas(res.metas);
+
+                if (!parsed.foundCtx && discoveredGenLen > 2) {
+                  const widerMetas = await callLocal(Math.max(0, discoveredGenLen - 15));
+                  parsed = extractStatsFromMetas(widerMetas);
                 }
               } catch {}
             }
@@ -841,34 +898,51 @@
             if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && typeof getRemoteRpcServiceForElement === 'function') {
               const svc = getRemoteRpcServiceForElement(inputBox);
               if (svc && typeof svc.getCascadeTrajectoryGeneratorMetadata === 'function') {
-                const tailOffset = totalGenLen > 3 ? totalGenLen - 3 : 0;
-                const j = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: tailOffset });
-                const metas = j?.generatorMetadata || [];
-                parsed = extractStatsFromMetas(metas);
-                if (!parsed.foundCtx && tailOffset > 0) {
-                  const widerOffset = Math.max(0, totalGenLen - 15);
-                  const j2 = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: widerOffset });
-                  parsed = extractStatsFromMetas(j2?.generatorMetadata || []);
+                const callRemote = async (offset) => {
+                  const j = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: offset });
+                  return j?.generatorMetadata || [];
+                };
+                const res = await fetchTailMetasBounded({
+                  cascadeId,
+                  totalGenLen,
+                  totalStepsLen,
+                  cachedGenLen: cached?.knownGenLen,
+                  tailSize: 2,
+                  callGenMeta: callRemote,
+                });
+                if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
+                parsed = extractStatsFromMetas(res.metas);
+                if (!parsed.foundCtx && discoveredGenLen > 2) {
+                  const widerMetas = await callRemote(Math.max(0, discoveredGenLen - 15));
+                  parsed = extractStatsFromMetas(widerMetas);
                 }
               }
-              if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && svc && typeof svc.getCascadeTrajectory === 'function') {
+              if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && svc && typeof svc.getCascadeTrajectory === 'function' && !svc.isRemoteControlHost) {
                 const t = await svc.getCascadeTrajectory({ cascadeId });
                 const metas = t?.trajectory?.generatorMetadata || [];
+                if (metas.length > 0) discoveredGenLen = metas.length;
                 parsed = extractStatsFromMetas(metas);
               }
             }
 
-            if (!parsed) {
+            if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
               return cached || null;
             }
 
+            if (discoveredGenLen > 0 && typeof window !== 'undefined') {
+              window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
+              window.__agyRcGenLenByCascade[cascadeId] = discoveredGenLen;
+            }
+
+            const finalVersionKey = `${totalGenLen}:${totalStepsLen}`;
             const data = {
               used: parsed.used,
               trajectoryMax: parsed.trajectoryMax,
               cacheRead: parsed.cacheRead,
               inputTok: parsed.inputTok,
               cachePct: parsed.cachePct,
-              versionKey,
+              knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
+              versionKey: finalVersionKey,
               ts: Date.now(),
             };
             setBoundedCache(cascadeId, data);
@@ -887,6 +961,8 @@
       return {
         fetchQuota,
         fetchCascadeStats,
+        fetchTailMetasBounded,
+        getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
         getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
         getLatestQuota: () => quotaData,
       };
@@ -1026,7 +1102,7 @@
 
       const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
       const PROTO_UUID_RE = /\x0a\x24([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-      const CONVO_RPC_RE = /\/(StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
+      const CONVO_RPC_RE = /\/(StreamAgentStateUpdates|RequestAgentStatePageUpdate|StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|GetCascadeModelConfigData|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
       let lastRcTrajectoryPollTs = 0;
       let rcTrajectoryPollInFlight = false;
 
@@ -1258,14 +1334,20 @@
         }
 
         const now = Date.now();
-        const recentlySniffed = window.__agySniffedCascadeTs && (now - window.__agySniffedCascadeTs < 4000);
-        if (rcInst && !rcTrajectoryPollInFlight && !recentlySniffed && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
+        const recentlySniffed = window.__agySniffedCascadeTs && (now - window.__agySniffedCascadeTs < 15000);
+        if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
           lastRcTrajectoryPollTs = now;
           rcTrajectoryPollInFlight = true;
           createRcServiceAdapter(rcInst).getAllCascadeTrajectories().then((all) => {
             const summaries = all?.trajectorySummaries || {};
             const entries = Object.entries(summaries);
             if (!entries.length) return;
+            window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
+            for (const [id, sum] of entries) {
+              if (typeof sum?.stepCount === 'number') {
+                window.__agyRcStepCountByCascade[id] = sum.stepCount;
+              }
+            }
             entries.sort((a, b) => {
               const vA = Date.parse(a[1]?.annotations?.lastUserViewTime || 0) || 0;
               const vB = Date.parse(b[1]?.annotations?.lastUserViewTime || 0) || 0;
@@ -1274,18 +1356,17 @@
               const mB = Date.parse(b[1]?.lastModifiedTime || 0) || 0;
               return mB - mA;
             });
-            const [latestId, latestSum] = entries[0];
+            const [latestId] = entries[0];
             if (latestId) {
-              window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
-              const prevSteps = window.__agyRcStepCountByCascade[latestId];
-              const nextSteps = latestSum?.stepCount ?? -1;
-              window.__agyRcStepCountByCascade[latestId] = nextSteps;
               const prevId = hostView.getAttribute('data-cascade-id');
-              if (!window.__agySniffedCascadeTs || (Date.now() - window.__agySniffedCascadeTs >= 4000)) {
+              if (!recentlySniffed || !window.__agySniffedCascadeId) {
                 window.__agySniffedCascadeId = latestId;
               }
               const resolvedId = window.__agySniffedCascadeId || latestId;
-              if (prevId !== resolvedId || prevSteps !== nextSteps) {
+              const nextSteps = window.__agyRcStepCountByCascade[resolvedId] ?? -1;
+              const prevObservedSteps = hostView.__agyObservedStepCount;
+              hostView.__agyObservedStepCount = nextSteps;
+              if (prevId !== resolvedId || prevObservedSteps !== nextSteps) {
                 hostView.setAttribute('data-cascade-id', resolvedId);
                 if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
               }
@@ -1301,14 +1382,15 @@
       function getAgentStateProviderForInputBox(inputBox) {
         const cc = getCascadeContextForElement(inputBox);
         if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
-        const cid = window?.__agySniffedCascadeId;
+        const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
         const steps = cid && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cid] : undefined;
-        if (typeof steps === 'number' && steps >= 0) {
+        const knownGenLen = cid && window?.__agyRcGenLenByCascade ? window.__agyRcGenLenByCascade[cid] : undefined;
+        if ((typeof steps === 'number' && steps >= 0) || (typeof knownGenLen === 'number' && knownGenLen >= 0)) {
           return {
             getState: () => ({
               trajectorySlice: {
-                totalGeneratorMetadataLength: steps,
-                totalStepsLength: steps,
+                totalGeneratorMetadataLength: typeof knownGenLen === 'number' ? knownGenLen : -1,
+                totalStepsLength: typeof steps === 'number' ? steps : -1,
               },
             }),
           };
@@ -2013,9 +2095,9 @@
         const currentCw = cwStore.getSavedContextWindow(cascadeId);
         const maxLimit = cwStore.getLimit(currentCw);
         const cc = hostBridge.getCascadeContextForElement(inputBox || view);
-        const asp = cc?.state?.agentStateProvider;
+        const asp = cc?.state?.agentStateProvider || (hostBridge.getAgentStateProviderForInputBox ? hostBridge.getAgentStateProviderForInputBox(inputBox || view) : null);
         const slice = asp?.getState?.()?.trajectorySlice;
-        const totalGenLen = slice?.totalGeneratorMetadataLength ?? 0;
+        let totalGenLen = slice?.totalGeneratorMetadataLength ?? 0;
         const totalStepsLen = slice?.totalStepsLength ?? 0;
         const trajectoryId = slice?.trajectoryId || '';
 
@@ -2073,7 +2155,7 @@
         }
 
         try {
-          const fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
+          let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
           let metas = [];
           if (csrf && typeof fetchFn === 'function') {
             try {
@@ -2089,11 +2171,27 @@
             } catch {}
           }
           if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+            if (totalGenLen <= 0 && totalStepsLen > 60) {
+              let cur = Math.ceil(totalStepsLen * 0.52);
+              while (cur > 0) {
+                const probe = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: cur });
+                const pm = probe?.generatorMetadata || [];
+                if (pm.length > 0) {
+                  totalGenLen = cur + pm.length;
+                  break;
+                }
+                cur = Math.max(0, cur - 35);
+              }
+            }
+            fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
             const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
             const allMetas = j?.generatorMetadata || [];
+            if (allMetas.length > 0 && totalGenLen <= 0) {
+              totalGenLen = fetchOffset + allMetas.length;
+            }
             metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
           }
-          if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function') {
+          if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function' && !remoteSvc.isRemoteControlHost) {
             const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
             const allMetas = t?.trajectory?.generatorMetadata || [];
             metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
@@ -2276,7 +2374,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v8';
+    const STATUSBAR_VERSION = 'v9';
 
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
