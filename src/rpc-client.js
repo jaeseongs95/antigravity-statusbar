@@ -131,6 +131,9 @@ function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputB
   }
 
   function fetchCascadeStats(cascadeId, csrf, inputBox) {
+    if (!cascadeId || cascadeId === 'remote-session') {
+      return Promise.resolve(null);
+    }
     const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
     const slice = asp?.getState?.()?.trajectorySlice;
     const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
@@ -178,7 +181,18 @@ function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputB
 
         if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && typeof getRemoteRpcServiceForElement === 'function') {
           const svc = getRemoteRpcServiceForElement(inputBox);
-          if (svc && typeof svc.getCascadeTrajectory === 'function') {
+          if (svc && typeof svc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+            const tailOffset = totalGenLen > 3 ? totalGenLen - 3 : 0;
+            const j = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: tailOffset });
+            const metas = j?.generatorMetadata || [];
+            parsed = extractStatsFromMetas(metas);
+            if (!parsed.foundCtx && tailOffset > 0) {
+              const widerOffset = Math.max(0, totalGenLen - 15);
+              const j2 = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: widerOffset });
+              parsed = extractStatsFromMetas(j2?.generatorMetadata || []);
+            }
+          }
+          if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && svc && typeof svc.getCascadeTrajectory === 'function') {
             const t = await svc.getCascadeTrajectory({ cascadeId });
             const metas = t?.trajectory?.generatorMetadata || [];
             parsed = extractStatsFromMetas(metas);

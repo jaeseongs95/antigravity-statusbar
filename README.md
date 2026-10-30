@@ -24,10 +24,10 @@ Custom context window statusbar (`.agy-ctx-statusbar`), **`StatusBarAdapter` ext
 - **Zero-Offset `app.asar` & Sandboxed `preload.js` Auto-Patcher**:
   - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` while preserving exact byte lengths (`0` offset drift) and updating `ElectronAsarIntegrity` SHA-256 block hashes.
 - **Remote Control Web & Mobile Support (`https://antigravity.google.com/r/...`)**:
-  - Works in Antigravity Remote Control web sessions (desktop & mobile browsers) where `csrfToken` and local `/exa.language_server_pb...` HTTP endpoints are absent, by automatically falling back to the internal React Fiber WebRTC/WebChannel RPC service (`retrieveUserQuotaSummary`, `getCascadeTrajectory`).
-  - Includes a built-in `// ==UserScript==` header in `dist/statusbar_autoinject.js` for Tampermonkey/AdGuard and supports one-tap Mobile Chrome bookmarklet execution:
+  - Works in Antigravity Remote Control web sessions (desktop & mobile browsers) where `csrfToken` and local `/exa.language_server_pb...` HTTP endpoints are absent, by automatically bridging both the top-level `<ga-remote-control>` Angular host shell (`RemoteControlComponent.prototype.proxyCommand`) and the internal React Fiber WebRTC/WebChannel RPC service (`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`).
+  - Includes a built-in `// ==UserScript==` header in `dist/statusbar_autoinject.js` for Tampermonkey/AdGuard and supports one-tap Mobile Chrome bookmarklet execution (CSP `nonce` & `TrustedTypes` compliant):
     ```javascript
-    javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js').then(r=>r.text()).then(eval)})();
+    javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
     ```
 
 ---

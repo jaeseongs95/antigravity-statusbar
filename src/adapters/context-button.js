@@ -104,6 +104,11 @@ function createContextButtonAdapter({
           }
         } catch {}
       }
+      if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+        const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
+        const allMetas = j?.generatorMetadata || [];
+        metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
+      }
       if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function') {
         const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
         const allMetas = t?.trajectory?.generatorMetadata || [];

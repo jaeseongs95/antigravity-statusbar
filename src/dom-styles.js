@@ -284,6 +284,26 @@ const STYLE_CSS = `
     .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
       text-align: right;
     }
+    ga-remote-control .iframe-panel {
+      min-height: 0 !important;
+      flex: 1 1 0% !important;
+    }
+    .agy-rc-host-view {
+      flex-shrink: 0;
+      width: 100%;
+      background: #18181d;
+      border-top: 1px solid rgba(128, 128, 128, 0.25);
+      box-sizing: border-box;
+      z-index: 1000;
+    }
+    .agy-rc-host-box .agy-ctx-statusbar {
+      margin-top: 0;
+      padding: 5px 10px;
+    }
+    .agy-rc-host-box .agy-ctx-menu {
+      left: 10px;
+      bottom: 28px;
+    }
 `;
 
 function buildDynamicCwWarnCss(underDefaultCwSet) {
@@ -311,11 +331,23 @@ function ensureStyleElement(document, underDefaultCwSet) {
 }
 
 function createTrustedHtmlSetter(window, document) {
+  if (window?.__agyTrustedHtmlPolicy) {
+    return (el, html) => { el.innerHTML = window.__agyTrustedHtmlPolicy.createHTML(html); };
+  }
   if (window?.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
-    const names = ['agy-statusbar', 'default', 'dompurify', 'nextjs#bundler'];
+    const names = [
+      'agy-statusbar',
+      'angular#unsafe-bypass',
+      'angular',
+      'default',
+      'dompurify',
+      'nextjs#bundler',
+      'agy-statusbar-' + Date.now(),
+    ];
     for (const name of names) {
       try {
-        const p = window.trustedTypes.createPolicy(name, { createHTML: (s) => s });
+        const p = window.trustedTypes.createPolicy(name, { createHTML: (s) => s, createScript: (s) => s });
+        try { window.__agyTrustedHtmlPolicy = p; } catch {}
         return (el, html) => { el.innerHTML = p.createHTML(html); };
       } catch {}
     }

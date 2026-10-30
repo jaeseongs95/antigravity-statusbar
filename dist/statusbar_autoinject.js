@@ -523,6 +523,26 @@
         .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
           text-align: right;
         }
+        ga-remote-control .iframe-panel {
+          min-height: 0 !important;
+          flex: 1 1 0% !important;
+        }
+        .agy-rc-host-view {
+          flex-shrink: 0;
+          width: 100%;
+          background: #18181d;
+          border-top: 1px solid rgba(128, 128, 128, 0.25);
+          box-sizing: border-box;
+          z-index: 1000;
+        }
+        .agy-rc-host-box .agy-ctx-statusbar {
+          margin-top: 0;
+          padding: 5px 10px;
+        }
+        .agy-rc-host-box .agy-ctx-menu {
+          left: 10px;
+          bottom: 28px;
+        }
     `;
 
     function buildDynamicCwWarnCss(underDefaultCwSet) {
@@ -550,11 +570,23 @@
     }
 
     function createTrustedHtmlSetter(window, document) {
+      if (window?.__agyTrustedHtmlPolicy) {
+        return (el, html) => { el.innerHTML = window.__agyTrustedHtmlPolicy.createHTML(html); };
+      }
       if (window?.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
-        const names = ['agy-statusbar', 'default', 'dompurify', 'nextjs#bundler'];
+        const names = [
+          'agy-statusbar',
+          'angular#unsafe-bypass',
+          'angular',
+          'default',
+          'dompurify',
+          'nextjs#bundler',
+          'agy-statusbar-' + Date.now(),
+        ];
         for (const name of names) {
           try {
-            const p = window.trustedTypes.createPolicy(name, { createHTML: (s) => s });
+            const p = window.trustedTypes.createPolicy(name, { createHTML: (s) => s, createScript: (s) => s });
+            try { window.__agyTrustedHtmlPolicy = p; } catch {}
             return (el, html) => { el.innerHTML = p.createHTML(html); };
           } catch {}
         }
@@ -758,6 +790,9 @@
       }
 
       function fetchCascadeStats(cascadeId, csrf, inputBox) {
+        if (!cascadeId || cascadeId === 'remote-session') {
+          return Promise.resolve(null);
+        }
         const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
         const slice = asp?.getState?.()?.trajectorySlice;
         const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
@@ -805,7 +840,18 @@
 
             if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && typeof getRemoteRpcServiceForElement === 'function') {
               const svc = getRemoteRpcServiceForElement(inputBox);
-              if (svc && typeof svc.getCascadeTrajectory === 'function') {
+              if (svc && typeof svc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+                const tailOffset = totalGenLen > 3 ? totalGenLen - 3 : 0;
+                const j = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: tailOffset });
+                const metas = j?.generatorMetadata || [];
+                parsed = extractStatsFromMetas(metas);
+                if (!parsed.foundCtx && tailOffset > 0) {
+                  const widerOffset = Math.max(0, totalGenLen - 15);
+                  const j2 = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: widerOffset });
+                  parsed = extractStatsFromMetas(j2?.generatorMetadata || []);
+                }
+              }
+              if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && svc && typeof svc.getCascadeTrajectory === 'function') {
                 const t = await svc.getCascadeTrajectory({ cascadeId });
                 const metas = t?.trajectory?.generatorMetadata || [];
                 parsed = extractStatsFromMetas(metas);
@@ -978,9 +1024,296 @@
         return null;
       }
 
+      const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+      const PROTO_UUID_RE = /\x0a\x24([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+      const CONVO_RPC_RE = /\/(StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
+      let lastRcTrajectoryPollTs = 0;
+      let rcTrajectoryPollInFlight = false;
+
+      function decodeBytesToText(body) {
+        if (!body) return '';
+        if (typeof body === 'string') return body;
+        try {
+          const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
+          if (TD) {
+            const u8 = body instanceof Uint8Array ? body : (body.buffer ? new Uint8Array(body.buffer) : new Uint8Array(body));
+            return new TD('utf-8').decode(u8);
+          }
+        } catch {}
+        return '';
+      }
+
+      function encodeTextToBytes(str) {
+        const TE = window?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
+        if (TE) return new TE().encode(str);
+        return Uint8Array.from(String(str).split('').map((c) => c.charCodeAt(0) & 0xff));
+      }
+
+      function extractCascadeIdFromBody(body, ignoreUuid) {
+        const text = decodeBytesToText(body);
+        if (!text) return null;
+        const trimmed = text.trim();
+        if (trimmed.startsWith('{')) {
+          try {
+            const j = JSON.parse(trimmed);
+            const cid = j.cascadeId || j.conversationId;
+            if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
+          } catch {}
+        }
+        const pm = text.match(PROTO_UUID_RE);
+        if (pm && pm[1] && pm[1] !== ignoreUuid) return pm[1];
+        const um = text.match(UUID_RE);
+        if (um && um[0] && um[0] !== ignoreUuid) return um[0];
+        return null;
+      }
+
+      function sniffCascadeIdFromRpc(path, body, rcInst) {
+        if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        const cid = extractCascadeIdFromBody(body, ignoreUuid);
+        if (cid) {
+          const changed = window.__agySniffedCascadeId !== cid;
+          window.__agySniffedCascadeId = cid;
+          window.__agySniffedCascadeTs = Date.now();
+          if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
+            window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
+            window.__agyRcStepCountByCascade[cid] = (window.__agyRcStepCountByCascade[cid] || 0) + 1;
+            setTimeout(() => {
+              if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
+            }, 1500);
+          }
+          if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
+            window.__agyOnCascadeSniffed(cid);
+          }
+        }
+      }
+
+      function hookRemoteControlPrototype(proto) {
+        if (!proto || proto.__agyHooked) return;
+        proto.__agyHooked = true;
+
+        if (typeof proto.handleIframeMessage === 'function') {
+          const origMsg = proto.handleIframeMessage;
+          proto.handleIframeMessage = function (ev) {
+            window.__agyRemoteControlInstance = this;
+            if (ev && ev.data === '__agy_probe__') return;
+            if (ev && ev.data && typeof ev.data.path === 'string') {
+              const ignoreUuid = typeof this.selectedInstanceUuid === 'function' ? this.selectedInstanceUuid() : '';
+              const m = ev.data.path.match(UUID_RE);
+              if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
+                window.__agySniffedCascadeId = m[0];
+                window.__agySniffedCascadeTs = Date.now();
+                if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
+              }
+            }
+            return origMsg.apply(this, arguments);
+          };
+        }
+
+        for (const mName of ['proxyCommand', 'streamProxyCommand']) {
+          if (typeof proto[mName] === 'function') {
+            const origFn = proto[mName];
+            proto[mName] = function (path, body) {
+              window.__agyRemoteControlInstance = this;
+              sniffCascadeIdFromRpc(path, body, this);
+              return origFn.apply(this, arguments);
+            };
+          }
+        }
+
+        if (typeof proto.handlePortRequest === 'function') {
+          const origPort = proto.handlePortRequest;
+          proto.handlePortRequest = function (msg) {
+            window.__agyRemoteControlInstance = this;
+            if (msg && typeof msg.path === 'string') {
+              sniffCascadeIdFromRpc(msg.path, msg.body, this);
+            }
+            return origPort.apply(this, arguments);
+          };
+        }
+      }
+
+      function getRemoteControlInstance(onCascadeChange) {
+        if (typeof onCascadeChange === 'function') {
+          window.__agyOnCascadeSniffed = onCascadeChange;
+        }
+        if (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed) {
+          hookRemoteControlPrototype(Object.getPrototypeOf(window.__agyRemoteControlInstance));
+          return window.__agyRemoteControlInstance;
+        }
+
+        const nsRoot = window?.default_GoogleAntigravity;
+        if (nsRoot && typeof nsRoot === 'object') {
+          for (const k of Object.keys(nsRoot)) {
+            const mod = nsRoot[k];
+            if (!mod || (typeof mod !== 'object' && typeof mod !== 'function')) continue;
+            const RC = mod.RemoteControlComponent || (typeof mod.prototype?.proxyCommand === 'function' ? mod : null);
+            if (RC && RC.prototype && typeof RC.prototype.proxyCommand === 'function') {
+              hookRemoteControlPrototype(RC.prototype);
+              break;
+            }
+          }
+        }
+
+        const rcEl = document?.querySelector?.('ga-remote-control');
+        if (rcEl) {
+          const ctx = rcEl.__ngContext__;
+          if (ctx && typeof ctx === 'object') {
+            const list = Array.isArray(ctx) ? ctx : (Array.isArray(ctx.lView) ? ctx.lView : [ctx.component, ctx]);
+            for (const item of list) {
+              if (item && typeof item === 'object' && typeof item.proxyCommand === 'function') {
+                window.__agyRemoteControlInstance = item;
+                hookRemoteControlPrototype(Object.getPrototypeOf(item));
+                break;
+              }
+            }
+          }
+        }
+
+        if (!window?.__agyRemoteControlInstance && typeof window?.dispatchEvent === 'function') {
+          try {
+            const Evt = window.MessageEvent || (typeof MessageEvent !== 'undefined' ? MessageEvent : null);
+            if (Evt) {
+              window.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
+            }
+          } catch {}
+        }
+
+        return (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed)
+          ? window.__agyRemoteControlInstance
+          : null;
+      }
+
+      function createRcServiceAdapter(rcInst) {
+        async function callJson(rpcPath, reqObj) {
+          if (!rcInst || typeof rcInst.proxyCommand !== 'function') return null;
+          const bytes = encodeTextToBytes(JSON.stringify(reqObj || {}));
+          const res = await rcInst.proxyCommand(rpcPath, bytes);
+          if (!res || !res.payload) return null;
+          const text = decodeBytesToText(res.payload);
+          return text ? JSON.parse(text) : null;
+        }
+        return {
+          isRemoteControlHost: true,
+          rcInst,
+          callJson,
+          async retrieveUserQuotaSummary(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', req || {});
+          },
+          async getCascadeTrajectoryGeneratorMetadata(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', req || {});
+          },
+          async getCascadeTrajectory(req) {
+            const metaRes = await callJson('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+              cascadeId: req?.cascadeId,
+              generatorMetadataOffset: req?.generatorMetadataOffset || 0,
+            });
+            if (metaRes && Array.isArray(metaRes.generatorMetadata)) {
+              return { trajectory: { generatorMetadata: metaRes.generatorMetadata } };
+            }
+            return await callJson('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory', req || {});
+          },
+          async getAllCascadeTrajectories() {
+            return await callJson('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {});
+          },
+          async sendUserCascadeMessage(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', req || {});
+          },
+        };
+      }
+
+      function ensureRemoteHostView(onCascadeChange) {
+        if (!document) return null;
+        const nativeView = document.querySelector('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
+        if (nativeView) return null;
+        const rcEl = document.querySelector('ga-remote-control');
+        if (!rcEl) return null;
+
+        const rcInst = getRemoteControlInstance(onCascadeChange);
+        const appContainer = rcEl.querySelector('.app-container') || rcEl;
+        let hostView = appContainer.querySelector('.agy-rc-host-view');
+        if (!hostView) {
+          hostView = document.createElement('div');
+          hostView.className = 'agy-rc-host-view';
+          hostView.setAttribute('data-testid', 'conversation-view');
+          const hostBox = document.createElement('div');
+          hostBox.className = 'agy-rc-host-box';
+          hostBox.setAttribute('data-testid', 'agent-input-box');
+          hostView.appendChild(hostBox);
+          appContainer.appendChild(hostView);
+        }
+
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        let activeCid = window.__agySniffedCascadeId || '';
+        if (!activeCid) {
+          const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
+          const m = String(childPath).match(UUID_RE);
+          if (m && m[0] && m[0] !== ignoreUuid) activeCid = m[0];
+        }
+
+        const currentAttr = hostView.getAttribute('data-cascade-id');
+        const nextAttr = activeCid || currentAttr || 'remote-session';
+        if (currentAttr !== nextAttr) {
+          hostView.setAttribute('data-cascade-id', nextAttr);
+        }
+
+        const now = Date.now();
+        const recentlySniffed = window.__agySniffedCascadeTs && (now - window.__agySniffedCascadeTs < 4000);
+        if (rcInst && !rcTrajectoryPollInFlight && !recentlySniffed && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
+          lastRcTrajectoryPollTs = now;
+          rcTrajectoryPollInFlight = true;
+          createRcServiceAdapter(rcInst).getAllCascadeTrajectories().then((all) => {
+            const summaries = all?.trajectorySummaries || {};
+            const entries = Object.entries(summaries);
+            if (!entries.length) return;
+            entries.sort((a, b) => {
+              const vA = Date.parse(a[1]?.annotations?.lastUserViewTime || 0) || 0;
+              const vB = Date.parse(b[1]?.annotations?.lastUserViewTime || 0) || 0;
+              if (vA !== vB) return vB - vA;
+              const mA = Date.parse(a[1]?.lastModifiedTime || 0) || 0;
+              const mB = Date.parse(b[1]?.lastModifiedTime || 0) || 0;
+              return mB - mA;
+            });
+            const [latestId, latestSum] = entries[0];
+            if (latestId) {
+              window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
+              const prevSteps = window.__agyRcStepCountByCascade[latestId];
+              const nextSteps = latestSum?.stepCount ?? -1;
+              window.__agyRcStepCountByCascade[latestId] = nextSteps;
+              const prevId = hostView.getAttribute('data-cascade-id');
+              if (!window.__agySniffedCascadeTs || (Date.now() - window.__agySniffedCascadeTs >= 4000)) {
+                window.__agySniffedCascadeId = latestId;
+              }
+              const resolvedId = window.__agySniffedCascadeId || latestId;
+              if (prevId !== resolvedId || prevSteps !== nextSteps) {
+                hostView.setAttribute('data-cascade-id', resolvedId);
+                if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
+              }
+            }
+          }).catch(() => {}).finally(() => {
+            rcTrajectoryPollInFlight = false;
+          });
+        }
+
+        return hostView;
+      }
+
       function getAgentStateProviderForInputBox(inputBox) {
         const cc = getCascadeContextForElement(inputBox);
-        return cc?.state?.agentStateProvider || null;
+        if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
+        const cid = window?.__agySniffedCascadeId;
+        const steps = cid && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cid] : undefined;
+        if (typeof steps === 'number' && steps >= 0) {
+          return {
+            getState: () => ({
+              trajectorySlice: {
+                totalGeneratorMetadataLength: steps,
+                totalStepsLength: steps,
+              },
+            }),
+          };
+        }
+        return null;
       }
 
       function getRemoteRpcServiceForElement(el) {
@@ -995,6 +1328,10 @@
             }
             curr = curr.return;
           }
+        }
+        const rcInst = getRemoteControlInstance();
+        if (rcInst && typeof rcInst.proxyCommand === 'function') {
+          return createRcServiceAdapter(rcInst);
         }
         return null;
       }
@@ -1114,7 +1451,30 @@
       async function runCompactForInputBox(inputBox) {
         if (!inputBox) return;
         const editable = inputBox.querySelector('[contenteditable="true"]');
-        if (!editable || !editable.__lexicalEditor) return;
+        if (!editable || !editable.__lexicalEditor) {
+          const rcInst = getRemoteControlInstance();
+          const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
+          if (rcInst && cid && cid !== 'remote-session') {
+            try {
+              await createRcServiceAdapter(rcInst).sendUserCascadeMessage({
+                cascadeId: cid,
+                items: [
+                  {
+                    item: {
+                      slashCommand: {
+                        info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
+                      },
+                    },
+                  },
+                  {
+                    text: ' ' + COMPACT_ARGS,
+                  },
+                ],
+              });
+            } catch {}
+          }
+          return;
+        }
         const ed = editable.__lexicalEditor;
         const PClass = ed._nodes.get('paragraph')?.klass;
         const MClass = ed._nodes.get('contextScopeItemMention')?.klass;
@@ -1166,6 +1526,8 @@
 
       return {
         ensureContextWindowSelectorFlag,
+        ensureRemoteHostView,
+        getRemoteControlInstance,
         getModelSelectorContextForView,
         getCascadeContextForElement,
         getAgentStateProviderForInputBox,
@@ -1564,11 +1926,7 @@
 
           if (containerEl.__lastHtml !== html) {
             containerEl.__lastHtml = html;
-            try {
-              containerEl.innerHTML = html;
-            } catch {
-              setHtml(containerEl, html);
-            }
+            setHtml(containerEl, html);
 
             const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
             if (limitBtn) {
@@ -1729,6 +2087,11 @@
                 metas = j.generatorMetadata || [];
               }
             } catch {}
+          }
+          if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+            const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
+            const allMetas = j?.generatorMetadata || [];
+            metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
           }
           if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function') {
             const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
@@ -1913,7 +2276,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v7';
+    const STATUSBAR_VERSION = 'v8';
 
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -2046,6 +2409,7 @@
       function updateAll() {
         refreshStyles();
         hostBridge.ensureContextWindowSelectorFlag();
+        hostBridge.ensureRemoteHostView(() => updateAll());
         const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
         const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
         if (!views.length) return;
@@ -2173,6 +2537,8 @@
         if (m) m.remove();
         const bars = doc.querySelectorAll('.agy-ctx-statusbar');
         for (const b of bars) b.remove();
+        const hostViews = doc.querySelectorAll('.agy-rc-host-view');
+        for (const hv of hostViews) hv.remove();
       };
 
       return win.agyStatusBar;

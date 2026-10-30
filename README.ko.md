@@ -25,10 +25,10 @@
   - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 원본 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
   - 트레이에서 이미 실행 중인 프로세스에서 새 창을 열거나 앱이 업데이트된 직후에도 `app_storage.json` 동기화 및 실시간 CDP 주입으로 상태바를 즉시 복구합니다.
 - **원격 제어(Remote Control) 웹 및 모바일 브라우저 완벽 지원 (`https://antigravity.google.com/r/...`)**:
-  - 로컬 HTTP 엔드포인트와 `csrfToken`이 없는 Remote Control 원격 웹 환경에서도 React Fiber 내부의 WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectory`)로 자동 폴백하여 컨텍스트 사용량, 한도 선택, 캐시율, 잔여 쿼터, `[ compact ]`, `[ context ]` 모달이 동일하게 동작합니다.
-  - `dist/statusbar_autoinject.js` 상단에 Tampermonkey/AdGuard용 `// ==UserScript==` 헤더가 포함되어 있으며, 확장프로그램을 지원하지 않는 모바일 크롬에서는 아래 주소창 북마클릿으로 즉시 실행할 수 있습니다:
+  - 로컬 HTTP 엔드포인트와 `csrfToken`이 없는 Remote Control 원격 웹 환경에서도 최상위 `<ga-remote-control>` Angular 호스트 셸(`RemoteControlComponent.prototype.proxyCommand`) 및 React Fiber 내부의 WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`)를 자동 브릿지하여 컨텍스트 사용량, 한도 선택, 캐시율, 잔여 쿼터, `[ compact ]`, `[ context ]` 모달이 동일하게 동작합니다.
+  - `dist/statusbar_autoinject.js` 상단에 Tampermonkey/AdGuard용 `// ==UserScript==` 헤더가 포함되어 있으며, 확장프로그램을 지원하지 않는 모바일 크롬에서는 아래 주소창 북마클릿(CSP `nonce` 및 `TrustedTypes` 정책 완벽 대응)으로 즉시 실행할 수 있습니다:
     ```javascript
-    javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js').then(r=>r.text()).then(eval)})();
+    javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
     ```
 
 ---

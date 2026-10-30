@@ -170,11 +170,7 @@ function createCoreMetricsAdapter({
 
       if (containerEl.__lastHtml !== html) {
         containerEl.__lastHtml = html;
-        try {
-          containerEl.innerHTML = html;
-        } catch {
-          setHtml(containerEl, html);
-        }
+        setHtml(containerEl, html);
 
         const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
         if (limitBtn) {

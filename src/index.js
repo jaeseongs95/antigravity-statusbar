@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v7';
+const STATUSBAR_VERSION = 'v8';
 
 function mountStatusBar(env = {}) {
   const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -142,6 +142,7 @@ function mountStatusBar(env = {}) {
   function updateAll() {
     refreshStyles();
     hostBridge.ensureContextWindowSelectorFlag();
+    hostBridge.ensureRemoteHostView(() => updateAll());
     const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
     const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
     if (!views.length) return;
@@ -269,6 +270,8 @@ function mountStatusBar(env = {}) {
     if (m) m.remove();
     const bars = doc.querySelectorAll('.agy-ctx-statusbar');
     for (const b of bars) b.remove();
+    const hostViews = doc.querySelectorAll('.agy-rc-host-view');
+    for (const hv of hostViews) hv.remove();
   };
 
   return win.agyStatusBar;

@@ -442,6 +442,163 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(coreNode.innerHTML.includes('72%'));
     sandbox.window.__agyStatusBarCleanup();
   });
+
+  it('mounts on antigravity.google.com/r/<uuid> (<ga-remote-control> Angular host shell) via RemoteControlComponent.proxyCommand', async () => {
+    const { sandbox } = createDomSandbox();
+    delete sandbox.window.__APP_CONFIG__;
+
+    const messageListeners = [];
+    sandbox.window.addEventListener = (type, fn) => {
+      if (type === 'message') messageListeners.push(fn);
+    };
+    sandbox.window.dispatchEvent = (ev) => {
+      for (const fn of messageListeners) fn(ev);
+    };
+    sandbox.window.MessageEvent = class {
+      constructor(type, init) {
+        this.type = type;
+        this.data = init?.data;
+      }
+    };
+
+    let sentCompactPayload = null;
+    class FakeRemoteControlComponent {
+      constructor() {
+        this.destroyed = false;
+        this.lastSyncedChildPath = '';
+      }
+      selectedInstanceUuid() {
+        return '547d3ff8-7d19-415f-a68a-9bbf28c06f6f-v2';
+      }
+      handleIframeMessage(ev) {
+        if (ev?.data === '__agy_probe__') return;
+      }
+      async proxyCommand(rpcPath, payloadBytes) {
+        const req = JSON.parse(new TextDecoder().decode(payloadBytes));
+        let resObj = {};
+        if (rpcPath.endsWith('/GetAllCascadeTrajectories')) {
+          resObj = {
+            trajectorySummaries: {
+              'e0b9092d-4949-4a25-9c5d-0afdfd030c10': {
+                stepCount: 42,
+                lastModifiedTime: '2026-10-30T03:00:00Z',
+                annotations: { lastUserViewTime: '2026-10-30T03:00:00Z' },
+              },
+            },
+          };
+        } else if (rpcPath.endsWith('/RetrieveUserQuotaSummary')) {
+          resObj = {
+            response: {
+              groups: [
+                {
+                  displayName: 'Gemini',
+                  buckets: [
+                    { window: '5h', remainingFraction: 0.84 },
+                    { window: 'weekly', remainingFraction: 0.61 },
+                  ],
+                },
+              ],
+            },
+          };
+        } else if (rpcPath.endsWith('/GetCascadeTrajectoryGeneratorMetadata')) {
+          resObj = {
+            generatorMetadata: [
+              {
+                chatModel: {
+                  chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 128000, maxContextTokens: 512000 } },
+                  usage: { cacheReadTokens: 110000, inputTokens: 18000 },
+                },
+              },
+            ],
+          };
+        } else if (rpcPath.endsWith('/SendUserCascadeMessage')) {
+          sentCompactPayload = req;
+          resObj = { ok: true };
+        }
+        return { payload: new TextEncoder().encode(JSON.stringify(resObj)), headers: {} };
+      }
+    }
+
+    const rcInstance = new FakeRemoteControlComponent();
+    sandbox.window.addEventListener('message', (e) => rcInstance.handleIframeMessage(e));
+    sandbox.window.default_GoogleAntigravity = {
+      iH: { RemoteControlComponent: FakeRemoteControlComponent },
+    };
+
+    let hostViewEl = null;
+    let hostBarEl = null;
+    const appContainerEl = {
+      children: [],
+      querySelector(sel) {
+        if (sel === '.agy-rc-host-view') return hostViewEl;
+        return null;
+      },
+      appendChild(el) {
+        if (el.className === 'agy-rc-host-view') {
+          hostViewEl = el;
+          const hostBox = el.children[0];
+          const origAppend = hostBox.appendChild.bind(hostBox);
+          hostBox.querySelector = (s) => (s === '.agy-ctx-statusbar' ? hostBarEl : null);
+          hostBox.appendChild = (child) => {
+            if (child.className === 'agy-ctx-statusbar') {
+              const leftSlot = sandbox.document.createElement('div');
+              leftSlot.className = 'agy-ctx-left';
+              const rightSlot = sandbox.document.createElement('div');
+              rightSlot.className = 'agy-ctx-right';
+              child.children = [leftSlot, rightSlot];
+              hostBarEl = child;
+            }
+            return origAppend(child);
+          };
+          el.querySelector = (s) => (s === '[data-testid="agent-input-box"]' ? hostBox : null);
+        }
+        this.children.push(el);
+        return el;
+      },
+    };
+    const gaRemoteControlEl = {
+      querySelector(sel) {
+        if (sel === '.app-container') return appContainerEl;
+        return null;
+      },
+    };
+
+    sandbox.document.querySelector = (sel) => {
+      if (sel === 'ga-remote-control') return gaRemoteControlEl;
+      if (sel === '[data-testid="conversation-view"]:not(.agy-rc-host-view)') return null;
+      if (sel === '.agy-rc-host-view' || sel === '[data-testid="conversation-view"]') return hostViewEl;
+      return null;
+    };
+    sandbox.document.querySelectorAll = (sel) => {
+      if (sel.includes('conversation-view')) return hostViewEl ? [hostViewEl] : [];
+      if (sel === '.agy-ctx-statusbar') return hostBarEl ? [hostBarEl] : [];
+      if (sel === '.agy-rc-host-view') return hostViewEl ? [hostViewEl] : [];
+      return [];
+    };
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.ok(hostViewEl, 'synthetic .agy-rc-host-view should be created inside ga-remote-control');
+    assert.equal(hostViewEl.getAttribute('data-cascade-id'), 'e0b9092d-4949-4a25-9c5d-0afdfd030c10');
+    assert.ok(hostBarEl, 'statusbar should be mounted inside .agy-rc-host-view');
+
+    const leftSlot = hostBarEl.querySelector('.agy-ctx-left');
+    const coreNode = leftSlot.querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode.innerHTML.includes('128k'));
+    assert.ok(coreNode.innerHTML.includes('84%'));
+    assert.ok(coreNode.innerHTML.includes('61%'));
+
+    const rightSlot = hostBarEl.querySelector('.agy-ctx-right');
+    const compactBtn = rightSlot.querySelector('[data-agy-adapter-id="compact"]');
+    await compactBtn.onclick({ preventDefault() {}, stopPropagation() {} });
+    assert.ok(sentCompactPayload, 'clicking [ compact ] on ga-remote-control should send SendUserCascadeMessage via proxyCommand');
+    assert.equal(sentCompactPayload.cascadeId, 'e0b9092d-4949-4a25-9c5d-0afdfd030c10');
+    assert.equal(sentCompactPayload.items[0].item.slashCommand.info.name, 'compact');
+
+    sandbox.window.__agyStatusBarCleanup();
+  });
 });
 
 describe('ASAR exact-size transformation', () => {
