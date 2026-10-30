@@ -33,6 +33,26 @@ function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate) {
 }
 
 function createHostBridge({ window, document, localStorage, cwStore }) {
+  try {
+    if (window && typeof window.__JETSKI_LS_CLIENT_DECORATOR__ !== 'function') {
+      const dec = function (client) {
+        window.__agyLsClient = client;
+        return client;
+      };
+      dec.__agyWrapped = true;
+      window.__JETSKI_LS_CLIENT_DECORATOR__ = dec;
+    } else if (window && typeof window.__JETSKI_LS_CLIENT_DECORATOR__ === 'function' && !window.__JETSKI_LS_CLIENT_DECORATOR__.__agyWrapped) {
+      const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
+      const wrappedDec = function (client) {
+        const res = prevDec.apply(this, arguments) || client;
+        window.__agyLsClient = res;
+        return res;
+      };
+      wrappedDec.__agyWrapped = true;
+      window.__JETSKI_LS_CLIENT_DECORATOR__ = wrappedDec;
+    }
+  } catch {}
+
   // Ensure context-window-selector flag is enabled in customFlagOverrides
   try {
     const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
@@ -420,14 +440,44 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
   }
 
   function getRemoteRpcServiceForElement(el) {
-    const candidates = [el, document?.querySelector?.('[data-testid="conversation-view"]')].filter(Boolean);
+    if (
+      window?.__agyLsClient &&
+      (typeof window.__agyLsClient.retrieveUserQuotaSummary === 'function' ||
+        typeof window.__agyLsClient.getCascadeTrajectoryGeneratorMetadata === 'function')
+    ) {
+      return window.__agyLsClient;
+    }
+    const candidates = [
+      el,
+      document?.querySelector?.('[data-testid="conversation-view"]'),
+      document?.querySelector?.('#root')?.firstElementChild,
+    ].filter(Boolean);
     for (const startEl of candidates) {
       const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
       let curr = fk ? startEl[fk] : null;
       while (curr) {
         const val = curr.memoizedProps?.value;
-        if (val && typeof val === 'object' && (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function')) {
-          return val;
+        if (val && typeof val === 'object') {
+          const lsClient =
+            val?.core?.projectManagementService?.lsClient ||
+            val?.projectManagementService?.lsClient ||
+            val?.lsClient;
+          if (
+            lsClient &&
+            (typeof lsClient.retrieveUserQuotaSummary === 'function' ||
+              typeof lsClient.getCascadeTrajectoryGeneratorMetadata === 'function' ||
+              typeof lsClient.getCascadeTrajectory === 'function')
+          ) {
+            if (window) window.__agyLsClient = lsClient;
+            return lsClient;
+          }
+          if (
+            typeof val.retrieveUserQuotaSummary === 'function' ||
+            typeof val.getCascadeTrajectoryGeneratorMetadata === 'function' ||
+            typeof val.getCascadeTrajectory === 'function'
+          ) {
+            return val;
+          }
         }
         curr = curr.return;
       }

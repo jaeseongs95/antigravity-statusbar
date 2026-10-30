@@ -1,6 +1,6 @@
 {
   "name": "antigravity-statusbar",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "description": "Custom context window statusbar, StatusBarAdapter extension architecture, per-session arbitrary token limit selector (32K-980K), Remote Control web support, and resilient zero-offset ASAR + CDP auto-patcher for Google Antigravity IDE.",
   "main": "src/index.js",
   "scripts": {

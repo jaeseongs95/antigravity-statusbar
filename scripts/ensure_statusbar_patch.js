@@ -27,6 +27,7 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const vm = require('vm');
+const zlib = require('zlib');
 const { spawn } = require('child_process');
 
 const HOME_DIR = process.env.USERPROFILE || process.env.HOME || os.homedir();
@@ -34,19 +35,30 @@ const LOCAL_APPDATA = process.env.LOCALAPPDATA || path.join(HOME_DIR, 'AppData',
 const APPDATA = process.env.APPDATA || path.join(HOME_DIR, 'AppData', 'Roaming');
 
 const ASAR_PATH = path.join(LOCAL_APPDATA, 'Programs', 'antigravity', 'resources', 'app.asar');
+const LS_BIN_PATH = path.join(
+  LOCAL_APPDATA,
+  'Programs',
+  'antigravity',
+  'resources',
+  'bin',
+  process.platform === 'win32' ? 'language_server.exe' : 'language_server'
+);
 const AGY_DIR = path.join(HOME_DIR, '.gemini', 'antigravity');
+const WEB_BUNDLE_DIR = path.join(AGY_DIR, 'web_bundle');
+const WEB_BUNDLE_META_PATH = path.join(WEB_BUNDLE_DIR, '.agy_bundle_meta.json');
 const AUTOINJECT_PATH = path.join(AGY_DIR, 'statusbar_autoinject.js');
 const LOCK_PATH = path.join(AGY_DIR, 'statusbar_patch.lock');
 const STATUS_PATH = path.join(AGY_DIR, 'statusbar_patch_status.json');
 const DEVTOOLS_PORT_FILE = path.join(APPDATA, 'Antigravity', 'DevToolsActivePort');
 const APP_STORAGE_PATH = path.join(APPDATA, 'Antigravity', 'app_storage.json');
 
-const PATCH_MARKER = 'AGY_STATUSBAR_AUTOINJECT_V5';
+const PATCH_MARKER = 'AGY_STATUSBAR_AUTOINJECT_V6';
 const LEGACY_MARKERS = [
   'statusbar_autoinject.js',
   'AGY_STATUSBAR_AUTOINJECT_V2',
   'AGY_STATUSBAR_AUTOINJECT_V3',
   'AGY_STATUSBAR_AUTOINJECT_V4',
+  'AGY_STATUSBAR_AUTOINJECT_V5',
 ];
 const STORAGE_CODE_KEY = 'agy-statusbar-code';
 const LOCK_STALE_MS = 60000;
@@ -57,7 +69,7 @@ const UTILS_ANCHOR_TARGET =
   "    void win.loadURL(url);";
 
 const UTILS_ANCHOR_REPLACEMENT =
-  "    // AGY_STATUSBAR_AUTOINJECT_V5\n" +
+  "    // AGY_STATUSBAR_AUTOINJECT_V6\n" +
   "    const _injectAgyStatusBar = () => {\n" +
   "        try {\n" +
   "            const _fs = require('fs');\n" +
@@ -78,7 +90,7 @@ const MAIN_ANCHOR_TARGET =
 
 const MAIN_ANCHOR_REPLACEMENT =
   "electron_1.app.on('web-contents-created', (_event, contents) => {\n" +
-  "    // AGY_STATUSBAR_AUTOINJECT_V5\n" +
+  "    // AGY_STATUSBAR_AUTOINJECT_V6\n" +
   "    if (contents.getType() === 'window') {\n" +
   "        const _injectAgyMain = () => {\n" +
   "            try {\n" +
@@ -100,12 +112,26 @@ const PRELOAD_ANCHOR_TARGET =
 
 const PRELOAD_ANCHOR_REPLACEMENT =
   "electron_1.contextBridge.exposeInMainWorld('wsl', wslAPI);\n" +
-  "// AGY_STATUSBAR_AUTOINJECT_V5\n" +
+  "// AGY_STATUSBAR_AUTOINJECT_V6\n" +
   "electron_1.ipcRenderer.invoke('storage:get-items').then((r) => {\n" +
   "    if (r && r['agy-statusbar-code']) {\n" +
   "        void electron_1.webFrame.executeJavaScript(r['agy-statusbar-code']).catch(() => {});\n" +
   "    }\n" +
   "}).catch(() => {});";
+
+// Anchor 4: Pass --web_bundle_path to language_server in dist/languageServer.js so Remote Control serves patched Web UI
+const LS_ANCHOR_TARGET =
+  "            '--enable_sidecars',\n" +
+  "        ];";
+
+const LS_ANCHOR_REPLACEMENT =
+  "            '--enable_sidecars',\n" +
+  "        ];\n" +
+  "        // AGY_STATUSBAR_AUTOINJECT_V6\n" +
+  "        try {\n" +
+  "            const _wb = require('path').join(process.env.USERPROFILE || process.env.HOME || '', '.gemini', 'antigravity', 'web_bundle');\n" +
+  "            if (!wsl && require('fs').existsSync(_wb + '/index.html')) args.push('--web_bundle_path=' + _wb);\n" +
+  "        } catch (_e) {}";
 
 function sha256Hex(bufferOrString) {
   return crypto.createHash('sha256').update(bufferOrString).digest('hex');
@@ -147,6 +173,194 @@ function syncAppStorageCode() {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Finds and extracts the compiled Web UI ZIP archive embedded inside `language_server` binary
+ * into `outDir`, saving unmodified `index.orig.html` and `prism_bundle.orig.js` backups.
+ */
+function extractEmbeddedWebZip(lsBinPath, outDir) {
+  const buf = fs.readFileSync(lsBinPath);
+  const eocdSig = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const cdSig = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+  const lhSig = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+  let foundZip = null;
+  let pos = 0;
+  while ((pos = buf.indexOf(eocdSig, pos)) !== -1) {
+    if (pos + 22 <= buf.length) {
+      const diskNo = buf.readUInt16LE(pos + 4);
+      const cdDisk = buf.readUInt16LE(pos + 6);
+      const totalEntries = buf.readUInt16LE(pos + 10);
+      const cdSize = buf.readUInt32LE(pos + 12);
+      const cdRelOffset = buf.readUInt32LE(pos + 16);
+      if (
+        diskNo === 0 &&
+        cdDisk === 0 &&
+        totalEntries >= 10 &&
+        totalEntries <= 20000 &&
+        cdSize > 0 &&
+        cdSize < 20 * 1024 * 1024 &&
+        pos >= cdSize + cdRelOffset
+      ) {
+        const cdStart = pos - cdSize;
+        if (buf.subarray(cdStart, cdStart + 4).equals(cdSig)) {
+          const zipStart = cdStart - cdRelOffset;
+          let ptr = cdStart;
+          let hasIndex = false;
+          let hasPrism = false;
+          const entries = [];
+          for (let e = 0; e < totalEntries && ptr + 46 <= pos; e++) {
+            if (!buf.subarray(ptr, ptr + 4).equals(cdSig)) break;
+            const method = buf.readUInt16LE(ptr + 10);
+            const compSize = buf.readUInt32LE(ptr + 20);
+            const nameLen = buf.readUInt16LE(ptr + 28);
+            const extraLen = buf.readUInt16LE(ptr + 30);
+            const commentLen = buf.readUInt16LE(ptr + 32);
+            const localHdrRel = buf.readUInt32LE(ptr + 42);
+            const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
+            if (name === 'index.html') hasIndex = true;
+            if (name === 'prism_bundle.js') hasPrism = true;
+            entries.push({ name, method, compSize, localHdrRel });
+            ptr += 46 + nameLen + extraLen + commentLen;
+          }
+          if (hasIndex && hasPrism) {
+            foundZip = { zipStart, entries };
+            break;
+          }
+        }
+      }
+    }
+    pos += 4;
+  }
+
+  if (!foundZip) {
+    throw new Error('Embedded Web UI ZIP archive not found in language_server binary');
+  }
+
+  fs.mkdirSync(outDir, { recursive: true });
+  const resolvedOutDir = path.resolve(outDir);
+
+  for (const entry of foundZip.entries) {
+    const cleanRel = entry.name.replace(/\\/g, '/').replace(/^\/+/, '');
+    const targetPath = path.resolve(outDir, cleanRel);
+    if (!targetPath.startsWith(resolvedOutDir + path.sep) && targetPath !== resolvedOutDir) {
+      continue;
+    }
+    if (entry.name.endsWith('/')) {
+      fs.mkdirSync(targetPath, { recursive: true });
+      continue;
+    }
+    const lh = foundZip.zipStart + entry.localHdrRel;
+    if (lh + 30 > buf.length || !buf.subarray(lh, lh + 4).equals(lhSig)) {
+      throw new Error(`Invalid local header for ${entry.name}`);
+    }
+    const lhNameLen = buf.readUInt16LE(lh + 26);
+    const lhExtraLen = buf.readUInt16LE(lh + 28);
+    const dataStart = lh + 30 + lhNameLen + lhExtraLen;
+    const compSlice = buf.subarray(dataStart, dataStart + entry.compSize);
+    const raw =
+      entry.method === 0
+        ? compSlice
+        : entry.method === 8
+          ? zlib.inflateRawSync(compSlice)
+          : null;
+    if (!raw) {
+      throw new Error(`Unsupported ZIP compression method ${entry.method} for ${entry.name}`);
+    }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, raw);
+  }
+
+  fs.copyFileSync(path.join(outDir, 'index.html'), path.join(outDir, 'index.orig.html'));
+  fs.copyFileSync(path.join(outDir, 'prism_bundle.js'), path.join(outDir, 'prism_bundle.orig.js'));
+  return foundZip.entries.length;
+}
+
+/**
+ * Synchronizes `~/.gemini/antigravity/web_bundle` so `language_server --web_bundle_path`
+ * serves the Web UI with `statusbar_autoinject.js` and `__JETSKI_LS_CLIENT_DECORATOR__` pre-bundled.
+ * Since `language_server` reads from `--web_bundle_path` on every HTTP/WebRTC request, updates to
+ * `statusbar_autoinject.js` take effect immediately on mobile Chrome reload without restarting LS.
+ */
+function syncWebBundle() {
+  try {
+    if (!fs.existsSync(LS_BIN_PATH) || !fs.existsSync(AUTOINJECT_PATH)) {
+      return { synced: false, status: 'SKIPPED_MISSING_FILES' };
+    }
+    const lsStat = fs.statSync(LS_BIN_PATH);
+    const autoinjectCode = fs.readFileSync(AUTOINJECT_PATH, 'utf8');
+    const autoinjectHash = sha256Hex(autoinjectCode).slice(0, 16);
+
+    const origHtmlPath = path.join(WEB_BUNDLE_DIR, 'index.orig.html');
+    const origPrismPath = path.join(WEB_BUNDLE_DIR, 'prism_bundle.orig.js');
+    const outHtmlPath = path.join(WEB_BUNDLE_DIR, 'index.html');
+    const outPrismPath = path.join(WEB_BUNDLE_DIR, 'prism_bundle.js');
+
+    let meta = null;
+    try {
+      if (fs.existsSync(WEB_BUNDLE_META_PATH)) {
+        meta = JSON.parse(fs.readFileSync(WEB_BUNDLE_META_PATH, 'utf8'));
+      }
+    } catch {}
+
+    const baseExtracted =
+      meta &&
+      meta.lsSize === lsStat.size &&
+      meta.lsMtimeMs === lsStat.mtimeMs &&
+      fs.existsSync(origHtmlPath) &&
+      fs.existsSync(origPrismPath);
+
+    if (
+      baseExtracted &&
+      meta.autoinjectHash === autoinjectHash &&
+      meta.patchVersion === PATCH_MARKER &&
+      fs.existsSync(outHtmlPath) &&
+      fs.existsSync(outPrismPath)
+    ) {
+      return { synced: false, status: 'ALREADY_SYNCED', autoinjectHash };
+    }
+
+    let extractedCount = meta?.extractedCount || 0;
+    if (!baseExtracted) {
+      extractedCount = extractEmbeddedWebZip(LS_BIN_PATH, WEB_BUNDLE_DIR);
+    }
+
+    const origPrism = fs.readFileSync(origPrismPath, 'utf8');
+    const patchedPrism = `${origPrism}\n;\n/* ${PATCH_MARKER}:${autoinjectHash} */\n${autoinjectCode}\n`;
+    fs.writeFileSync(outPrismPath, patchedPrism, 'utf8');
+
+    const origHtml = fs.readFileSync(origHtmlPath, 'utf8');
+    const lsHookTag = `<script>globalThis.__JETSKI_LS_CLIENT_DECORATOR__=function(c){globalThis.__agyLsClient=c;return c;};</script>`;
+    const patchedHtml = origHtml.replace(
+      '<script defer src="/prism_bundle.js"></script>',
+      `${lsHookTag}\n    <script defer src="/prism_bundle.js?agy=${autoinjectHash}"></script>`
+    );
+    fs.writeFileSync(outHtmlPath, patchedHtml, 'utf8');
+
+    const nextMeta = {
+      patchVersion: PATCH_MARKER,
+      lsSize: lsStat.size,
+      lsMtimeMs: lsStat.mtimeMs,
+      autoinjectHash,
+      extractedCount,
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(WEB_BUNDLE_META_PATH, JSON.stringify(nextMeta, null, 2) + '\n', 'utf8');
+
+    return {
+      synced: true,
+      status: baseExtracted ? 'UPDATED_BUNDLE_SCRIPT' : 'EXTRACTED_AND_PATCHED',
+      autoinjectHash,
+      extractedCount,
+    };
+  } catch (err) {
+    return {
+      synced: false,
+      status: 'FAILED_WEB_BUNDLE_SYNC',
+      error: String(err?.message || err),
+    };
   }
 }
 
@@ -248,6 +462,7 @@ function isAsarPatchedFast(asarPath = ASAR_PATH) {
     const utilsNode = distFiles['utils.js'];
     const mainNode = distFiles['main.js'];
     const preloadNode = distFiles['preload.js'];
+    const lsNode = distFiles['languageServer.js'];
     if (!utilsNode || !mainNode || !preloadNode) return false;
 
     const utilsBuf = Buffer.alloc(utilsNode.size);
@@ -263,11 +478,19 @@ function isAsarPatchedFast(asarPath = ASAR_PATH) {
     const mainStr = mainBuf.toString('utf8');
     const preloadStr = preloadBuf.toString('utf8');
 
+    let lsPatched = true;
+    if (lsNode) {
+      const lsBuf = Buffer.alloc(lsNode.size);
+      fs.readSync(fd, lsBuf, 0, lsNode.size, dataOffset + Number(lsNode.offset));
+      lsPatched = lsBuf.toString('utf8').includes(PATCH_MARKER);
+    }
+
     return (
       utilsStr.includes(PATCH_MARKER) &&
       mainStr.includes(PATCH_MARKER) &&
       preloadStr.startsWith('"use strict";') &&
-      preloadStr.includes(PATCH_MARKER)
+      preloadStr.includes(PATCH_MARKER) &&
+      lsPatched
     );
   } catch {
     return false;
@@ -488,12 +711,13 @@ function readAsarArchive(filePath) {
 
 function patchAsarOnDisk() {
   syncAppStorageCode();
+  const webBundle = syncWebBundle();
 
   if (!fs.existsSync(ASAR_PATH)) {
-    return { status: 'SKIPPED_NO_ASAR' };
+    return { status: 'SKIPPED_NO_ASAR', webBundle };
   }
   if (!fs.existsSync(AUTOINJECT_PATH)) {
-    return { status: 'SKIPPED_NO_AUTOINJECT_SCRIPT' };
+    return { status: 'SKIPPED_NO_AUTOINJECT_SCRIPT', webBundle };
   }
 
   if (isAsarPatchedFast(ASAR_PATH)) {
@@ -505,6 +729,7 @@ function patchAsarOnDisk() {
       status: 'ALREADY_PATCHED',
       patchVersion: PATCH_MARKER,
       appVersion: currentArchive?.appVersion || 'unknown',
+      webBundle,
     };
   }
 
@@ -515,6 +740,7 @@ function patchAsarOnDisk() {
   const curUtils = archive.fileMap.get('dist/utils.js')?.toString('utf8') || '';
   const curMain = archive.fileMap.get('dist/main.js')?.toString('utf8') || '';
   const curPreload = archive.fileMap.get('dist/preload.js')?.toString('utf8') || '';
+  const curLs = archive.fileMap.get('dist/languageServer.js')?.toString('utf8') || '';
 
   const hasAnyMarker = (str) =>
     str.includes(PATCH_MARKER) || LEGACY_MARKERS.some((m) => str.includes(m));
@@ -522,7 +748,8 @@ function patchAsarOnDisk() {
   const isPureUnpatched =
     !hasAnyMarker(curUtils) &&
     !hasAnyMarker(curMain) &&
-    !hasAnyMarker(curPreload);
+    !hasAnyMarker(curPreload) &&
+    !hasAnyMarker(curLs);
 
   let backupCreated = false;
   if (isPureUnpatched && !fs.existsSync(backupPath)) {
@@ -539,28 +766,37 @@ function patchAsarOnDisk() {
   const utilsBuf = fileMap.get('dist/utils.js');
   const mainBuf = fileMap.get('dist/main.js');
   const preloadBuf = fileMap.get('dist/preload.js');
+  const lsBuf = fileMap.get('dist/languageServer.js');
   if (!utilsBuf || !mainBuf || !preloadBuf) {
-    return { status: 'FAILED_TARGET_FILES_MISSING', appVersion };
+    return { status: 'FAILED_TARGET_FILES_MISSING', appVersion, webBundle };
   }
 
   let patchedUtilsBuf;
   let patchedMainBuf;
   let patchedPreloadBuf;
+  let patchedLsBuf = null;
   try {
     patchedUtilsBuf = transformExactSize(utilsBuf, UTILS_ANCHOR_TARGET, UTILS_ANCHOR_REPLACEMENT);
     patchedMainBuf = transformExactSize(mainBuf, MAIN_ANCHOR_TARGET, MAIN_ANCHOR_REPLACEMENT);
     patchedPreloadBuf = transformExactSize(preloadBuf, PRELOAD_ANCHOR_TARGET, PRELOAD_ANCHOR_REPLACEMENT);
+    if (lsBuf) {
+      patchedLsBuf = transformExactSize(lsBuf, LS_ANCHOR_TARGET, LS_ANCHOR_REPLACEMENT);
+    }
   } catch (err) {
     return {
       status: 'FAILED_PATTERN_OR_SIZE',
       appVersion,
       detail: String(err?.message || err),
+      webBundle,
     };
   }
 
   fileMap.set('dist/utils.js', patchedUtilsBuf);
   fileMap.set('dist/main.js', patchedMainBuf);
   fileMap.set('dist/preload.js', patchedPreloadBuf);
+  if (patchedLsBuf) {
+    fileMap.set('dist/languageServer.js', patchedLsBuf);
+  }
 
   // Rebuild ASAR payload & recalculate SHA256 integrity while keeping 100% identical offsets & sizes
   const chunks = [];
@@ -640,6 +876,7 @@ function patchAsarOnDisk() {
     preloadOffset: newPreloadOffset,
     bytes: outBuf.length,
     sha256: sha256Hex(outBuf).toUpperCase(),
+    webBundle,
   };
 }
 
@@ -662,7 +899,7 @@ async function runWorkerMode() {
       statusReport.cdp = { error: String(err?.message || err) };
     }
 
-    // Block B: Exact-size / offset-preserving persistent app.asar patch + app_storage sync
+    // Block B: Exact-size / offset-preserving persistent app.asar patch + app_storage + web_bundle sync
     try {
       statusReport.asar = patchAsarOnDisk();
     } catch (err) {
@@ -672,7 +909,8 @@ async function runWorkerMode() {
     if (
       !fs.existsSync(STATUS_PATH) ||
       (statusReport.cdp && statusReport.cdp.injectedCount > 0) ||
-      (statusReport.asar && statusReport.asar.status !== 'ALREADY_PATCHED')
+      (statusReport.asar && statusReport.asar.status !== 'ALREADY_PATCHED') ||
+      (statusReport.asar && statusReport.asar.webBundle && statusReport.asar.webBundle.synced)
     ) {
       writeStatus(statusReport);
     }
@@ -689,6 +927,7 @@ async function runHookFastPath() {
 
   try {
     syncAppStorageCode();
+    syncWebBundle();
     if (!isAsarPatchedFast()) {
       const child = spawn(process.execPath, [__filename, '--worker'], {
         detached: true,
@@ -731,10 +970,13 @@ module.exports = {
   MAIN_ANCHOR_REPLACEMENT,
   PRELOAD_ANCHOR_TARGET,
   PRELOAD_ANCHOR_REPLACEMENT,
+  LS_ANCHOR_TARGET,
+  LS_ANCHOR_REPLACEMENT,
   sha256Hex,
   computeIntegrity,
   transformExactSize,
   isAsarPatchedFast,
+  syncWebBundle,
 };
 
 if (require.main === module) {

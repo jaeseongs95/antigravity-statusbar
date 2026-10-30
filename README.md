@@ -21,11 +21,12 @@ Custom context window statusbar (`.agy-ctx-statusbar`), **`StatusBarAdapter` ext
   - Type any custom value between `32` and `980` (`K` tokens) or choose from presets (`128K`, `256K`, `384K`, `512K`, `750K`, `900K`).
   - Stored per `cascadeId` across `localStorage`, cookies, and `nativeStorage`, while isolating Redux's global default so changing one conversation never pollutes other sessions.
   - Suppresses the yellow warning icon (`⚠️`) in the native model selector pill when the session limit is `<= 256K` while keeping the `· {cw}` badge visible.
-- **Zero-Offset `app.asar` & Sandboxed `preload.js` Auto-Patcher**:
-  - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` while preserving exact byte lengths (`0` offset drift) and updating `ElectronAsarIntegrity` SHA-256 block hashes.
+- **Zero-Offset `app.asar`, Sandboxed `preload.js` & `language_server` Web Bundle Auto-Patcher**:
+  - Patches `dist/preload.js`, `dist/utils.js`, `dist/main.js`, and `dist/languageServer.js` inside `app.asar` while preserving exact byte lengths (`0` offset drift) and updating `ElectronAsarIntegrity` SHA-256 block hashes.
+  - Extracts the compiled Web UI archive from `language_server` into `~/.gemini/antigravity/web_bundle`, pre-bundles `statusbar_autoinject.js` into `prism_bundle.js` and `index.html`, and passes `--web_bundle_path` to `language_server` so Remote Control sessions (`https://antigravity.google.com/r/...`) automatically serve the custom statusbar to any desktop or mobile browser with zero client-side setup.
 - **Remote Control Web & Mobile Support (`https://antigravity.google.com/r/...`)**:
-  - Works in Antigravity Remote Control web sessions (desktop & mobile browsers) where `csrfToken` and local `/exa.language_server_pb...` HTTP endpoints are absent, by automatically bridging both the top-level `<ga-remote-control>` Angular host shell (`RemoteControlComponent.prototype.proxyCommand`) and the internal React Fiber WebRTC/WebChannel RPC service (`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`).
-  - Includes a built-in `// ==UserScript==` header in `dist/statusbar_autoinject.js` for Tampermonkey/AdGuard and supports one-tap Mobile Chrome bookmarklet execution (CSP `nonce` & `TrustedTypes` compliant):
+  - **Zero-Setup Host Serving**: Once installed on your desktop PC (`npm run install-statusbar`), opening a Remote Control link on Mobile Chrome or any browser automatically loads the pre-patched Web UI bundle inside the remote `<iframe>` over WebRTC (`core.projectManagementService.lsClient`).
+  - Also supports top-level `<ga-remote-control>` Angular host shell bridging (`RemoteControlComponent.prototype.proxyCommand`), a `// ==UserScript==` header in `dist/statusbar_autoinject.js`, and an optional Mobile Chrome bookmarklet fallback:
     ```javascript
     javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
     ```

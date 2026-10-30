@@ -21,12 +21,13 @@
   - `32`~`980` (`K` 토큰) 사이의 원하는 값을 직접 입력하거나 프리셋(`128K`, `256K`, `384K`, `512K`, `750K`, `900K`)을 선택할 수 있습니다.
   - 세션 식별자(`cascadeId`)별로 `localStorage`, 쿠키, `nativeStorage`에 영구 보존되며, Redux 전역 기본값을 격리해 특정 세션의 한도 변경이 다른 세션에 영향을 주지 않습니다.
   - 세션 한도가 `256K` 이하(`<= 256K`)일 때는 네이티브 모델 선택기의 `· {cw}` 배지는 유지하면서 노란색 주의 아이콘(`⚠️`)만 숨깁니다.
-- **오프셋 보존(`0` drift) `app.asar` 및 샌드박스 `preload.js` 자동 복구 패처**:
-  - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 원본 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
-  - 트레이에서 이미 실행 중인 프로세스에서 새 창을 열거나 앱이 업데이트된 직후에도 `app_storage.json` 동기화 및 실시간 CDP 주입으로 상태바를 즉시 복구합니다.
-- **원격 제어(Remote Control) 웹 및 모바일 브라우저 완벽 지원 (`https://antigravity.google.com/r/...`)**:
-  - 로컬 HTTP 엔드포인트와 `csrfToken`이 없는 Remote Control 원격 웹 환경에서도 최상위 `<ga-remote-control>` Angular 호스트 셸(`RemoteControlComponent.prototype.proxyCommand`) 및 React Fiber 내부의 WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`)를 자동 브릿지하여 컨텍스트 사용량, 한도 선택, 캐시율, 잔여 쿼터, `[ compact ]`, `[ context ]` 모달이 동일하게 동작합니다.
-  - `dist/statusbar_autoinject.js` 상단에 Tampermonkey/AdGuard용 `// ==UserScript==` 헤더가 포함되어 있으며, 확장프로그램을 지원하지 않는 모바일 크롬에서는 아래 주소창 북마클릿(CSP `nonce` 및 `TrustedTypes` 정책 완벽 대응)으로 즉시 실행할 수 있습니다:
+- **오프셋 보존(`0` drift) `app.asar`, 샌드박스 `preload.js` 및 `language_server` 웹 번들 자동 패처**:
+  - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`, `dist/languageServer.js`의 원본 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
+  - 데스크톱 `language_server` 바이너리에 내장된 Web UI 번들을 `~/.gemini/antigravity/web_bundle`로 자동 추출·동기화하여 `prism_bundle.js`와 `index.html`에 상태바를 사전 주입하고 `--web_bundle_path` 플래그로 서빙합니다.
+  - 트레이에서 이미 실행 중인 프로세스에서 새 창을 열거나 앱이 업데이트된 직후에도 `app_storage.json`·`web_bundle` 동기화 및 실시간 CDP 주입으로 상태바를 즉시 복구합니다.
+- **원격 제어(Remote Control) 웹 및 모바일 브라우저 무조작 자동 지원 (`https://antigravity.google.com/r/...`)**:
+  - **호스트 측 자동 서빙 (모바일 무설치)**: 데스크톱 PC에 한 번 설치(`npm run install-statusbar`)해 두면, 모바일 크롬 등 어떤 브라우저에서든 원격 세션 링크(`https://antigravity.google.com/r/...`)를 열기만 해도 데스크톱 `language_server`가 WebRTC를 통해 패치된 웹 번들을 내려주어 북마클릿이나 확장 프로그램 없이 하단바가 자동으로 나타납니다 (`core.projectManagementService.lsClient` 연동).
+  - 추가로 최상위 `<ga-remote-control>` Angular 호스트 셸 브릿지(`RemoteControlComponent.prototype.proxyCommand`), `dist/statusbar_autoinject.js` 상단 `// ==UserScript==` 헤더, 그리고 모바일 크롬 주소창 북마클릿 수동 실행도 함께 지원합니다:
     ```javascript
     javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
     ```

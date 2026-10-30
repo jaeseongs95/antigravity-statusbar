@@ -24,6 +24,8 @@ const {
   MAIN_ANCHOR_REPLACEMENT,
   PRELOAD_ANCHOR_TARGET,
   PRELOAD_ANCHOR_REPLACEMENT,
+  LS_ANCHOR_TARGET,
+  LS_ANCHOR_REPLACEMENT,
   transformExactSize,
   computeIntegrity,
 } = require('../scripts/ensure_statusbar_patch.js');
@@ -123,9 +125,11 @@ describe('modular architecture & bundle verification', () => {
     assert.equal(pbStats.trajectoryMax, 512000);
     assert.equal(pbStats.cachePct, 88);
 
-    // 4. dom-styles
+    // 4. dom-styles (including BigInt safety for protobuf-es lsClient responses)
     assert.equal(fmtK(12500), '13k');
+    assert.equal(fmtK(147000n), '147k');
     assert.equal(fmtNum(123456), '123,456');
+    assert.equal(fmtNum(98765n), '98,765');
     assert.equal(escHtml('<a>"x"</a>'), '&lt;a&gt;&quot;x&quot;&lt;/a&gt;');
     assert.ok(buildDynamicCwWarnCss(new Set(['200K'])).includes('data-context-window="200K"'));
   });
@@ -443,6 +447,61 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     sandbox.window.__agyStatusBarCleanup();
   });
 
+  it('mounts inside Remote Control Web UI iframe (isRemoteControl: true) via core.projectManagementService.lsClient with protobuf BigInt fields', async () => {
+    const { sandbox, getMountedBar } = createDomSandbox();
+    sandbox.window.__APP_CONFIG__ = { isRemoteControl: true, csrfToken: 'should-not-use-http-fetch' };
+    let fetchCalled = false;
+    sandbox.fetch = async () => {
+      fetchCalled = true;
+      throw new Error('local HTTP fetch should not be called when isRemoteControl is true');
+    };
+    sandbox.window.fetch = sandbox.fetch;
+
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    view.__reactFiber$test.memoizedProps.value.core = {
+      projectManagementService: {
+        lsClient: {
+          retrieveUserQuotaSummary: async () => ({
+            groups: [
+              {
+                displayName: 'Gemini Models',
+                buckets: [
+                  { window: '5h', remainingFraction: 0.87, resetTime: { seconds: 1793851984n } },
+                  { window: 'weekly', remainingFraction: 0.83 },
+                ],
+              },
+            ],
+          }),
+          getCascadeTrajectoryGeneratorMetadata: async () => ({
+            generatorMetadata: [
+              {
+                chatModel: {
+                  chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 147000, maxContextTokens: 512000 } },
+                  usage: { cacheReadTokens: 142000n, inputTokens: 5000n, outputTokens: 800n, thinkingOutputTokens: 200n },
+                },
+              },
+            ],
+          }),
+        },
+      },
+    };
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(fetchCalled, false, 'should skip local HTTP fetch when isRemoteControl is true');
+    const barEl = getMountedBar();
+    assert.ok(barEl);
+    const leftSlot = barEl.querySelector('.agy-ctx-left');
+    const coreNode = leftSlot.querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode.innerHTML.includes('147k'));
+    assert.ok(coreNode.innerHTML.includes('97%'));
+    assert.ok(coreNode.innerHTML.includes('87%'));
+    assert.ok(coreNode.innerHTML.includes('83%'));
+    sandbox.window.__agyStatusBarCleanup();
+  });
+
   it('mounts on antigravity.google.com/r/<uuid> (<ga-remote-control> Angular host shell) via RemoteControlComponent.proxyCommand', async () => {
     const { sandbox } = createDomSandbox();
     delete sandbox.window.__APP_CONFIG__;
@@ -644,6 +703,12 @@ describe('ASAR exact-size transformation', () => {
     assert.equal(patchedPreload.length, fakePreload.length);
     assert.ok(patchedPreload.toString('utf8').startsWith('"use strict";'));
     assert.ok(patchedPreload.toString('utf8').includes(PATCH_MARKER));
+
+    const fakeLs = Buffer.from(`"use strict";\n${commentPadding}\nconst args = [\n${LS_ANCHOR_TARGET}\n`, 'utf8');
+    const patchedLs = transformExactSize(fakeLs, LS_ANCHOR_TARGET, LS_ANCHOR_REPLACEMENT);
+    assert.equal(patchedLs.length, fakeLs.length);
+    assert.ok(patchedLs.toString('utf8').includes(PATCH_MARKER));
+    assert.ok(patchedLs.toString('utf8').includes('--web_bundle_path='));
 
     const integrity = computeIntegrity(patchedPreload);
     assert.equal(integrity.algorithm, 'SHA256');
