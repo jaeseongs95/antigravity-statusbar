@@ -1,7 +1,7 @@
 'use strict';
 
 const { fmtNum, escHtml } = require('../dom-styles');
-const { extractStatsFromMetas } = require('../rpc-client');
+const { getChatModelFromMeta, extractStatsFromMetas } = require('../rpc-client');
 
 function createContextButtonAdapter({
   window,
@@ -80,29 +80,42 @@ function createContextButtonAdapter({
     }
 
     const bodyEl = backdrop.querySelector('#agy-ctx-modal-body');
-    if (!csrf || !cascadeId) {
+    const remoteSvc = hostBridge.getRemoteRpcServiceForElement ? hostBridge.getRemoteRpcServiceForElement(inputBox || view) : null;
+    if (!cascadeId || (!csrf && !remoteSvc)) {
       if (bodyEl) {
-        setHtml(bodyEl, `<div class="agy-ctx-crit">세션 정보(cascadeId 또는 CSRF 토큰)를 찾을 수 없습니다.</div>`);
+        setHtml(bodyEl, `<div class="agy-ctx-crit">세션 정보(cascadeId 또는 RPC 연결)를 찾을 수 없습니다.</div>`);
       }
       return;
     }
 
     try {
       const fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
-      const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-        body: JSON.stringify({ cascadeId, generatorMetadataOffset: fetchOffset }),
-      });
-      const j = await r.json();
-      const metas = j.generatorMetadata || [];
+      let metas = [];
+      if (csrf && typeof fetchFn === 'function') {
+        try {
+          const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+            body: JSON.stringify({ cascadeId, generatorMetadataOffset: fetchOffset }),
+          });
+          if (r && r.ok !== false) {
+            const j = await r.json();
+            metas = j.generatorMetadata || [];
+          }
+        } catch {}
+      }
+      if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function') {
+        const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
+        const allMetas = t?.trajectory?.generatorMetadata || [];
+        metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
+      }
       const parsed = extractStatsFromMetas(metas);
 
       let latestCwm = null;
       let latestSections = [];
       let latestModel = '';
       for (let i = metas.length - 1; i >= 0; i--) {
-        const cm = metas[i]?.chatModel;
+        const cm = getChatModelFromMeta(metas[i]);
         if (!cm) continue;
         if (!latestModel && (cm.modelDisplayName || cm.responseModel || cm.model)) {
           latestModel = cm.modelDisplayName || cm.responseModel || cm.model;
@@ -163,7 +176,7 @@ function createContextButtonAdapter({
       const recentTurns = [];
       for (let i = metas.length - 1; i >= 0 && recentTurns.length < 12; i--) {
         const m = metas[i];
-        const cm = m?.chatModel;
+        const cm = getChatModelFromMeta(m);
         if (!cm) continue;
         const u = cm.usage || {};
         const cwm = cm.chatStartMetadata?.contextWindowMetadata;

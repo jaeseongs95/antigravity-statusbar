@@ -51,6 +51,7 @@ function mountStatusBar(env = {}) {
     fetchFn,
     localStorage: ls,
     getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,
+    getRemoteRpcServiceForElement: hostBridge.getRemoteRpcServiceForElement,
   });
 
   function getConversationContextWindow(view, cascadeId) {
@@ -142,11 +143,11 @@ function mountStatusBar(env = {}) {
     refreshStyles();
     hostBridge.ensureContextWindowSelectorFlag();
     const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
-    if (!csrf) return;
     const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
     if (!views.length) return;
+    if (!csrf && !hostBridge.getRemoteRpcServiceForElement(views[0])) return;
 
-    const quotaPromise = rpcClient.fetchQuota(csrf);
+    const quotaPromise = rpcClient.fetchQuota(csrf, views[0]);
 
     for (const view of views) {
       const cascadeId = view.getAttribute('data-cascade-id');

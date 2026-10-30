@@ -1,3 +1,14 @@
+// ==UserScript==
+// @name         Antigravity Custom Statusbar (Local & Remote Control)
+// @namespace    https://github.com/jaeseongs95/antigravity-statusbar
+// @version      1.3.0
+// @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
+// @match        https://antigravity.google.com/*
+// @match        https://*.antigravity.google.com/*
+// @match        https://127.0.0.1/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
 (() => {
   'use strict';
   const __modules = {
@@ -585,7 +596,13 @@
     function fmtResetTime(iso) {
       if (!iso) return '';
       try {
-        const d = new Date(iso);
+        let d;
+        if (typeof iso === 'object' && iso.seconds !== undefined) {
+          d = new Date(Number(iso.seconds) * 1000);
+        } else {
+          d = new Date(iso);
+        }
+        if (isNaN(d.getTime())) return '';
         const hh = String(d.getHours()).padStart(2, '0');
         const mm = String(d.getMinutes()).padStart(2, '0');
         return `→${hh}:${mm}`;
@@ -615,17 +632,34 @@
     const MAX_CACHE_ENTRIES = 60;
     const STATS_CACHE_KEY = 'agy-stats-cache-v1';
 
+    function getChatModelFromMeta(m) {
+      if (!m) return null;
+      if (m.chatModel) return m.chatModel;
+      if (m.metadata && m.metadata.case === 'chatModel' && m.metadata.value) return m.metadata.value;
+      if (m.metadata && m.metadata.value && (m.metadata.value.chatStartMetadata || m.metadata.value.usage)) return m.metadata.value;
+      return null;
+    }
+
+    function getBucketRemainingFraction(b) {
+      if (!b) return null;
+      if (typeof b.remainingFraction === 'number') return b.remainingFraction;
+      if (b.remaining && b.remaining.case === 'remainingFraction' && typeof b.remaining.value === 'number') {
+        return b.remaining.value;
+      }
+      return null;
+    }
+
     function extractStatsFromMetas(metas) {
       let used = 0, max = 256000, cacheRead = 0, inputTok = 0;
       let foundCtx = false, foundUsage = false;
       for (let i = metas.length - 1; i >= 0; i--) {
-        const cm = metas[i] && metas[i].chatModel;
+        const cm = getChatModelFromMeta(metas[i]);
         if (!cm) continue;
         if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
           const cwm = cm.chatStartMetadata.contextWindowMetadata;
           if (cwm.estimatedTokensUsed) {
-            used = cwm.estimatedTokensUsed;
-            max = cwm.maxContextTokens || 256000;
+            used = Number(cwm.estimatedTokensUsed);
+            max = Number(cwm.maxContextTokens || 256000);
             foundCtx = true;
           }
         }
@@ -641,7 +675,7 @@
       return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, foundCtx, foundUsage };
     }
 
-    function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputBox }) {
+    function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
       const stateCache = new Map();
       const inFlightStats = new Map();
       let inFlightQuota = null;
@@ -670,30 +704,52 @@
         } catch {}
       }
 
-      function fetchQuota(csrf) {
+      function parseQuotaResponse(j) {
+        if (!j) return null;
+        const groups = (j.response && j.response.groups) || j.groups || [];
+        const geminiGroup = groups.find((g) => (g.displayName || g.groupName || '').includes('Gemini')) || groups[0];
+        if (geminiGroup && geminiGroup.buckets) {
+          const b5h = geminiGroup.buckets.find((b) => b.window === '5h');
+          const b7d = geminiGroup.buckets.find((b) => b.window === 'weekly');
+          const frac5h = getBucketRemainingFraction(b5h);
+          const frac7d = getBucketRemainingFraction(b7d);
+          return {
+            pct5h: frac5h !== null ? Math.round(frac5h * 100) : null,
+            rst5h: b5h ? fmtResetTime(b5h.resetTime) : '',
+            pct7d: frac7d !== null ? Math.round(frac7d * 100) : null,
+          };
+        }
+        return null;
+      }
+
+      function fetchQuota(csrf, el) {
         const now = Date.now();
         if (now - lastQuotaFetch < 15000 && quotaData) return Promise.resolve(quotaData);
         if (inFlightQuota) return inFlightQuota;
         lastQuotaFetch = now;
         inFlightQuota = (async () => {
           try {
-            const r = await fetchFn('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-              body: '{}',
-            });
-            const j = await r.json();
-            const groups = (j.response && j.response.groups) || j.groups || [];
-            const geminiGroup = groups.find((g) => (g.displayName || g.groupName || '').includes('Gemini')) || groups[0];
-            if (geminiGroup && geminiGroup.buckets) {
-              const b5h = geminiGroup.buckets.find((b) => b.window === '5h');
-              const b7d = geminiGroup.buckets.find((b) => b.window === 'weekly');
-              quotaData = {
-                pct5h: b5h && typeof b5h.remainingFraction === 'number' ? Math.round(b5h.remainingFraction * 100) : null,
-                rst5h: b5h ? fmtResetTime(b5h.resetTime) : '',
-                pct7d: b7d && typeof b7d.remainingFraction === 'number' ? Math.round(b7d.remainingFraction * 100) : null,
-              };
+            let j = null;
+            if (csrf && typeof fetchFn === 'function') {
+              try {
+                const r = await fetchFn('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+                  body: '{}',
+                });
+                if (r && r.ok !== false) {
+                  j = await r.json();
+                }
+              } catch {}
             }
+            if (!j && typeof getRemoteRpcServiceForElement === 'function') {
+              const svc = getRemoteRpcServiceForElement(el);
+              if (svc && typeof svc.retrieveUserQuotaSummary === 'function') {
+                j = await svc.retrieveUserQuotaSummary({});
+              }
+            }
+            const parsedQuota = parseQuotaResponse(j);
+            if (parsedQuota) quotaData = parsedQuota;
           } catch {}
           inFlightQuota = null;
           return quotaData;
@@ -719,25 +775,45 @@
 
         const promise = (async () => {
           try {
-            const tailOffset = totalGenLen > 3 ? totalGenLen - 3 : 0;
-            const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-              body: JSON.stringify({ cascadeId, generatorMetadataOffset: tailOffset }),
-            });
-            const j = await r.json();
-            const metas = j.generatorMetadata || [];
-            let parsed = extractStatsFromMetas(metas);
+            let parsed = null;
+            if (csrf && typeof fetchFn === 'function') {
+              try {
+                const tailOffset = totalGenLen > 3 ? totalGenLen - 3 : 0;
+                const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+                  body: JSON.stringify({ cascadeId, generatorMetadataOffset: tailOffset }),
+                });
+                if (r && r.ok !== false) {
+                  const j = await r.json();
+                  const metas = j.generatorMetadata || [];
+                  parsed = extractStatsFromMetas(metas);
 
-            if (!parsed.foundCtx && tailOffset > 0) {
-              const widerOffset = Math.max(0, totalGenLen - 15);
-              const r2 = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-                body: JSON.stringify({ cascadeId, generatorMetadataOffset: widerOffset }),
-              });
-              const j2 = await r2.json();
-              parsed = extractStatsFromMetas(j2.generatorMetadata || []);
+                  if (!parsed.foundCtx && tailOffset > 0) {
+                    const widerOffset = Math.max(0, totalGenLen - 15);
+                    const r2 = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+                      body: JSON.stringify({ cascadeId, generatorMetadataOffset: widerOffset }),
+                    });
+                    const j2 = await r2.json();
+                    parsed = extractStatsFromMetas(j2.generatorMetadata || []);
+                  }
+                }
+              } catch {}
+            }
+
+            if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && typeof getRemoteRpcServiceForElement === 'function') {
+              const svc = getRemoteRpcServiceForElement(inputBox);
+              if (svc && typeof svc.getCascadeTrajectory === 'function') {
+                const t = await svc.getCascadeTrajectory({ cascadeId });
+                const metas = t?.trajectory?.generatorMetadata || [];
+                parsed = extractStatsFromMetas(metas);
+              }
+            }
+
+            if (!parsed) {
+              return cached || null;
             }
 
             const data = {
@@ -771,6 +847,7 @@
     }
 
     module.exports = {
+      getChatModelFromMeta,
       extractStatsFromMetas,
       createRpcClient,
     };
@@ -904,6 +981,22 @@
       function getAgentStateProviderForInputBox(inputBox) {
         const cc = getCascadeContextForElement(inputBox);
         return cc?.state?.agentStateProvider || null;
+      }
+
+      function getRemoteRpcServiceForElement(el) {
+        const candidates = [el, document?.querySelector?.('[data-testid="conversation-view"]')].filter(Boolean);
+        for (const startEl of candidates) {
+          const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
+          let curr = fk ? startEl[fk] : null;
+          while (curr) {
+            const val = curr.memoizedProps?.value;
+            if (val && typeof val === 'object' && (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function')) {
+              return val;
+            }
+            curr = curr.return;
+          }
+        }
+        return null;
       }
 
       function getSelectedModelKey(view, cascadeId, infoOpt) {
@@ -1076,6 +1169,7 @@
         getModelSelectorContextForView,
         getCascadeContextForElement,
         getAgentStateProviderForInputBox,
+        getRemoteRpcServiceForElement,
         getSelectedModelKey,
         applyContextWindowToEngine,
         runCompactForInputBox,
@@ -1533,7 +1627,7 @@
     'use strict';
 
     const { fmtNum, escHtml } = require('../dom-styles');
-    const { extractStatsFromMetas } = require('../rpc-client');
+    const { getChatModelFromMeta, extractStatsFromMetas } = require('../rpc-client');
 
     function createContextButtonAdapter({
       window,
@@ -1612,29 +1706,42 @@
         }
 
         const bodyEl = backdrop.querySelector('#agy-ctx-modal-body');
-        if (!csrf || !cascadeId) {
+        const remoteSvc = hostBridge.getRemoteRpcServiceForElement ? hostBridge.getRemoteRpcServiceForElement(inputBox || view) : null;
+        if (!cascadeId || (!csrf && !remoteSvc)) {
           if (bodyEl) {
-            setHtml(bodyEl, `<div class="agy-ctx-crit">세션 정보(cascadeId 또는 CSRF 토큰)를 찾을 수 없습니다.</div>`);
+            setHtml(bodyEl, `<div class="agy-ctx-crit">세션 정보(cascadeId 또는 RPC 연결)를 찾을 수 없습니다.</div>`);
           }
           return;
         }
 
         try {
           const fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
-          const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
-            body: JSON.stringify({ cascadeId, generatorMetadataOffset: fetchOffset }),
-          });
-          const j = await r.json();
-          const metas = j.generatorMetadata || [];
+          let metas = [];
+          if (csrf && typeof fetchFn === 'function') {
+            try {
+              const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+                body: JSON.stringify({ cascadeId, generatorMetadataOffset: fetchOffset }),
+              });
+              if (r && r.ok !== false) {
+                const j = await r.json();
+                metas = j.generatorMetadata || [];
+              }
+            } catch {}
+          }
+          if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function') {
+            const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
+            const allMetas = t?.trajectory?.generatorMetadata || [];
+            metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
+          }
           const parsed = extractStatsFromMetas(metas);
 
           let latestCwm = null;
           let latestSections = [];
           let latestModel = '';
           for (let i = metas.length - 1; i >= 0; i--) {
-            const cm = metas[i]?.chatModel;
+            const cm = getChatModelFromMeta(metas[i]);
             if (!cm) continue;
             if (!latestModel && (cm.modelDisplayName || cm.responseModel || cm.model)) {
               latestModel = cm.modelDisplayName || cm.responseModel || cm.model;
@@ -1695,7 +1802,7 @@
           const recentTurns = [];
           for (let i = metas.length - 1; i >= 0 && recentTurns.length < 12; i--) {
             const m = metas[i];
-            const cm = m?.chatModel;
+            const cm = getChatModelFromMeta(m);
             if (!cm) continue;
             const u = cm.usage || {};
             const cwm = cm.chatStartMetadata?.contextWindowMetadata;
@@ -1848,6 +1955,7 @@
         fetchFn,
         localStorage: ls,
         getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,
+        getRemoteRpcServiceForElement: hostBridge.getRemoteRpcServiceForElement,
       });
 
       function getConversationContextWindow(view, cascadeId) {
@@ -1939,11 +2047,11 @@
         refreshStyles();
         hostBridge.ensureContextWindowSelectorFlag();
         const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
-        if (!csrf) return;
         const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
         if (!views.length) return;
+        if (!csrf && !hostBridge.getRemoteRpcServiceForElement(views[0])) return;
 
-        const quotaPromise = rpcClient.fetchQuota(csrf);
+        const quotaPromise = rpcClient.fetchQuota(csrf, views[0]);
 
         for (const view of views) {
           const cascadeId = view.getAttribute('data-cascade-id');

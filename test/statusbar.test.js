@@ -96,7 +96,7 @@ describe('modular architecture & bundle verification', () => {
     off();
     assert.equal(reg.getAdapters().length, 0);
 
-    // 3. rpc-client metadata parser
+    // 3. rpc-client metadata parser (REST JSON & protobuf-es oneof formats)
     const stats = extractStatsFromMetas([
       {
         chatModel: {
@@ -107,6 +107,21 @@ describe('modular architecture & bundle verification', () => {
     ]);
     assert.equal(stats.used, 64000);
     assert.equal(stats.cachePct, 94);
+
+    const pbStats = extractStatsFromMetas([
+      {
+        metadata: {
+          case: 'chatModel',
+          value: {
+            chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 80000n, maxContextTokens: 512000n } },
+            usage: { cacheReadTokens: 70000n, inputTokens: 10000n },
+          },
+        },
+      },
+    ]);
+    assert.equal(pbStats.used, 80000);
+    assert.equal(pbStats.trajectoryMax, 512000);
+    assert.equal(pbStats.cachePct, 88);
 
     // 4. dom-styles
     assert.equal(fmtK(12500), '13k');
@@ -378,6 +393,54 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.equal(typeof sandbox.window.__agyStatusBarCleanup, 'function');
     sandbox.window.__agyStatusBarCleanup();
     assert.equal(sandbox.window.__agyStatusBarActiveVersion, undefined);
+  });
+
+  it('mounts and fetches stats/quota in Remote Control web mode (no csrfToken) via React Fiber RPC service', async () => {
+    const { sandbox, getMountedBar } = createDomSandbox();
+    delete sandbox.window.__APP_CONFIG__;
+
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    view.__reactFiber$test.memoizedProps.value.retrieveUserQuotaSummary = async () => ({
+      response: {
+        groups: [
+          {
+            displayName: 'Gemini Models',
+            buckets: [
+              { window: '5h', remaining: { case: 'remainingFraction', value: 0.72 }, resetTime: { seconds: 1793332083 } },
+              { window: 'weekly', remaining: { case: 'remainingFraction', value: 0.9 } },
+            ],
+          },
+        ],
+      },
+    });
+    view.__reactFiber$test.memoizedProps.value.getCascadeTrajectory = async () => ({
+      trajectory: {
+        generatorMetadata: [
+          {
+            metadata: {
+              case: 'chatModel',
+              value: {
+                chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 51200, maxContextTokens: 256000 } },
+                usage: { cacheReadTokens: 45000, inputTokens: 5000 },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    await new Promise((r) => setTimeout(r, 25));
+
+    const barEl = getMountedBar();
+    assert.ok(barEl, 'statusbar should mount even without csrfToken when Remote Control service is in Fiber');
+    const leftSlot = barEl.querySelector('.agy-ctx-left');
+    const coreNode = leftSlot.querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode.innerHTML.includes('51k'));
+    assert.ok(coreNode.innerHTML.includes('90%'));
+    assert.ok(coreNode.innerHTML.includes('72%'));
+    sandbox.window.__agyStatusBarCleanup();
   });
 });
 

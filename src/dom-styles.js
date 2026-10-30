@@ -357,7 +357,13 @@ function escHtml(s) {
 function fmtResetTime(iso) {
   if (!iso) return '';
   try {
-    const d = new Date(iso);
+    let d;
+    if (typeof iso === 'object' && iso.seconds !== undefined) {
+      d = new Date(Number(iso.seconds) * 1000);
+    } else {
+      d = new Date(iso);
+    }
+    if (isNaN(d.getTime())) return '';
     const hh = String(d.getHours()).padStart(2, '0');
     const mm = String(d.getMinutes()).padStart(2, '0');
     return `→${hh}:${mm}`;

@@ -49,7 +49,21 @@ function buildBundle() {
     );
   }
 
+  const header =
+    `// ==UserScript==\n` +
+    `// @name         Antigravity Custom Statusbar (Local & Remote Control)\n` +
+    `// @namespace    https://github.com/jaeseongs95/antigravity-statusbar\n` +
+    `// @version      1.3.0\n` +
+    `// @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.\n` +
+    `// @match        https://antigravity.google.com/*\n` +
+    `// @match        https://*.antigravity.google.com/*\n` +
+    `// @match        https://127.0.0.1/*\n` +
+    `// @grant        none\n` +
+    `// @run-at       document-idle\n` +
+    `// ==/UserScript==\n`;
+
   const bundle =
+    header +
     `(() => {\n` +
     `  'use strict';\n` +
     `  const __modules = {\n` +

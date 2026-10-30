@@ -126,6 +126,22 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
     return cc?.state?.agentStateProvider || null;
   }
 
+  function getRemoteRpcServiceForElement(el) {
+    const candidates = [el, document?.querySelector?.('[data-testid="conversation-view"]')].filter(Boolean);
+    for (const startEl of candidates) {
+      const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
+      let curr = fk ? startEl[fk] : null;
+      while (curr) {
+        const val = curr.memoizedProps?.value;
+        if (val && typeof val === 'object' && (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function')) {
+          return val;
+        }
+        curr = curr.return;
+      }
+    }
+    return null;
+  }
+
   function getSelectedModelKey(view, cascadeId, infoOpt) {
     const info = infoOpt || getModelSelectorContextForView(view);
     const state = info?.reduxStore ? info.reduxStore.getState() : null;
@@ -296,6 +312,7 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
     getModelSelectorContextForView,
     getCascadeContextForElement,
     getAgentStateProviderForInputBox,
+    getRemoteRpcServiceForElement,
     getSelectedModelKey,
     applyContextWindowToEngine,
     runCompactForInputBox,
