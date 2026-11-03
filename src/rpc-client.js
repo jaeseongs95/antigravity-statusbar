@@ -48,13 +48,19 @@ function extractStatsFromMetas(metas) {
   return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, foundCtx, foundUsage };
 }
 
-function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
+function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
   const stateCache = new Map();
   const inFlightStats = new Map();
   const knownGenLenMap = new Map();
   let inFlightQuota = null;
   let quotaData = null;
   let lastQuotaFetch = 0;
+
+  function canUseLocalHttp(csrf) {
+    const win = window || (typeof globalThis !== 'undefined' ? globalThis.window : null);
+    if (win?.__APP_CONFIG__?.isRemoteControl) return false;
+    return Boolean(csrf && typeof fetchFn === 'function');
+  }
 
   try {
     const rawCache = localStorage?.getItem(STATS_CACHE_KEY);
@@ -109,7 +115,7 @@ function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputB
     inFlightQuota = (async () => {
       try {
         let j = null;
-        if (csrf && typeof fetchFn === 'function') {
+        if (canUseLocalHttp(csrf)) {
           try {
             const r = await fetchFn('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
               method: 'POST',
@@ -200,7 +206,7 @@ function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputB
         let parsed = null;
         let discoveredGenLen = knownGenLen;
 
-        if (csrf && typeof fetchFn === 'function') {
+        if (canUseLocalHttp(csrf)) {
           try {
             const callLocal = async (offset) => {
               const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {

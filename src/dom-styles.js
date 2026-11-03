@@ -298,9 +298,24 @@ const STYLE_CSS = `
     .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
       text-align: right;
     }
+    ga-remote-control {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    ga-remote-control .app-container {
+      display: flex !important;
+      flex-direction: column !important;
+      height: 100vh !important;
+      height: 100dvh !important;
+      max-height: 100dvh !important;
+      overflow: hidden !important;
+      box-sizing: border-box !important;
+    }
     ga-remote-control .iframe-panel {
       min-height: 0 !important;
       flex: 1 1 0% !important;
+      overflow: hidden !important;
     }
     .agy-rc-host-view {
       flex-shrink: 0;
@@ -430,15 +445,18 @@ function createTrustedHtmlSetter(window, document) {
 }
 
 function fmtK(n) {
-  if (!n || isNaN(n)) return '0';
-  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + 'M';
-  if (n >= 1000) return Math.round(n / 1000) + 'k';
-  return String(n);
+  const num = Number(n);
+  if (!num || isNaN(num)) return '0';
+  if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
+  if (num >= 1000) return Math.round(num / 1000) + 'k';
+  return String(num);
 }
 
 function fmtNum(n) {
-  if (n === null || n === undefined || isNaN(n)) return '0';
-  return Number(n).toLocaleString('en-US');
+  if (n === null || n === undefined) return '0';
+  const num = Number(n);
+  if (isNaN(num)) return '0';
+  return num.toLocaleString('en-US');
 }
 
 function escHtml(s) {

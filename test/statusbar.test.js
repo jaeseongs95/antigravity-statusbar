@@ -623,6 +623,76 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
 
     sandbox.window.__agyStatusBarCleanup();
   });
+
+  it('skips local HTTP fetch when isRemoteControl is true and handles Protobuf BigInt metrics + lsClient in Same-Origin remote iframe', async () => {
+    const { sandbox, getMountedBar } = createDomSandbox();
+    sandbox.window.__APP_CONFIG__ = {
+      productName: 'antigravity',
+      csrfToken: 'csrf_token',
+      isRemoteControl: true,
+    };
+
+    let localHttpCalled = false;
+    sandbox.fetch = async () => {
+      localHttpCalled = true;
+      throw new Error('local HTTP fetch should not be called when isRemoteControl is true');
+    };
+    sandbox.window.fetch = sandbox.fetch;
+
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    view.__reactFiber$test.memoizedProps.value.core = {
+      projectManagementService: {
+        lsClient: {
+          retrieveUserQuotaSummary: async () => ({
+            response: {
+              groups: [
+                {
+                  displayName: 'Gemini',
+                  buckets: [
+                    { window: '5h', remainingFraction: 0.65, resetTime: { seconds: 1793332083n } },
+                    { window: 'weekly', remainingFraction: 0.88 },
+                  ],
+                },
+              ],
+            },
+          }),
+          getCascadeTrajectoryGeneratorMetadata: async () => ({
+            generatorMetadata: [
+              {
+                chatModel: {
+                  chatStartMetadata: {
+                    contextWindowMetadata: {
+                      estimatedTokensUsed: 64000n,
+                      maxContextTokens: 256000n,
+                    },
+                  },
+                  usage: {
+                    cacheReadTokens: 60000n,
+                    inputTokens: 4000n,
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      },
+    };
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(localHttpCalled, false, 'should bypass local HTTP fetch when isRemoteControl is true');
+    const barEl = getMountedBar();
+    assert.ok(barEl);
+    const leftSlot = barEl.querySelector('.agy-ctx-left');
+    const coreNode = leftSlot.querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode.innerHTML.includes('64k'), 'should render BigInt token usage without TypeError');
+    assert.ok(coreNode.innerHTML.includes('94%'), 'should compute cache hit rate from BigInt values');
+    assert.ok(coreNode.innerHTML.includes('65%'), 'should render quota summary from core.projectManagementService.lsClient');
+
+    sandbox.window.__agyStatusBarCleanup();
+  });
 });
 
 describe('ASAR exact-size transformation', () => {

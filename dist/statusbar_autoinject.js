@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.3
+// @version      1.3.4
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -537,9 +537,24 @@
         .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
           text-align: right;
         }
+        ga-remote-control {
+          display: block;
+          width: 100%;
+          height: 100%;
+        }
+        ga-remote-control .app-container {
+          display: flex !important;
+          flex-direction: column !important;
+          height: 100vh !important;
+          height: 100dvh !important;
+          max-height: 100dvh !important;
+          overflow: hidden !important;
+          box-sizing: border-box !important;
+        }
         ga-remote-control .iframe-panel {
           min-height: 0 !important;
           flex: 1 1 0% !important;
+          overflow: hidden !important;
         }
         .agy-rc-host-view {
           flex-shrink: 0;
@@ -669,15 +684,18 @@
     }
 
     function fmtK(n) {
-      if (!n || isNaN(n)) return '0';
-      if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + 'M';
-      if (n >= 1000) return Math.round(n / 1000) + 'k';
-      return String(n);
+      const num = Number(n);
+      if (!num || isNaN(num)) return '0';
+      if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
+      if (num >= 1000) return Math.round(num / 1000) + 'k';
+      return String(num);
     }
 
     function fmtNum(n) {
-      if (n === null || n === undefined || isNaN(n)) return '0';
-      return Number(n).toLocaleString('en-US');
+      if (n === null || n === undefined) return '0';
+      const num = Number(n);
+      if (isNaN(num)) return '0';
+      return num.toLocaleString('en-US');
     }
 
     function escHtml(s) {
@@ -770,13 +788,19 @@
       return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, foundCtx, foundUsage };
     }
 
-    function createRpcClient({ fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
+    function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
       const stateCache = new Map();
       const inFlightStats = new Map();
       const knownGenLenMap = new Map();
       let inFlightQuota = null;
       let quotaData = null;
       let lastQuotaFetch = 0;
+
+      function canUseLocalHttp(csrf) {
+        const win = window || (typeof globalThis !== 'undefined' ? globalThis.window : null);
+        if (win?.__APP_CONFIG__?.isRemoteControl) return false;
+        return Boolean(csrf && typeof fetchFn === 'function');
+      }
 
       try {
         const rawCache = localStorage?.getItem(STATS_CACHE_KEY);
@@ -831,7 +855,7 @@
         inFlightQuota = (async () => {
           try {
             let j = null;
-            if (csrf && typeof fetchFn === 'function') {
+            if (canUseLocalHttp(csrf)) {
               try {
                 const r = await fetchFn('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
                   method: 'POST',
@@ -922,7 +946,7 @@
             let parsed = null;
             let discoveredGenLen = knownGenLen;
 
-            if (csrf && typeof fetchFn === 'function') {
+            if (canUseLocalHttp(csrf)) {
               try {
                 const callLocal = async (offset) => {
                   const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
@@ -1089,36 +1113,91 @@
         }
       } catch {}
 
+      try {
+        if (window && !window.__agyLsClientDecoratorHooked) {
+          window.__agyLsClientDecoratorHooked = true;
+          const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
+          window.__JETSKI_LS_CLIENT_DECORATOR__ = function (client) {
+            const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
+            if (decorated && typeof decorated === 'object') {
+              window.__agyCapturedLsClient = decorated;
+            }
+            return decorated;
+          };
+        }
+      } catch {}
+
+      function getAccessibleRemoteIframeDoc() {
+        try {
+          const iframe = document?.querySelector?.('ga-remote-control iframe');
+          const cdoc = iframe?.contentDocument || iframe?.contentWindow?.document;
+          return cdoc || null;
+        } catch {
+          return null;
+        }
+      }
+
+      function resolveEffectiveView(view) {
+        if (view && view.classList?.contains?.('agy-rc-host-view')) {
+          const cdoc = getAccessibleRemoteIframeDoc();
+          if (cdoc) {
+            const cid = view.getAttribute('data-cascade-id');
+            if (cid && cid !== 'remote-session') {
+              const exact = cdoc.querySelector(`[data-testid="conversation-view"][data-cascade-id="${cid}"]`);
+              if (exact) return exact;
+            }
+            const anyView = cdoc.querySelector('[data-testid="conversation-view"]');
+            if (anyView) return anyView;
+          }
+        }
+        return view;
+      }
+
+      function resolveEffectiveInputBox(inputBox) {
+        if (inputBox && inputBox.classList?.contains?.('agy-rc-host-box')) {
+          const cdoc = getAccessibleRemoteIframeDoc();
+          if (cdoc) {
+            const innerBox = cdoc.querySelector('[data-testid="agent-input-box"]');
+            if (innerBox) return innerBox;
+          }
+        }
+        return inputBox;
+      }
+
       function ensureContextWindowSelectorFlag() {
         if (!document) return;
-        const views = document.querySelectorAll('[data-testid="conversation-view"]');
-        for (const view of views) {
-          const fk = Object.keys(view).find((k) => k.startsWith('__reactFiber$'));
-          let fiber = fk ? view[fk] : null;
-          while (fiber) {
-            const val = fiber.memoizedProps?.value;
-            if (val && typeof val === 'object' && typeof val.get === 'function') {
-              if (!val.__cwsPatched) {
-                const origGet = val.get;
-                val.get = function (name) {
-                  if (name === 'contextWindowSelector') {
-                    return { enabled: true, feature: { enabled: true } };
-                  }
-                  return origGet.apply(this, arguments);
-                };
-                val.__cwsPatched = true;
+        const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
+        for (const d of docs) {
+          const views = d.querySelectorAll('[data-testid="conversation-view"]');
+          for (const view of views) {
+            const fk = Object.keys(view).find((k) => k.startsWith('__reactFiber$'));
+            let fiber = fk ? view[fk] : null;
+            while (fiber) {
+              const val = fiber.memoizedProps?.value;
+              if (val && typeof val === 'object' && typeof val.get === 'function') {
+                if (!val.__cwsPatched) {
+                  const origGet = val.get;
+                  val.get = function (name) {
+                    if (name === 'contextWindowSelector') {
+                      return { enabled: true, feature: { enabled: true } };
+                    }
+                    return origGet.apply(this, arguments);
+                  };
+                  val.__cwsPatched = true;
+                }
               }
+              fiber = fiber.return;
             }
-            fiber = fiber.return;
           }
         }
       }
 
       function getModelSelectorContextForView(view) {
         ensureContextWindowSelectorFlag();
-        if (!view) return null;
-        const triggerEl = view.querySelector('[data-testid="model-selector-trigger"]');
-        const startEl = triggerEl || view;
+        const effView = resolveEffectiveView(view);
+        if (!effView) return null;
+        const triggerEl = effView.querySelector('[data-testid="model-selector-trigger"]');
+        const startEl = triggerEl || effView;
         const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
         let fiber = fk ? startEl[fk] : null;
         let msCtx = null;
@@ -1143,9 +1222,10 @@
       }
 
       function getCascadeContextForElement(el) {
-        if (!el) return null;
-        const fk = Object.keys(el).find((k) => k.startsWith('__reactFiber$'));
-        let curr = fk ? el[fk] : null;
+        const effEl = resolveEffectiveInputBox(resolveEffectiveView(el));
+        if (!effEl) return null;
+        const fk = Object.keys(effEl).find((k) => k.startsWith('__reactFiber$'));
+        let curr = fk ? effEl[fk] : null;
         while (curr) {
           const val = curr.memoizedProps?.value;
           if (val?.cascadeContext?.state?.agentStateProvider) {
@@ -1381,6 +1461,15 @@
         const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
         let activeCid = window.__agySniffedCascadeId || '';
         if (!activeCid) {
+          const cdoc = getAccessibleRemoteIframeDoc();
+          const innerView = cdoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+          const innerCid = innerView?.getAttribute?.('data-cascade-id');
+          if (innerCid && UUID_RE.test(innerCid) && innerCid !== ignoreUuid) {
+            activeCid = innerCid;
+            window.__agySniffedCascadeId = innerCid;
+          }
+        }
+        if (!activeCid) {
           const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
           const m = String(childPath).match(UUID_RE);
           if (m && m[0] && m[0] !== ignoreUuid) activeCid = m[0];
@@ -1458,14 +1547,35 @@
       }
 
       function getRemoteRpcServiceForElement(el) {
-        const candidates = [el, document?.querySelector?.('[data-testid="conversation-view"]')].filter(Boolean);
+        if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
+          return window.__agyCapturedLsClient;
+        }
+        try {
+          const cwin = document?.querySelector?.('ga-remote-control iframe')?.contentWindow;
+          if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
+            return cwin.__agyCapturedLsClient;
+          }
+        } catch {}
+        const cdoc = getAccessibleRemoteIframeDoc();
+        const candidates = [
+          resolveEffectiveInputBox(resolveEffectiveView(el)),
+          el,
+          document?.querySelector?.('[data-testid="conversation-view"]'),
+          cdoc?.querySelector?.('[data-testid="conversation-view"]'),
+        ].filter(Boolean);
         for (const startEl of candidates) {
           const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
           let curr = fk ? startEl[fk] : null;
           while (curr) {
             const val = curr.memoizedProps?.value;
-            if (val && typeof val === 'object' && (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function')) {
-              return val;
+            if (val && typeof val === 'object') {
+              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function') {
+                return val;
+              }
+              const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
+              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function')) {
+                return lsClient;
+              }
             }
             curr = curr.return;
           }
@@ -1474,6 +1584,13 @@
         if (rcInst && typeof rcInst.proxyCommand === 'function') {
           return createRcServiceAdapter(rcInst);
         }
+        try {
+          const parentWin = window?.parent !== window ? window?.parent : null;
+          const pRc = parentWin?.__agyRemoteControlInstance;
+          if (pRc && !pRc.destroyed && typeof pRc.proxyCommand === 'function') {
+            return createRcServiceAdapter(pRc);
+          }
+        } catch {}
         return null;
       }
 
@@ -1590,14 +1707,15 @@
       }
 
       async function runCompactForInputBox(inputBox) {
-        if (!inputBox) return;
-        const editable = inputBox.querySelector('[contenteditable="true"]');
+        const effBox = resolveEffectiveInputBox(inputBox);
+        if (!effBox) return;
+        const editable = effBox.querySelector('[contenteditable="true"]');
         if (!editable || !editable.__lexicalEditor) {
-          const rcInst = getRemoteControlInstance();
-          const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
-          if (rcInst && cid && cid !== 'remote-session') {
+          const svc = getRemoteRpcServiceForElement(effBox);
+          const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id') || effBox.closest?.('[data-cascade-id]')?.getAttribute?.('data-cascade-id');
+          if (svc && typeof svc.sendUserCascadeMessage === 'function' && cid && cid !== 'remote-session') {
             try {
-              await createRcServiceAdapter(rcInst).sendUserCascadeMessage({
+              await svc.sendUserCascadeMessage({
                 cascadeId: cid,
                 items: [
                   {
@@ -1660,7 +1778,7 @@
           const Evt = typeof KeyboardEvent === 'function' ? KeyboardEvent : function (t, o) { Object.assign(this, o, { type: t }); };
           await curr.memoizedProps.handleEnter(new Evt('keydown', { key: 'Enter' }), ed);
         } else {
-          const sendBtn = inputBox.querySelector('[data-testid="send-button"]');
+          const sendBtn = effBox.querySelector('[data-testid="send-button"]');
           if (sendBtn && !sendBtn.disabled) sendBtn.click();
         }
       }
@@ -2220,7 +2338,7 @@
         try {
           let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
           let metas = [];
-          if (csrf && typeof fetchFn === 'function') {
+          if (csrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function') {
             try {
               const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
                 method: 'POST',
@@ -2437,7 +2555,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v10';
+    const STATUSBAR_VERSION = 'v11';
 
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -2476,6 +2594,7 @@
       });
 
       const rpcClient = createRpcClient({
+        window: win,
         fetchFn,
         localStorage: ls,
         getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,
