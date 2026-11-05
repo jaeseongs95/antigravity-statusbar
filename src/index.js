@@ -1,6 +1,6 @@
 'use strict';
 
-const { CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
+const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
 const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
 const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
 const { createRpcClient } = require('./rpc-client');
@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v13';
+const STATUSBAR_VERSION = 'v14';
 
 function mountStatusBar(env = {}) {
   const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -25,7 +25,6 @@ function mountStatusBar(env = {}) {
   if (win.__agyStatusBarCleanup) {
     try { win.__agyStatusBarCleanup(); } catch {}
   }
-  win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
 
   const underDefaultCwSet = new Set(['128K', '256K']);
   const refreshStyles = () => ensureStyleElement(doc, underDefaultCwSet);
@@ -44,10 +43,12 @@ function mountStatusBar(env = {}) {
     },
     onSaveCw: (cid) => {
       if (hostBridge && typeof hostBridge.pushSessionCwToServer === 'function') {
+        const targetView = (cid && doc.querySelector?.(`[data-testid="conversation-view"][data-cascade-id="${cid}"]`))
+          || doc.querySelector?.('[data-testid="conversation-view"]');
         hostBridge.pushSessionCwToServer(
           cid,
           win.__APP_CONFIG__?.csrfToken,
-          doc.querySelector?.('[data-testid="conversation-view"]')
+          targetView
         );
       }
     },
@@ -175,18 +176,24 @@ function mountStatusBar(env = {}) {
       const inputBox = view.querySelector('[data-testid="agent-input-box"]');
       if (!cascadeId || !inputBox) continue;
 
+      if (view.__lastTrackedCascadeId !== cascadeId) {
+        view.__lastTrackedCascadeId = cascadeId;
+        view.__lastObservedDomCw = null;
+        view.__lastAppliedTargetCw = null;
+        view.__ignoreDomCwUntil = Date.now() + 500;
+      }
+
       const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
       const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
       const canAdoptFromDom = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
-      if (canAdoptFromDom && domCw && CONTEXT_WINDOWS.includes(domCw) && view.__lastObservedDomCw && view.__lastObservedDomCw !== domCw) {
+      if (canAdoptFromDom && domCw && PRESET_CONTEXT_WINDOWS.includes(domCw) && view.__lastObservedDomCw && view.__lastObservedDomCw !== domCw) {
         const savedCw = cwStore.getSavedContextWindow(cascadeId);
         if (domCw !== savedCw && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
           cwStore.saveContextWindowSetting(cascadeId, domCw);
         }
       }
 
-      const targetCw = cwStore.getSavedContextWindow(cascadeId);
-      hostBridge.applyContextWindowToEngine(view, cascadeId, targetCw);
+      const targetCw = getConversationContextWindow(view, cascadeId);
       view.__lastAppliedTargetCw = targetCw;
       if (triggerEl && canAdoptFromDom) {
         view.__lastObservedDomCw = triggerEl.getAttribute('data-context-window') || targetCw;
@@ -245,8 +252,12 @@ function mountStatusBar(env = {}) {
     for (const view of views) {
       const cid = view.getAttribute('data-cascade-id');
       const box = view.querySelector('[data-testid="agent-input-box"]');
-      if (box && (!box.querySelector('.agy-ctx-statusbar') || box.__lastCascadeId !== cid)) {
+      if (box && (!box.querySelector('.agy-ctx-statusbar') || box.__lastCascadeId !== cid || view.__lastTrackedCascadeId !== cid)) {
         box.__lastCascadeId = cid;
+        view.__lastTrackedCascadeId = cid;
+        view.__lastObservedDomCw = null;
+        view.__lastAppliedTargetCw = null;
+        view.__ignoreDomCwUntil = Date.now() + 500;
         updateAll();
         return;
       }
@@ -256,9 +267,10 @@ function mountStatusBar(env = {}) {
         const expected = cwStore.getSavedContextWindow(cid);
         const model = hostBridge.getSelectedModelKey(view, cid);
         const expectedKey = (model || '') + ':' + String(expected);
-        if (actual !== expected && win.__agyLastAppliedContextWindow !== expectedKey) {
+        const lastByCid = win.__agyLastAppliedContextWindowByCascade?.[cid];
+        if (actual !== expected && lastByCid !== expectedKey && win.__agyLastAppliedContextWindow !== expectedKey) {
           const canAdopt = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
-          if (canAdopt && CONTEXT_WINDOWS.includes(actual) && view.__lastObservedDomCw && view.__lastObservedDomCw !== actual && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
+          if (canAdopt && PRESET_CONTEXT_WINDOWS.includes(actual) && view.__lastObservedDomCw && view.__lastObservedDomCw !== actual && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
             cwStore.saveContextWindowSetting(cid, actual);
             view.__lastAppliedTargetCw = actual;
             view.__lastObservedDomCw = actual;
@@ -299,6 +311,7 @@ function mountStatusBar(env = {}) {
     const hostViews = doc.querySelectorAll('.agy-rc-host-view');
     for (const hv of hostViews) hv.remove();
   };
+  win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
 
   return win.agyStatusBar;
 }

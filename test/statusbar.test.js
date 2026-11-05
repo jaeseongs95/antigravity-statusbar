@@ -614,6 +614,19 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.equal(hostViewEl.getAttribute('data-cascade-id'), '1f3f7633-f0b7-4fc7-a958-9fb667c85623');
     assert.ok(coreNode.innerHTML.includes('245k'), 'switching session via StreamAgentStateUpdates should update context stats immediately');
 
+    // Set custom context window on switched session and simulate >15s idle polling: must NOT revert to latestId (e0b9092d-...)
+    api.setConversationContextWindow(hostViewEl, '1f3f7633-f0b7-4fc7-a958-9fb667c85623', '600K');
+    sandbox.window.__agySniffedCascadeTs = Date.now() - 25000;
+    api.updateAll();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(
+      hostViewEl.getAttribute('data-cascade-id'),
+      '1f3f7633-f0b7-4fc7-a958-9fb667c85623',
+      'polling after 15s must not overwrite active switched session with latestId'
+    );
+    assert.equal(api.getConversationContextWindow(hostViewEl, '1f3f7633-f0b7-4fc7-a958-9fb667c85623'), '600K');
+    assert.equal(api.getConversationContextWindow(hostViewEl, 'e0b9092d-4949-4a25-9c5d-0afdfd030c10'), '512K');
+
     const rightSlot = hostBarEl.querySelector('.agy-ctx-right');
     const compactBtn = rightSlot.querySelector('[data-agy-adapter-id="compact"]');
     await compactBtn.onclick({ preventDefault() {}, stopPropagation() {} });
@@ -785,6 +798,144 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(annotationUpdates.length >= 1, 'changing context window should call UpdateConversationAnnotations');
     assert.deepEqual(annotationUpdates[annotationUpdates.length - 1].cascadeIds, [cid]);
     assert.ok(String(annotationUpdates[annotationUpdates.length - 1].annotations.activeProfile).startsWith('256K|'));
+
+    sandbox.window.__agyStatusBarCleanup();
+  });
+
+  it('preserves independent per-session context windows across session switches, 1-arg msCtx wrapper, and mobile 15s polling', async () => {
+    const { sandbox, triggerEl } = createDomSandbox();
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+
+    let currentCascadeId = 'session-alpha';
+    view.getAttribute = (k) => (k === 'data-cascade-id' ? currentCascadeId : null);
+    view.setAttribute = (k, v) => {
+      if (k === 'data-cascade-id') currentCascadeId = String(v);
+    };
+
+    const reduxState = {
+      modelSelection: {
+        default: { model: 1418, contextWindow: '256K' },
+        byConversation: {
+          'session-alpha': { model: 1418, contextWindow: '256K' },
+          'session-beta': { model: 1418, contextWindow: '256K' },
+        },
+      },
+      userStatus: Object.freeze({
+        cascadeModelConfigData: Object.freeze({
+          clientModelConfigs: Object.freeze([
+            Object.freeze({ label: 'Gemini 4 Argon (Medium)', value: 1418, contextWindowOptions: Object.freeze([]) }),
+          ]),
+        }),
+      }),
+    };
+
+    const dispatchedActions = [];
+    const reduxStore = {
+      getState: () => reduxState,
+      dispatch(action) {
+        dispatchedActions.push(action);
+        if (action.type === 'userStatus/setUserStatus') {
+          reduxState.userStatus = action.payload;
+        }
+        if (action.type === 'modelSelection/modelPicked') {
+          const { conversationId, model, customLabel, contextWindow } = action.payload;
+          if (conversationId) {
+            reduxState.modelSelection.byConversation[conversationId] = {
+              model,
+              customLabel,
+              contextWindow,
+            };
+          } else {
+            reduxState.modelSelection.default = {
+              model,
+              customLabel,
+              contextWindow,
+            };
+          }
+        }
+      },
+    };
+
+    const buildBindingsProviderVal = {
+      corpHost: undefined,
+      cider: undefined,
+      contextWindow: undefined,
+    };
+
+    // Simulate Antigravity 2.0 where jtc.Provider wraps setSelectedModel with 1-arg `m => { b(m); c(!1) }`
+    // and contextWindow is initially undefined
+    const selectedModelObj = { value: 1418, label: 'Gemini 4 Argon (Medium)' };
+    triggerEl.__reactFiber$test = {
+      memoizedProps: {
+        value: {
+          selectedModel: selectedModelObj,
+          // 1-arg wrapper that ignores 2nd arg (targetCw)
+          setSelectedModel(m) {
+            reduxStore.dispatch({
+              type: 'modelSelection/modelPicked',
+              payload: { conversationId: currentCascadeId, model: m.value, contextWindow: '256K' },
+            });
+          },
+          contextWindow: undefined,
+        },
+      },
+      return: {
+        memoizedProps: {
+          value: buildBindingsProviderVal,
+        },
+        return: {
+          memoizedProps: {
+            value: { store: reduxStore },
+          },
+          return: null,
+        },
+      },
+    };
+    view.__reactFiber$test = triggerEl.__reactFiber$test;
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+
+    // 1. Set session-alpha to 384K and session-beta to 750K
+    api.setConversationContextWindow(view, 'session-alpha', '384K');
+    api.setConversationContextWindow(view, 'session-beta', '750K');
+
+    assert.equal(reduxState.modelSelection.byConversation['session-alpha'].contextWindow, '384K', 'Redux byConversation for session-alpha must be 384K despite 1-arg setSelectedModel wrapper');
+    assert.equal(reduxState.modelSelection.byConversation['session-beta'].contextWindow, '750K', 'Redux byConversation for session-beta must be 750K');
+    assert.ok(buildBindingsProviderVal.contextWindow && typeof buildBindingsProviderVal.contextWindow === 'object', 'buildBindings contextWindow should be enabled');
+    assert.ok(Array.isArray(selectedModelObj.contextWindowOptions) && selectedModelObj.contextWindowOptions.some((o) => o.name === '384K'), 'selectedModel.contextWindowOptions should include custom 384K option');
+    assert.ok(
+      reduxState.userStatus.cascadeModelConfigData.clientModelConfigs[0].contextWindowOptions.some((o) => o.name === '384K'),
+      'frozen Redux clientModelConfigs should be updated via userStatus/setUserStatus without TypeError'
+    );
+
+    // 2. Render session-alpha first, then switch the same view element to session-beta where React initially renders data-context-window="256K"
+    currentCascadeId = 'session-alpha';
+    api.updateAll();
+    assert.equal(triggerEl.getAttribute('data-context-window'), '384K');
+
+    // Simulate switching tab/session in the same view: React resets DOM attribute to "256K" before statusbar runs
+    currentCascadeId = 'session-beta';
+    triggerEl.setAttribute('data-context-window', '256K');
+    api.updateAll();
+
+    assert.equal(
+      api.getConversationContextWindow(view, 'session-beta'),
+      '750K',
+      'switching session must NOT overwrite session-beta saved 750K with React initial 256K'
+    );
+    assert.equal(triggerEl.getAttribute('data-context-window'), '750K');
+    assert.equal(reduxState.modelSelection.byConversation['session-beta'].contextWindow, '750K');
+
+    // Switch back to session-alpha -> triggerEl and statusbar must reflect 384K
+    currentCascadeId = 'session-alpha';
+    api.updateAll();
+    assert.equal(triggerEl.getAttribute('data-context-window'), '384K');
+    assert.equal(api.getConversationContextWindow(view, 'session-alpha'), '384K');
+
+    // 3. Verify mobile migrateSessionOverride ('remote-session' -> resolved UUID)
+    api.setConversationContextWindow(view, 'remote-session', '640K');
+    assert.equal(api.getConversationContextWindow(view, 'remote-session'), '640K');
 
     sandbox.window.__agyStatusBarCleanup();
   });

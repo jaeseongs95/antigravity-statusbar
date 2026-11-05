@@ -1,5 +1,7 @@
 'use strict';
 
+const { PRESET_CONTEXT_WINDOWS } = require('./context-window-policy');
+
 const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
 
 function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
@@ -153,29 +155,131 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     return inputBox;
   }
 
-  function ensureContextWindowSelectorFlag() {
+  function ensureModelContextWindowOptions(modelObj, extraCw) {
+    if (!modelObj || typeof modelObj !== 'object') return modelObj;
+    const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
+    const existingNames = new Set(
+      curArr.map((o) => o && o.name).filter(Boolean)
+    );
+    const wanted = [...PRESET_CONTEXT_WINDOWS];
+    if (extraCw && !wanted.includes(extraCw)) {
+      wanted.push(extraCw);
+    }
+    const toAdd = [];
+    for (const cw of wanted) {
+      if (!existingNames.has(cw)) {
+        const limit = cwStore ? cwStore.getLimit(cw) : 256000;
+        const hint = cwStore ? cwStore.getQuotaHint(cw) : cw;
+        toAdd.push({
+          name: cw,
+          description: hint,
+          expensive: limit > 256000,
+        });
+        existingNames.add(cw);
+      }
+    }
+    if (toAdd.length === 0 && Array.isArray(modelObj.contextWindowOptions)) {
+      return modelObj;
+    }
+    if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
+      try {
+        modelObj.contextWindowOptions.push(...toAdd);
+        return modelObj;
+      } catch {}
+    }
+    const nextArr = [...curArr, ...toAdd];
+    try {
+      modelObj.contextWindowOptions = nextArr;
+      if (modelObj.contextWindowOptions === nextArr) return modelObj;
+    } catch {}
+    try {
+      return { ...modelObj, contextWindowOptions: nextArr };
+    } catch {
+      return modelObj;
+    }
+  }
+
+  function ensureContextWindowSelectorFlag(extraCw) {
     if (!document) return;
     const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
     for (const d of docs) {
       const views = d.querySelectorAll('[data-testid="conversation-view"]');
       for (const view of views) {
-        const fk = Object.keys(view).find((k) => k.startsWith('__reactFiber$'));
-        let fiber = fk ? view[fk] : null;
-        while (fiber) {
-          const val = fiber.memoizedProps?.value;
-          if (val && typeof val === 'object' && typeof val.get === 'function') {
-            if (!val.__cwsPatched) {
-              const origGet = val.get;
-              val.get = function (name) {
-                if (name === 'contextWindowSelector') {
-                  return { enabled: true, feature: { enabled: true } };
+        const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
+        const startNodes = [triggerEl, view].filter(Boolean);
+        for (const node of startNodes) {
+          const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
+          let fiber = fk ? node[fk] : null;
+          while (fiber) {
+            const val = fiber.memoizedProps?.value;
+            if (val && typeof val === 'object') {
+              if (typeof val.get === 'function' && !val.__cwsPatched) {
+                try {
+                  const origGet = val.get;
+                  val.get = function (name) {
+                    if (name === 'contextWindowSelector') {
+                      return { enabled: true, feature: { enabled: true } };
+                    }
+                    return origGet.apply(this, arguments);
+                  };
+                  val.__cwsPatched = true;
+                } catch {}
+              }
+              if ('corpHost' in val && 'cider' in val && 'contextWindow' in val && val.contextWindow === undefined) {
+                try { val.contextWindow = {}; } catch {}
+              }
+              if (val.selectedModel && typeof val.selectedModel === 'object') {
+                const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
+                if (nextSm !== val.selectedModel) {
+                  try { val.selectedModel = nextSm; } catch {}
                 }
-                return origGet.apply(this, arguments);
-              };
-              val.__cwsPatched = true;
+              }
+              if (Array.isArray(val.modelOptions)) {
+                if (Object.isExtensible(val.modelOptions)) {
+                  for (let i = 0; i < val.modelOptions.length; i++) {
+                    const nextOpt = ensureModelContextWindowOptions(val.modelOptions[i], extraCw);
+                    if (nextOpt !== val.modelOptions[i]) {
+                      try { val.modelOptions[i] = nextOpt; } catch {}
+                    }
+                  }
+                } else {
+                  try {
+                    val.modelOptions = val.modelOptions.map((opt) => ensureModelContextWindowOptions(opt, extraCw));
+                  } catch {}
+                }
+              }
+              if (val.store && typeof val.store.getState === 'function') {
+                const st = val.store.getState();
+                const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+                if (Array.isArray(clientConfigs)) {
+                  let needsReduxUpdate = false;
+                  const updatedConfigs = [];
+                  for (const cfg of clientConfigs) {
+                    const nextCfg = ensureModelContextWindowOptions(cfg, extraCw);
+                    updatedConfigs.push(nextCfg);
+                    if (nextCfg !== cfg) {
+                      needsReduxUpdate = true;
+                    }
+                  }
+                  if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
+                    try {
+                      val.store.dispatch({
+                        type: 'userStatus/setUserStatus',
+                        payload: {
+                          ...st.userStatus,
+                          cascadeModelConfigData: {
+                            ...st.userStatus.cascadeModelConfigData,
+                            clientModelConfigs: updatedConfigs,
+                          },
+                        },
+                      });
+                    } catch {}
+                  }
+                }
+              }
             }
+            fiber = fiber.return;
           }
-          fiber = fiber.return;
         }
       }
     }
@@ -237,8 +341,8 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     }
   }
 
-  function getModelSelectorContextForView(view) {
-    ensureContextWindowSelectorFlag();
+  function getModelSelectorContextForView(view, extraCw) {
+    ensureContextWindowSelectorFlag(extraCw);
     const effView = resolveEffectiveView(view);
     if (!effView) return null;
     const triggerEl = effView.querySelector('[data-testid="model-selector-trigger"]');
@@ -246,13 +350,21 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
     let fiber = fk ? startEl[fk] : null;
     let msCtx = null;
+    let setSelectedModelWithCw = null;
     let reduxStore = null;
     let legacyCtx = null;
     while (fiber) {
-      const val = fiber.memoizedProps?.value;
+      const props = fiber.memoizedProps;
+      if (!setSelectedModelWithCw && typeof props?.setSelectedModel === 'function' && props.setSelectedModel.length >= 2) {
+        setSelectedModelWithCw = props.setSelectedModel;
+      }
+      const val = props?.value;
       if (val && typeof val === 'object') {
         if (!msCtx && typeof val.setSelectedModel === 'function' && ('selectedModel' in val)) {
           msCtx = val;
+        }
+        if (!setSelectedModelWithCw && typeof val.setSelectedModel === 'function' && val.setSelectedModel.length >= 2) {
+          setSelectedModelWithCw = val.setSelectedModel;
         }
         if (!reduxStore && val.store && typeof val.store.dispatch === 'function' && typeof val.store.getState === 'function') {
           reduxStore = val.store;
@@ -263,7 +375,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       }
       fiber = fiber.return;
     }
-    return { msCtx, reduxStore, legacyCtx, triggerEl };
+    if (msCtx?.selectedModel) {
+      ensureModelContextWindowOptions(msCtx.selectedModel, extraCw);
+    }
+    return { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
   }
 
   function getCascadeContextForElement(el) {
@@ -603,30 +718,41 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     }
 
     const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-    let activeCid = window.__agySniffedCascadeId || '';
-    if (!activeCid) {
-      const cdoc = getAccessibleRemoteIframeDoc();
-      const innerView = cdoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
-      const innerCid = innerView?.getAttribute?.('data-cascade-id');
-      if (innerCid && UUID_RE.test(innerCid) && innerCid !== ignoreUuid) {
-        activeCid = innerCid;
+    const cdoc = getAccessibleRemoteIframeDoc();
+    const innerView = cdoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+    const rawInnerCid = innerView?.getAttribute?.('data-cascade-id');
+    const innerCid = (rawInnerCid && UUID_RE.test(rawInnerCid) && rawInnerCid !== ignoreUuid) ? rawInnerCid : '';
+
+    const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
+    const pathMatch = String(childPath).match(UUID_RE);
+    const pathCid = (pathMatch && pathMatch[0] && pathMatch[0] !== ignoreUuid) ? pathMatch[0] : '';
+
+    let activeCid = '';
+    if (innerCid) {
+      activeCid = innerCid;
+      if (window.__agySniffedCascadeId !== innerCid) {
         window.__agySniffedCascadeId = innerCid;
+        window.__agySniffedCascadeTs = Date.now();
       }
-    }
-    if (!activeCid) {
-      const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
-      const m = String(childPath).match(UUID_RE);
-      if (m && m[0] && m[0] !== ignoreUuid) activeCid = m[0];
+    } else if (pathCid && pathCid !== hostView.__agyLastChildPathCid) {
+      hostView.__agyLastChildPathCid = pathCid;
+      activeCid = pathCid;
+      window.__agySniffedCascadeId = pathCid;
+      window.__agySniffedCascadeTs = Date.now();
+    } else {
+      activeCid = window.__agySniffedCascadeId || pathCid || '';
     }
 
     const currentAttr = hostView.getAttribute('data-cascade-id');
     const nextAttr = activeCid || currentAttr || 'remote-session';
     if (currentAttr !== nextAttr) {
+      if (currentAttr === 'remote-session' && nextAttr !== 'remote-session') {
+        cwStore?.migrateSessionOverride?.('remote-session', nextAttr);
+      }
       hostView.setAttribute('data-cascade-id', nextAttr);
     }
 
     const now = Date.now();
-    const recentlySniffed = window.__agySniffedCascadeTs && (now - window.__agySniffedCascadeTs < 15000);
     if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
       lastRcTrajectoryPollTs = now;
       rcTrajectoryPollInFlight = true;
@@ -652,10 +778,18 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
         const [latestId] = entries[0];
         if (latestId) {
           const prevId = hostView.getAttribute('data-cascade-id');
-          if (!recentlySniffed || !window.__agySniffedCascadeId) {
+          const hasValidActive = Boolean(
+            window.__agySniffedCascadeId &&
+            window.__agySniffedCascadeId !== 'remote-session' &&
+            summaries[window.__agySniffedCascadeId]
+          );
+          if (!hasValidActive && (!prevId || prevId === 'remote-session' || !summaries[prevId])) {
             window.__agySniffedCascadeId = latestId;
           }
-          const resolvedId = window.__agySniffedCascadeId || latestId;
+          const resolvedId = window.__agySniffedCascadeId || (prevId && prevId !== 'remote-session' ? prevId : latestId);
+          if (prevId === 'remote-session' && resolvedId && resolvedId !== 'remote-session') {
+            cwStore?.migrateSessionOverride?.('remote-session', resolvedId);
+          }
           const nextSteps = window.__agyRcStepCountByCascade[resolvedId] ?? -1;
           const prevObservedSteps = hostView.__agyObservedStepCount;
           hostView.__agyObservedStepCount = nextSteps;
@@ -756,10 +890,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
   function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
     const targetCw = cwStore.normalize(rawTargetCw);
     if (!view || !cascadeId || !targetCw) return false;
-    const info = getModelSelectorContextForView(view);
+    const info = getModelSelectorContextForView(view, targetCw);
     if (!info) return false;
 
-    const { msCtx, reduxStore, legacyCtx, triggerEl } = info;
+    const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
     if (triggerEl) {
       const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
       if (triggerEl.getAttribute('data-agy-cw-warn') !== warnAttr) {
@@ -769,24 +903,32 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     const currentInDom = triggerEl ? cwStore.normalize(triggerEl.getAttribute('data-context-window')) : null;
     const selectedModel = getSelectedModelKey(view, cascadeId, info);
     const applyKey = (selectedModel || '') + ':' + String(targetCw);
-    if ((currentInDom === targetCw || window.__agyLastAppliedContextWindow === applyKey) && !force) return true;
+    window.__agyLastAppliedContextWindowByCascade = window.__agyLastAppliedContextWindowByCascade || {};
+    const lastAppliedForCascade = window.__agyLastAppliedContextWindowByCascade[cascadeId];
+    const initialState = reduxStore ? reduxStore.getState() : null;
+    const initialReduxCw = initialState?.modelSelection?.byConversation?.[cascadeId]?.contextWindow;
+    const reduxAlreadyMatches = !reduxStore || initialReduxCw === targetCw;
+
+    if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
+      if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
+        triggerEl.setAttribute('data-context-window', String(targetCw));
+      }
+      return true;
+    }
 
     if (msCtx || reduxStore) {
-      const state = reduxStore ? reduxStore.getState() : null;
+      const state = initialState;
       const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
       const currentInRedux = byConvo?.contextWindow || msCtx?.contextWindow?.selected || currentInDom || '256K';
       const selectedModelObj = msCtx?.selectedModel;
+      if (selectedModelObj) {
+        ensureModelContextWindowOptions(selectedModelObj, targetCw);
+      }
       let dispatched = false;
 
-      if (currentInRedux !== targetCw || force) {
+      if (currentInRedux !== targetCw || (reduxStore && byConvo?.contextWindow !== targetCw) || force) {
         const prevDefaultCw = state?.modelSelection?.default?.contextWindow;
-        if (msCtx?.contextWindow && typeof msCtx.contextWindow.select === 'function' && selectedModelObj) {
-          msCtx.contextWindow.select(selectedModelObj, targetCw);
-          dispatched = true;
-        } else if (typeof msCtx?.setSelectedModel === 'function' && selectedModelObj) {
-          msCtx.setSelectedModel(selectedModelObj, targetCw);
-          dispatched = true;
-        } else if (reduxStore) {
+        if (reduxStore) {
           const modelVal = byConvo?.model ?? selectedModelObj?.value ?? state?.modelSelection?.default?.model;
           const customLabel = byConvo?.customLabel ?? (selectedModelObj?.isCustom ? selectedModelObj?.label : undefined);
           if (modelVal !== undefined) {
@@ -802,7 +944,17 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
             });
             dispatched = true;
           }
+        } else if (msCtx?.contextWindow && typeof msCtx.contextWindow.select === 'function' && selectedModelObj) {
+          msCtx.contextWindow.select(selectedModelObj, targetCw);
+          dispatched = true;
+        } else if (typeof setSelectedModelWithCw === 'function' && selectedModelObj) {
+          setSelectedModelWithCw(selectedModelObj, targetCw);
+          dispatched = true;
+        } else if (typeof msCtx?.setSelectedModel === 'function' && selectedModelObj) {
+          msCtx.setSelectedModel(selectedModelObj, targetCw);
+          dispatched = true;
         }
+
         if (dispatched && reduxStore) {
           const nextState = reduxStore.getState();
           const defObj = nextState?.modelSelection?.default;
@@ -823,6 +975,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
 
       if (dispatched || currentInRedux === targetCw) {
         window.__agyLastAppliedContextWindow = applyKey;
+        window.__agyLastAppliedContextWindowByCascade[cascadeId] = applyKey;
         if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
           triggerEl.setAttribute('data-context-window', String(targetCw));
         }
@@ -843,6 +996,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
         legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, targetCw);
       }
       window.__agyLastAppliedContextWindow = applyKey;
+      window.__agyLastAppliedContextWindowByCascade[cascadeId] = applyKey;
       if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
         triggerEl.setAttribute('data-context-window', String(targetCw));
       }

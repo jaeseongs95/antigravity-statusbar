@@ -19,7 +19,8 @@ function createCoreMetricsAdapter({
       return;
     }
 
-    const currentCw = getConversationContextWindow(view, cascadeId);
+    const resolveCurrentCascadeId = () => view?.getAttribute?.('data-cascade-id') || cascadeId;
+    const currentCw = getConversationContextWindow(view, resolveCurrentCascadeId());
     const currentKNum = parseInt(currentCw, 10) || 512;
     const menu = document.createElement('div');
     menu.className = 'agy-ctx-menu';
@@ -30,7 +31,8 @@ function createCoreMetricsAdapter({
       }
     }
 
-    const sessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재 세션';
+    const activeHdrCid = resolveCurrentCascadeId();
+    const sessionLabel = activeHdrCid && activeHdrCid !== 'remote-session' ? activeHdrCid.slice(0, 8) : '현재 세션';
     const hdr = document.createElement('div');
     hdr.className = 'agy-ctx-menu-hdr';
     setHtml(hdr, `
@@ -72,7 +74,7 @@ function createCoreMetricsAdapter({
         if (inputEl.style) inputEl.style.borderColor = '#ec7063';
         return;
       }
-      setConversationContextWindow(view, cascadeId, norm);
+      setConversationContextWindow(view, resolveCurrentCascadeId(), norm);
       closeMenu();
       updateAll();
     };
@@ -113,7 +115,7 @@ function createCoreMetricsAdapter({
       item.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        setConversationContextWindow(view, cascadeId, cw);
+        setConversationContextWindow(view, resolveCurrentCascadeId(), cw);
         closeMenu();
         updateAll();
       };
@@ -197,17 +199,19 @@ function createCoreMetricsAdapter({
           limitBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            const activeCid = view?.getAttribute?.('data-cascade-id') || cascadeId;
             if (e.shiftKey) {
-              cycleConversationContextWindow(view, cascadeId);
+              cycleConversationContextWindow(view, activeCid);
               updateAll();
             } else {
-              showContextMenu(barEl, view, cascadeId, limitBtn);
+              showContextMenu(barEl, view, activeCid, limitBtn);
             }
           };
           limitBtn.oncontextmenu = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            showContextMenu(barEl, view, cascadeId, limitBtn);
+            const activeCid = view?.getAttribute?.('data-cascade-id') || cascadeId;
+            showContextMenu(barEl, view, activeCid, limitBtn);
           };
         }
       }

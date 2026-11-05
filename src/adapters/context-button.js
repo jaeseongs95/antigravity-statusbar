@@ -24,7 +24,16 @@ function createContextButtonAdapter({
     if (!inputBox && view) {
       inputBox = view.querySelector('[data-testid="agent-input-box"]');
     }
-    const cascadeId = view ? view.getAttribute('data-cascade-id') : '';
+    let cascadeId = view ? view.getAttribute('data-cascade-id') : '';
+    if (!cascadeId || cascadeId === 'remote-session') {
+      try {
+        const innerCid = document?.querySelector?.('ga-remote-control iframe')?.contentDocument?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]')?.getAttribute?.('data-cascade-id');
+        if (innerCid && innerCid !== 'remote-session') cascadeId = innerCid;
+      } catch {}
+      if ((!cascadeId || cascadeId === 'remote-session') && window?.__agySniffedCascadeId) {
+        cascadeId = window.__agySniffedCascadeId;
+      }
+    }
     const csrf = window.__APP_CONFIG__ && window.__APP_CONFIG__.csrfToken;
     const currentCw = cwStore.getSavedContextWindow(cascadeId);
     const maxLimit = cwStore.getLimit(currentCw);
