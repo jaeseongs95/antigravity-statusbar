@@ -25,31 +25,42 @@ function createCoreMetricsAdapter({
     menu.className = 'agy-ctx-menu';
 
     if (typeof menu.addEventListener === 'function') {
-      for (const evtName of ['mousedown', 'mouseup', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
+      for (const evtName of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
         menu.addEventListener(evtName, (ev) => ev.stopPropagation());
       }
     }
 
+    const sessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재 세션';
     const hdr = document.createElement('div');
     hdr.className = 'agy-ctx-menu-hdr';
     setHtml(hdr, `
       <span>세션 컨텍스트 한도</span>
-      <span style="opacity:0.75">${escHtml(cascadeId ? cascadeId.slice(0, 8) : '현재 세션')}</span>
+      <span style="opacity:0.75">${escHtml(sessionLabel)}</span>
     `);
     menu.appendChild(hdr);
 
     const customRow = document.createElement('div');
     customRow.className = 'agy-ctx-custom-row';
     setHtml(customRow, `
-      <input type="text" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
+      <input type="text" inputmode="numeric" pattern="[0-9]*" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
       <span class="agy-ctx-custom-unit">K</span>
       <button type="button" class="agy-ctx-custom-apply">적용</button>
     `);
     menu.appendChild(customRow);
 
+    let iframeDoc = null;
+    try {
+      iframeDoc = document?.querySelector?.('ga-remote-control iframe')?.contentDocument || null;
+    } catch {}
+    const winObj = document?.defaultView || null;
+
     const closeMenu = () => {
       menu.remove();
-      document?.removeEventListener('mousedown', outsideHandler, true);
+      for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
+        document?.removeEventListener?.(evt, outsideHandler, true);
+        try { iframeDoc?.removeEventListener?.(evt, outsideHandler, true); } catch {}
+      }
+      try { winObj?.removeEventListener?.('blur', closeMenu); } catch {}
     };
 
     const inputEl = customRow.querySelector('.agy-ctx-custom-input');
@@ -115,7 +126,11 @@ function createCoreMetricsAdapter({
       }
     };
     setTimeout(() => {
-      document?.addEventListener('mousedown', outsideHandler, true);
+      for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
+        document?.addEventListener?.(evt, outsideHandler, true);
+        try { iframeDoc?.addEventListener?.(evt, outsideHandler, true); } catch {}
+      }
+      try { winObj?.addEventListener?.('blur', closeMenu); } catch {}
       const isCoarseOrNarrow = typeof document?.defaultView?.matchMedia === 'function'
         && document.defaultView.matchMedia('(max-width: 640px), (pointer: coarse)').matches;
       if (!isCoarseOrNarrow && inputEl && inputEl.isConnected && typeof inputEl.focus === 'function') {
@@ -146,7 +161,8 @@ function createCoreMetricsAdapter({
       const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
 
       const limitModClass = maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : (maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '');
-      const limitTitle = `이 세션(${cascadeId ? cascadeId.slice(0, 8) : '현재'})의 컨텍스트 한도: ${currentCw} (${cwStore.getQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
+      const titleSessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재';
+      const limitTitle = `이 세션(${titleSessionLabel})의 컨텍스트 한도: ${currentCw} (${cwStore.getQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
 
       let quotaHtml = '';
       if (quota) {

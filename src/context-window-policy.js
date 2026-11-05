@@ -66,8 +66,9 @@ function getCwQuotaHint(cw, onNormalized) {
   return `직접 지정 (~${mult}x 추정)`;
 }
 
-function createContextWindowStore({ document, localStorage, nativeStorage, onCustomCw }) {
+function createContextWindowStore({ document, localStorage, nativeStorage, onCustomCw, onSaveCw }) {
   const sessionCwMap = new Map();
+  const sessionCwTsMap = new Map();
   let defaultCwCache = '512K';
 
   const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
@@ -99,6 +100,9 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
           const norm = normalize(v);
           if (norm) {
             sessionCwMap.set(k, norm);
+            if (!sessionCwTsMap.has(k)) {
+              sessionCwTsMap.set(k, 1);
+            }
           }
         }
       }
@@ -155,27 +159,109 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     return normalize(defaultCwCache) || '512K';
   }
 
-  function saveContextWindowSetting(cascadeId, targetCw) {
+  function saveContextWindowSetting(cascadeId, targetCw, opts = {}) {
     const norm = normalize(targetCw);
     if (!norm) return null;
+    const ts = typeof opts?.updatedAtMs === 'number' && opts.updatedAtMs > 0 ? opts.updatedAtMs : Date.now();
     if (cascadeId) {
       if (sessionCwMap.has(cascadeId)) sessionCwMap.delete(cascadeId);
       sessionCwMap.set(cascadeId, norm);
+      sessionCwTsMap.set(cascadeId, ts);
       writeCookie('agy_cw_' + cascadeId, norm);
       const serialized = serializeSessionMap();
       try { localStorage?.setItem(STORAGE_MAP_KEY, serialized); } catch {}
       if (nativeStorage && typeof nativeStorage.updateItems === 'function') {
         try { nativeStorage.updateItems({ [STORAGE_MAP_KEY]: serialized }); } catch {}
       }
+      if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
+        try { onSaveCw(cascadeId, norm, ts); } catch {}
+      }
     } else {
       defaultCwCache = norm;
+      sessionCwTsMap.set('__default__', ts);
       writeCookie('agy_default_cw', norm);
       try { localStorage?.setItem(DEFAULT_CW_KEY, norm); } catch {}
       if (nativeStorage && typeof nativeStorage.updateItems === 'function') {
         try { nativeStorage.updateItems({ [DEFAULT_CW_KEY]: norm }); } catch {}
       }
+      if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
+        try { onSaveCw(null, norm, ts); } catch {}
+      }
     }
     return norm;
+  }
+
+  function encodeRemoteAnnotationProfile(cascadeId) {
+    if (!cascadeId) return null;
+    const sessionCw = normalize(sessionCwMap.get(cascadeId));
+    if (!sessionCw) return null;
+    const defCw = normalize(defaultCwCache) || '512K';
+    const ts = sessionCwTsMap.get(cascadeId) || 1;
+    return `${sessionCw}|${defCw}|${ts}`;
+  }
+
+  function parseRemoteAnnotationProfile(rawProfile) {
+    if (!rawProfile || typeof rawProfile !== 'string') return null;
+    const trimmed = rawProfile.trim();
+    if (!trimmed) return null;
+    if (!trimmed.includes('|')) {
+      const single = normalize(trimmed);
+      return single ? { sessionCw: single, defaultCw: null, ts: 1 } : null;
+    }
+    const parts = trimmed.split('|');
+    const sessionCw = normalize(parts[0]);
+    const defaultCw = normalize(parts[1]);
+    const tsRaw = parseInt(parts[2], 10);
+    const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
+    if (!sessionCw && !defaultCw) return null;
+    return { sessionCw, defaultCw, ts };
+  }
+
+  function syncFromRemoteAnnotations(summariesMap) {
+    if (!summariesMap || typeof summariesMap !== 'object') {
+      return { changed: false, unsyncedLocalIds: [] };
+    }
+    let changed = false;
+    for (const [cid, sum] of Object.entries(summariesMap)) {
+      const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
+      if (!parsed) continue;
+      if (parsed.sessionCw) {
+        const localCw = sessionCwMap.get(cid);
+        const localTs = sessionCwTsMap.get(cid) || 0;
+        if (!localCw || parsed.ts > localTs || (localTs <= 1 && parsed.sessionCw !== localCw)) {
+          saveContextWindowSetting(cid, parsed.sessionCw, {
+            fromRemoteSync: true,
+            updatedAtMs: parsed.ts,
+          });
+          if (localCw !== parsed.sessionCw) {
+            changed = true;
+          }
+        }
+      }
+      if (parsed.defaultCw) {
+        const localDefTs = sessionCwTsMap.get('__default__') || 0;
+        if (parsed.ts > localDefTs && parsed.defaultCw !== defaultCwCache) {
+          saveContextWindowSetting(null, parsed.defaultCw, {
+            fromRemoteSync: true,
+            updatedAtMs: parsed.ts,
+          });
+          changed = true;
+        }
+      }
+    }
+
+    const unsyncedLocalIds = [];
+    for (const [cid, localCw] of sessionCwMap.entries()) {
+      if (!cid || cid === 'remote-session') continue;
+      if ((sessionCwTsMap.get(cid) || 0) < 1) continue;
+      const sum = summariesMap[cid];
+      if (!sum) continue;
+      const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
+      if (!parsed || parsed.sessionCw !== localCw) {
+        unsyncedLocalIds.push(cid);
+      }
+    }
+    return { changed, unsyncedLocalIds };
   }
 
   function hasSessionOverride(cascadeId) {
@@ -201,6 +287,9 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     loadPersistentContextSettings,
     getSavedContextWindow,
     saveContextWindowSetting,
+    encodeRemoteAnnotationProfile,
+    parseRemoteAnnotationProfile,
+    syncFromRemoteAnnotations,
     hasSessionOverride,
     seedSessionIfEmpty,
     getDefaultCw,

@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v11';
+const STATUSBAR_VERSION = 'v13';
 
 function mountStatusBar(env = {}) {
   const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -29,21 +29,38 @@ function mountStatusBar(env = {}) {
 
   const underDefaultCwSet = new Set(['128K', '256K']);
   const refreshStyles = () => ensureStyleElement(doc, underDefaultCwSet);
+  let hostBridge = null;
 
   const cwStore = createContextWindowStore({
     document: doc,
     localStorage: ls,
     nativeStorage: win.nativeStorage,
-    onCustomCw: (cw) => registerCustomCwInPrototype(cw, underDefaultCwSet, refreshStyles),
+    onCustomCw: (cw) => {
+      let extraWin = null;
+      try {
+        extraWin = doc.querySelector?.('ga-remote-control iframe')?.contentWindow || null;
+      } catch {}
+      registerCustomCwInPrototype(cw, underDefaultCwSet, refreshStyles, extraWin);
+    },
+    onSaveCw: (cid) => {
+      if (hostBridge && typeof hostBridge.pushSessionCwToServer === 'function') {
+        hostBridge.pushSessionCwToServer(
+          cid,
+          win.__APP_CONFIG__?.csrfToken,
+          doc.querySelector?.('[data-testid="conversation-view"]')
+        );
+      }
+    },
   });
 
   refreshStyles();
 
   const setHtml = createTrustedHtmlSetter(win, doc);
-  const hostBridge = createHostBridge({
+  hostBridge = createHostBridge({
     window: win,
     document: doc,
     localStorage: ls,
+    fetchFn,
     cwStore,
   });
 
@@ -143,6 +160,7 @@ function mountStatusBar(env = {}) {
   function updateAll() {
     refreshStyles();
     hostBridge.ensureContextWindowSelectorFlag();
+    hostBridge.ensureCustomizationsStoreLoaded();
     hostBridge.ensureRemoteHostView(() => updateAll());
     const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
     const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
@@ -150,13 +168,14 @@ function mountStatusBar(env = {}) {
     if (!csrf && !hostBridge.getRemoteRpcServiceForElement(views[0])) return;
 
     const quotaPromise = rpcClient.fetchQuota(csrf, views[0]);
+    hostBridge.syncDesktopAnnotations(csrf, views[0], () => updateAll());
 
     for (const view of views) {
       const cascadeId = view.getAttribute('data-cascade-id');
       const inputBox = view.querySelector('[data-testid="agent-input-box"]');
       if (!cascadeId || !inputBox) continue;
 
-      const triggerEl = view.querySelector('[data-testid="model-selector-trigger"]');
+      const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
       const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
       const canAdoptFromDom = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
       if (canAdoptFromDom && domCw && CONTEXT_WINDOWS.includes(domCw) && view.__lastObservedDomCw && view.__lastObservedDomCw !== domCw) {
@@ -204,6 +223,12 @@ function mountStatusBar(env = {}) {
   };
 
   cwStore.loadPersistentContextSettings().then(() => {
+    hostBridge.syncDesktopAnnotations(
+      win.__APP_CONFIG__?.csrfToken,
+      doc.querySelector?.('[data-testid="conversation-view"]'),
+      () => updateAll(),
+      true
+    );
     updateAll();
   });
   updateAll();
@@ -225,7 +250,7 @@ function mountStatusBar(env = {}) {
         updateAll();
         return;
       }
-      const trigger = view.querySelector('[data-testid="model-selector-trigger"]');
+      const trigger = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
       if (cid && trigger) {
         const actual = cwStore.normalize(trigger.getAttribute('data-context-window')) || '256K';
         const expected = cwStore.getSavedContextWindow(cid);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.4
+// @version      1.3.5
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -82,8 +82,9 @@
       return `직접 지정 (~${mult}x 추정)`;
     }
 
-    function createContextWindowStore({ document, localStorage, nativeStorage, onCustomCw }) {
+    function createContextWindowStore({ document, localStorage, nativeStorage, onCustomCw, onSaveCw }) {
       const sessionCwMap = new Map();
+      const sessionCwTsMap = new Map();
       let defaultCwCache = '512K';
 
       const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
@@ -115,6 +116,9 @@
               const norm = normalize(v);
               if (norm) {
                 sessionCwMap.set(k, norm);
+                if (!sessionCwTsMap.has(k)) {
+                  sessionCwTsMap.set(k, 1);
+                }
               }
             }
           }
@@ -171,27 +175,109 @@
         return normalize(defaultCwCache) || '512K';
       }
 
-      function saveContextWindowSetting(cascadeId, targetCw) {
+      function saveContextWindowSetting(cascadeId, targetCw, opts = {}) {
         const norm = normalize(targetCw);
         if (!norm) return null;
+        const ts = typeof opts?.updatedAtMs === 'number' && opts.updatedAtMs > 0 ? opts.updatedAtMs : Date.now();
         if (cascadeId) {
           if (sessionCwMap.has(cascadeId)) sessionCwMap.delete(cascadeId);
           sessionCwMap.set(cascadeId, norm);
+          sessionCwTsMap.set(cascadeId, ts);
           writeCookie('agy_cw_' + cascadeId, norm);
           const serialized = serializeSessionMap();
           try { localStorage?.setItem(STORAGE_MAP_KEY, serialized); } catch {}
           if (nativeStorage && typeof nativeStorage.updateItems === 'function') {
             try { nativeStorage.updateItems({ [STORAGE_MAP_KEY]: serialized }); } catch {}
           }
+          if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
+            try { onSaveCw(cascadeId, norm, ts); } catch {}
+          }
         } else {
           defaultCwCache = norm;
+          sessionCwTsMap.set('__default__', ts);
           writeCookie('agy_default_cw', norm);
           try { localStorage?.setItem(DEFAULT_CW_KEY, norm); } catch {}
           if (nativeStorage && typeof nativeStorage.updateItems === 'function') {
             try { nativeStorage.updateItems({ [DEFAULT_CW_KEY]: norm }); } catch {}
           }
+          if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
+            try { onSaveCw(null, norm, ts); } catch {}
+          }
         }
         return norm;
+      }
+
+      function encodeRemoteAnnotationProfile(cascadeId) {
+        if (!cascadeId) return null;
+        const sessionCw = normalize(sessionCwMap.get(cascadeId));
+        if (!sessionCw) return null;
+        const defCw = normalize(defaultCwCache) || '512K';
+        const ts = sessionCwTsMap.get(cascadeId) || 1;
+        return `${sessionCw}|${defCw}|${ts}`;
+      }
+
+      function parseRemoteAnnotationProfile(rawProfile) {
+        if (!rawProfile || typeof rawProfile !== 'string') return null;
+        const trimmed = rawProfile.trim();
+        if (!trimmed) return null;
+        if (!trimmed.includes('|')) {
+          const single = normalize(trimmed);
+          return single ? { sessionCw: single, defaultCw: null, ts: 1 } : null;
+        }
+        const parts = trimmed.split('|');
+        const sessionCw = normalize(parts[0]);
+        const defaultCw = normalize(parts[1]);
+        const tsRaw = parseInt(parts[2], 10);
+        const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
+        if (!sessionCw && !defaultCw) return null;
+        return { sessionCw, defaultCw, ts };
+      }
+
+      function syncFromRemoteAnnotations(summariesMap) {
+        if (!summariesMap || typeof summariesMap !== 'object') {
+          return { changed: false, unsyncedLocalIds: [] };
+        }
+        let changed = false;
+        for (const [cid, sum] of Object.entries(summariesMap)) {
+          const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
+          if (!parsed) continue;
+          if (parsed.sessionCw) {
+            const localCw = sessionCwMap.get(cid);
+            const localTs = sessionCwTsMap.get(cid) || 0;
+            if (!localCw || parsed.ts > localTs || (localTs <= 1 && parsed.sessionCw !== localCw)) {
+              saveContextWindowSetting(cid, parsed.sessionCw, {
+                fromRemoteSync: true,
+                updatedAtMs: parsed.ts,
+              });
+              if (localCw !== parsed.sessionCw) {
+                changed = true;
+              }
+            }
+          }
+          if (parsed.defaultCw) {
+            const localDefTs = sessionCwTsMap.get('__default__') || 0;
+            if (parsed.ts > localDefTs && parsed.defaultCw !== defaultCwCache) {
+              saveContextWindowSetting(null, parsed.defaultCw, {
+                fromRemoteSync: true,
+                updatedAtMs: parsed.ts,
+              });
+              changed = true;
+            }
+          }
+        }
+
+        const unsyncedLocalIds = [];
+        for (const [cid, localCw] of sessionCwMap.entries()) {
+          if (!cid || cid === 'remote-session') continue;
+          if ((sessionCwTsMap.get(cid) || 0) < 1) continue;
+          const sum = summariesMap[cid];
+          if (!sum) continue;
+          const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
+          if (!parsed || parsed.sessionCw !== localCw) {
+            unsyncedLocalIds.push(cid);
+          }
+        }
+        return { changed, unsyncedLocalIds };
       }
 
       function hasSessionOverride(cascadeId) {
@@ -217,6 +303,9 @@
         loadPersistentContextSettings,
         getSavedContextWindow,
         saveContextWindowSetting,
+        encodeRemoteAnnotationProfile,
+        parseRemoteAnnotationProfile,
+        syncFromRemoteAnnotations,
         hasSessionOverride,
         seedSessionIfEmpty,
         getDefaultCw,
@@ -365,6 +454,7 @@
           display: flex;
           flex-direction: column;
           min-width: 215px;
+          text-align: left;
         }
         .agy-ctx-menu-hdr {
           padding: 2px 10px 5px 10px;
@@ -595,6 +685,23 @@
           .agy-ctx-group-ctx {
             flex-basis: 100%;
           }
+          .agy-ctx-menu,
+          .agy-rc-host-box .agy-ctx-menu {
+            min-width: min(250px, calc(100vw - 24px));
+            max-width: calc(100vw - 16px);
+          }
+          .agy-ctx-menu-item {
+            padding: 7px 12px;
+            font-size: 12px;
+          }
+          .agy-ctx-custom-input {
+            font-size: 16px;
+            padding: 4px 8px;
+          }
+          .agy-ctx-custom-apply {
+            padding: 5px 10px;
+            font-size: 11.5px;
+          }
           .agy-ctx-modal-backdrop {
             padding: 8px;
           }
@@ -633,17 +740,24 @@
 
     function ensureStyleElement(document, underDefaultCwSet) {
       if (!document) return;
-      const parent = document.head || document.documentElement;
-      if (!parent) return;
-      let styleEl = document.getElementById('agy-ctx-statusbar-style');
-      if (!styleEl) {
-        styleEl = document.createElement('style');
-        styleEl.id = 'agy-ctx-statusbar-style';
-        parent.appendChild(styleEl);
-      }
       const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
-      if (styleEl.textContent !== fullCss) {
-        styleEl.textContent = fullCss;
+      const docs = [document];
+      try {
+        const iframeDoc = document.querySelector?.('ga-remote-control iframe')?.contentDocument;
+        if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
+      } catch {}
+      for (const d of docs) {
+        const parent = d.head || d.documentElement;
+        if (!parent) continue;
+        let styleEl = d.getElementById('agy-ctx-statusbar-style');
+        if (!styleEl) {
+          styleEl = d.createElement('style');
+          styleEl.id = 'agy-ctx-statusbar-style';
+          parent.appendChild(styleEl);
+        }
+        if (styleEl.textContent !== fullCss) {
+          styleEl.textContent = fullCss;
+        }
       }
     }
 
@@ -1064,7 +1178,7 @@
 
     const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
 
-    function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate) {
+    function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
       if (!cw) return;
       const kNum = parseInt(cw, 10);
       if (!isNaN(kNum) && kNum > 0 && kNum <= 256 && underDefaultCwSet && !underDefaultCwSet.has(cw)) {
@@ -1076,25 +1190,33 @@
       if (cw === '256K' || cw === '512K' || cw === '900K') return;
       if (isNaN(kNum) || kNum <= 0) return;
       const tokens = kNum * 1000;
-      if (Object.prototype.hasOwnProperty.call(Object.prototype, cw)) return;
+      const protos = [Object.prototype];
       try {
-        Object.defineProperty(Object.prototype, cw, {
-          configurable: true,
-          enumerable: false,
-          get() {
-            if (this && this['512K'] === 512000 && this['900K'] === 900000) {
-              return tokens;
-            }
-            if (this && typeof this['512K'] === 'string' && this['512K'].indexOf('512K') !== -1) {
-              return `${cw} custom context limit (${tokens.toLocaleString('en-US')} tokens)`;
-            }
-            return undefined;
-          },
-        });
+        if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
+          protos.push(extraWin.Object.prototype);
+        }
       } catch {}
+      for (const proto of protos) {
+        if (Object.prototype.hasOwnProperty.call(proto, cw)) continue;
+        try {
+          Object.defineProperty(proto, cw, {
+            configurable: true,
+            enumerable: false,
+            get() {
+              if (this && this['512K'] === 512000 && this['900K'] === 900000) {
+                return tokens;
+              }
+              if (this && typeof this['512K'] === 'string' && this['512K'].indexOf('512K') !== -1) {
+                return `${cw} custom context limit (${tokens.toLocaleString('en-US')} tokens)`;
+              }
+              return undefined;
+            },
+          });
+        } catch {}
+      }
     }
 
-    function createHostBridge({ window, document, localStorage, cwStore }) {
+    function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) {
       // Ensure context-window-selector flag is enabled in customFlagOverrides
       try {
         const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
@@ -1121,6 +1243,49 @@
             const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
             if (decorated && typeof decorated === 'object') {
               window.__agyCapturedLsClient = decorated;
+              if (typeof decorated.subscribeToPlugins === 'function' && typeof decorated.getAllPlugins === 'function' && !decorated.__agyPluginsStreamPatched) {
+                decorated.__agyPluginsStreamPatched = true;
+                const origSub = decorated.subscribeToPlugins.bind(decorated);
+                decorated.subscribeToPlugins = function (req, opts) {
+                  const stream = origSub(req, opts);
+                  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream;
+                  return {
+                    [Symbol.asyncIterator]() {
+                      const it = stream[Symbol.asyncIterator]();
+                      let yieldedFirst = false;
+                      return {
+                        async next() {
+                          if (!yieldedFirst) {
+                            yieldedFirst = true;
+                            let timer;
+                            const raceRes = await Promise.race([
+                              it.next().then((r) => ({ from: 'stream', r })),
+                              new Promise((resolve) => {
+                                timer = setTimeout(() => resolve({ from: 'timeout' }), 600);
+                              }),
+                            ]);
+                            clearTimeout(timer);
+                            if (raceRes.from === 'stream') return raceRes.r;
+                            try {
+                              const res = await decorated.getAllPlugins({ workspaceUris: [] });
+                              return { done: false, value: { plugins: res?.plugins || [] } };
+                            } catch {
+                              return it.next();
+                            }
+                          }
+                          return it.next();
+                        },
+                        return(v) {
+                          return typeof it.return === 'function' ? it.return(v) : Promise.resolve({ done: true, value: v });
+                        },
+                        throw(e) {
+                          return typeof it.throw === 'function' ? it.throw(e) : Promise.reject(e);
+                        },
+                      };
+                    },
+                  };
+                };
+              }
             }
             return decorated;
           };
@@ -1187,6 +1352,62 @@
                 }
               }
               fiber = fiber.return;
+            }
+          }
+        }
+      }
+
+      function ensureCustomizationsStoreLoaded() {
+        if (!document) return;
+        const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
+        for (const d of docs) {
+          const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
+          const rootEl = d.querySelector?.('#root, #app') || d.body?.firstElementChild;
+          const startNodes = [...views, rootEl].filter(Boolean);
+          for (const node of startNodes) {
+            const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$'));
+            const startFiber = fk ? node[fk] : null;
+            if (!startFiber) continue;
+            let up = startFiber;
+            let foundStore = null;
+            while (up) {
+              const val = up.memoizedProps?.value;
+              if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
+                foundStore = val;
+                break;
+              }
+              up = up.return;
+            }
+            if (!foundStore && node === rootEl) {
+              const stack = [startFiber];
+              const visited = new Set();
+              while (stack.length > 0 && visited.size < 2500) {
+                const f = stack.pop();
+                if (!f || visited.has(f)) continue;
+                visited.add(f);
+                const val = f.memoizedProps?.value;
+                if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
+                  foundStore = val;
+                  break;
+                }
+                if (f.sibling) stack.push(f.sibling);
+                if (f.child) stack.push(f.child);
+              }
+            }
+            if (foundStore) {
+              try {
+                if (typeof foundStore.disableStreaming === 'function' && !foundStore.streamingDisabled) {
+                  foundStore.disableStreaming();
+                }
+                const st = typeof foundStore.state?.getState === 'function' ? foundStore.state.getState() : null;
+                if ((!foundStore.hasReceivedStreamSnapshot || st?.isLoadingPlugins) && !foundStore.__agyInitialRefreshTriggered) {
+                  foundStore.__agyInitialRefreshTriggered = true;
+                  Promise.resolve(foundStore.refresh()).catch(() => {
+                    foundStore.__agyInitialRefreshTriggered = false;
+                  });
+                }
+              } catch {}
+              break;
             }
           }
         }
@@ -1431,10 +1652,109 @@
           async getAllCascadeTrajectories() {
             return await callJson('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {});
           },
+          async updateConversationAnnotations(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', req || {});
+          },
           async sendUserCascadeMessage(req) {
             return await callJson('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', req || {});
           },
         };
+      }
+
+      let lastDesktopTrajectorySyncTs = 0;
+      let desktopTrajectorySyncInFlight = false;
+
+      async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {
+        if (!cwStore || typeof cwStore.encodeRemoteAnnotationProfile !== 'function') return false;
+        let targetIds = [];
+        if (cascadeId && cascadeId !== 'remote-session') {
+          targetIds = [cascadeId];
+        } else if (!cascadeId) {
+          const activeView = viewOrEl || document?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+          const activeCid = activeView?.getAttribute?.('data-cascade-id') || window?.__agySniffedCascadeId;
+          if (activeCid && activeCid !== 'remote-session') {
+            targetIds = [activeCid];
+          }
+        }
+        if (!targetIds.length) return false;
+
+        for (const cid of targetIds) {
+          const profileStr = cwStore.encodeRemoteAnnotationProfile(cid);
+          if (!profileStr) continue;
+          const reqPayload = {
+            cascadeIds: [cid],
+            annotations: { activeProfile: profileStr },
+            mergeAnnotations: true,
+          };
+          const svc = getRemoteRpcServiceForElement(viewOrEl);
+          if (svc && typeof svc.updateConversationAnnotations === 'function') {
+            try {
+              await svc.updateConversationAnnotations(reqPayload);
+              continue;
+            } catch {}
+          }
+          const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
+          if (effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function') {
+            try {
+              await fetchFn('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': effCsrf },
+                body: JSON.stringify(reqPayload),
+              });
+            } catch {}
+          }
+        }
+        return true;
+      }
+
+      function pullAndBackfillTrajectorySummaries(summaries, csrf, viewOrEl, onRemoteUpdated) {
+        if (!summaries || typeof summaries !== 'object' || typeof cwStore?.syncFromRemoteAnnotations !== 'function') {
+          return false;
+        }
+        const { changed, unsyncedLocalIds } = cwStore.syncFromRemoteAnnotations(summaries);
+        if (Array.isArray(unsyncedLocalIds) && unsyncedLocalIds.length > 0) {
+          for (const cid of unsyncedLocalIds) {
+            pushSessionCwToServer(cid, csrf, viewOrEl).catch?.(() => {});
+          }
+        }
+        if (changed && typeof onRemoteUpdated === 'function') {
+          try { onRemoteUpdated(); } catch {}
+        }
+        return changed;
+      }
+
+      function syncDesktopAnnotations(csrf, viewOrEl, onRemoteUpdated, force = false) {
+        const nativeView = document?.querySelector?.('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
+        if (!nativeView && document?.querySelector?.('ga-remote-control')) return;
+        const now = Date.now();
+        if (desktopTrajectorySyncInFlight || (!force && now - lastDesktopTrajectorySyncTs < 4000)) return;
+        const svc = getRemoteRpcServiceForElement(viewOrEl);
+        const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
+        const canCallSvc = svc && typeof svc.getAllCascadeTrajectories === 'function';
+        const canCallHttp = effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function';
+        if (!canCallSvc && !canCallHttp) return;
+
+        lastDesktopTrajectorySyncTs = now;
+        desktopTrajectorySyncInFlight = true;
+        const p = canCallSvc
+          ? svc.getAllCascadeTrajectories({})
+          : fetchFn('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': effCsrf },
+              body: '{}',
+            }).then((r) => (r && r.ok !== false ? r.json() : null));
+
+        Promise.resolve(p)
+          .then((all) => {
+            const summaries = all?.trajectorySummaries;
+            if (summaries) {
+              pullAndBackfillTrajectorySummaries(summaries, effCsrf, viewOrEl, onRemoteUpdated);
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            desktopTrajectorySyncInFlight = false;
+          });
       }
 
       function ensureRemoteHostView(onCascadeChange) {
@@ -1490,6 +1810,7 @@
             const summaries = all?.trajectorySummaries || {};
             const entries = Object.entries(summaries);
             if (!entries.length) return;
+            const cwChanged = pullAndBackfillTrajectorySummaries(summaries, null, hostView);
             window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
             for (const [id, sum] of entries) {
               if (typeof sum?.stepCount === 'number') {
@@ -1514,7 +1835,7 @@
               const nextSteps = window.__agyRcStepCountByCascade[resolvedId] ?? -1;
               const prevObservedSteps = hostView.__agyObservedStepCount;
               hostView.__agyObservedStepCount = nextSteps;
-              if (prevId !== resolvedId || prevObservedSteps !== nextSteps) {
+              if (prevId !== resolvedId || prevObservedSteps !== nextSteps || cwChanged) {
                 hostView.setAttribute('data-cascade-id', resolvedId);
                 if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
               }
@@ -1569,11 +1890,11 @@
           while (curr) {
             const val = curr.memoizedProps?.value;
             if (val && typeof val === 'object') {
-              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function') {
+              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function') {
                 return val;
               }
               const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
-              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function')) {
+              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function')) {
                 return lsClient;
               }
             }
@@ -1785,6 +2106,7 @@
 
       return {
         ensureContextWindowSelectorFlag,
+        ensureCustomizationsStoreLoaded,
         ensureRemoteHostView,
         getRemoteControlInstance,
         getModelSelectorContextForView,
@@ -1794,6 +2116,9 @@
         getSelectedModelKey,
         applyContextWindowToEngine,
         runCompactForInputBox,
+        pushSessionCwToServer,
+        pullAndBackfillTrajectorySummaries,
+        syncDesktopAnnotations,
       };
     }
 
@@ -2040,31 +2365,42 @@
         menu.className = 'agy-ctx-menu';
 
         if (typeof menu.addEventListener === 'function') {
-          for (const evtName of ['mousedown', 'mouseup', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
+          for (const evtName of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
             menu.addEventListener(evtName, (ev) => ev.stopPropagation());
           }
         }
 
+        const sessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재 세션';
         const hdr = document.createElement('div');
         hdr.className = 'agy-ctx-menu-hdr';
         setHtml(hdr, `
           <span>세션 컨텍스트 한도</span>
-          <span style="opacity:0.75">${escHtml(cascadeId ? cascadeId.slice(0, 8) : '현재 세션')}</span>
+          <span style="opacity:0.75">${escHtml(sessionLabel)}</span>
         `);
         menu.appendChild(hdr);
 
         const customRow = document.createElement('div');
         customRow.className = 'agy-ctx-custom-row';
         setHtml(customRow, `
-          <input type="text" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
+          <input type="text" inputmode="numeric" pattern="[0-9]*" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
           <span class="agy-ctx-custom-unit">K</span>
           <button type="button" class="agy-ctx-custom-apply">적용</button>
         `);
         menu.appendChild(customRow);
 
+        let iframeDoc = null;
+        try {
+          iframeDoc = document?.querySelector?.('ga-remote-control iframe')?.contentDocument || null;
+        } catch {}
+        const winObj = document?.defaultView || null;
+
         const closeMenu = () => {
           menu.remove();
-          document?.removeEventListener('mousedown', outsideHandler, true);
+          for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
+            document?.removeEventListener?.(evt, outsideHandler, true);
+            try { iframeDoc?.removeEventListener?.(evt, outsideHandler, true); } catch {}
+          }
+          try { winObj?.removeEventListener?.('blur', closeMenu); } catch {}
         };
 
         const inputEl = customRow.querySelector('.agy-ctx-custom-input');
@@ -2130,7 +2466,11 @@
           }
         };
         setTimeout(() => {
-          document?.addEventListener('mousedown', outsideHandler, true);
+          for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
+            document?.addEventListener?.(evt, outsideHandler, true);
+            try { iframeDoc?.addEventListener?.(evt, outsideHandler, true); } catch {}
+          }
+          try { winObj?.addEventListener?.('blur', closeMenu); } catch {}
           const isCoarseOrNarrow = typeof document?.defaultView?.matchMedia === 'function'
             && document.defaultView.matchMedia('(max-width: 640px), (pointer: coarse)').matches;
           if (!isCoarseOrNarrow && inputEl && inputEl.isConnected && typeof inputEl.focus === 'function') {
@@ -2161,7 +2501,8 @@
           const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
 
           const limitModClass = maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : (maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '');
-          const limitTitle = `이 세션(${cascadeId ? cascadeId.slice(0, 8) : '현재'})의 컨텍스트 한도: ${currentCw} (${cwStore.getQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
+          const titleSessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재';
+          const limitTitle = `이 세션(${titleSessionLabel})의 컨텍스트 한도: ${currentCw} (${cwStore.getQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
 
           let quotaHtml = '';
           if (quota) {
@@ -2555,7 +2896,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v11';
+    const STATUSBAR_VERSION = 'v13';
 
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -2575,21 +2916,38 @@
 
       const underDefaultCwSet = new Set(['128K', '256K']);
       const refreshStyles = () => ensureStyleElement(doc, underDefaultCwSet);
+      let hostBridge = null;
 
       const cwStore = createContextWindowStore({
         document: doc,
         localStorage: ls,
         nativeStorage: win.nativeStorage,
-        onCustomCw: (cw) => registerCustomCwInPrototype(cw, underDefaultCwSet, refreshStyles),
+        onCustomCw: (cw) => {
+          let extraWin = null;
+          try {
+            extraWin = doc.querySelector?.('ga-remote-control iframe')?.contentWindow || null;
+          } catch {}
+          registerCustomCwInPrototype(cw, underDefaultCwSet, refreshStyles, extraWin);
+        },
+        onSaveCw: (cid) => {
+          if (hostBridge && typeof hostBridge.pushSessionCwToServer === 'function') {
+            hostBridge.pushSessionCwToServer(
+              cid,
+              win.__APP_CONFIG__?.csrfToken,
+              doc.querySelector?.('[data-testid="conversation-view"]')
+            );
+          }
+        },
       });
 
       refreshStyles();
 
       const setHtml = createTrustedHtmlSetter(win, doc);
-      const hostBridge = createHostBridge({
+      hostBridge = createHostBridge({
         window: win,
         document: doc,
         localStorage: ls,
+        fetchFn,
         cwStore,
       });
 
@@ -2689,6 +3047,7 @@
       function updateAll() {
         refreshStyles();
         hostBridge.ensureContextWindowSelectorFlag();
+        hostBridge.ensureCustomizationsStoreLoaded();
         hostBridge.ensureRemoteHostView(() => updateAll());
         const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
         const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
@@ -2696,13 +3055,14 @@
         if (!csrf && !hostBridge.getRemoteRpcServiceForElement(views[0])) return;
 
         const quotaPromise = rpcClient.fetchQuota(csrf, views[0]);
+        hostBridge.syncDesktopAnnotations(csrf, views[0], () => updateAll());
 
         for (const view of views) {
           const cascadeId = view.getAttribute('data-cascade-id');
           const inputBox = view.querySelector('[data-testid="agent-input-box"]');
           if (!cascadeId || !inputBox) continue;
 
-          const triggerEl = view.querySelector('[data-testid="model-selector-trigger"]');
+          const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
           const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
           const canAdoptFromDom = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
           if (canAdoptFromDom && domCw && CONTEXT_WINDOWS.includes(domCw) && view.__lastObservedDomCw && view.__lastObservedDomCw !== domCw) {
@@ -2750,6 +3110,12 @@
       };
 
       cwStore.loadPersistentContextSettings().then(() => {
+        hostBridge.syncDesktopAnnotations(
+          win.__APP_CONFIG__?.csrfToken,
+          doc.querySelector?.('[data-testid="conversation-view"]'),
+          () => updateAll(),
+          true
+        );
         updateAll();
       });
       updateAll();
@@ -2771,7 +3137,7 @@
             updateAll();
             return;
           }
-          const trigger = view.querySelector('[data-testid="model-selector-trigger"]');
+          const trigger = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
           if (cid && trigger) {
             const actual = cwStore.normalize(trigger.getAttribute('data-context-window')) || '256K';
             const expected = cwStore.getSavedContextWindow(cid);

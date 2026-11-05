@@ -2,7 +2,7 @@
 
 const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
 
-function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate) {
+function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
   if (!cw) return;
   const kNum = parseInt(cw, 10);
   if (!isNaN(kNum) && kNum > 0 && kNum <= 256 && underDefaultCwSet && !underDefaultCwSet.has(cw)) {
@@ -14,25 +14,33 @@ function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate) {
   if (cw === '256K' || cw === '512K' || cw === '900K') return;
   if (isNaN(kNum) || kNum <= 0) return;
   const tokens = kNum * 1000;
-  if (Object.prototype.hasOwnProperty.call(Object.prototype, cw)) return;
+  const protos = [Object.prototype];
   try {
-    Object.defineProperty(Object.prototype, cw, {
-      configurable: true,
-      enumerable: false,
-      get() {
-        if (this && this['512K'] === 512000 && this['900K'] === 900000) {
-          return tokens;
-        }
-        if (this && typeof this['512K'] === 'string' && this['512K'].indexOf('512K') !== -1) {
-          return `${cw} custom context limit (${tokens.toLocaleString('en-US')} tokens)`;
-        }
-        return undefined;
-      },
-    });
+    if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
+      protos.push(extraWin.Object.prototype);
+    }
   } catch {}
+  for (const proto of protos) {
+    if (Object.prototype.hasOwnProperty.call(proto, cw)) continue;
+    try {
+      Object.defineProperty(proto, cw, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          if (this && this['512K'] === 512000 && this['900K'] === 900000) {
+            return tokens;
+          }
+          if (this && typeof this['512K'] === 'string' && this['512K'].indexOf('512K') !== -1) {
+            return `${cw} custom context limit (${tokens.toLocaleString('en-US')} tokens)`;
+          }
+          return undefined;
+        },
+      });
+    } catch {}
+  }
 }
 
-function createHostBridge({ window, document, localStorage, cwStore }) {
+function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) {
   // Ensure context-window-selector flag is enabled in customFlagOverrides
   try {
     const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
@@ -59,6 +67,49 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
         const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
         if (decorated && typeof decorated === 'object') {
           window.__agyCapturedLsClient = decorated;
+          if (typeof decorated.subscribeToPlugins === 'function' && typeof decorated.getAllPlugins === 'function' && !decorated.__agyPluginsStreamPatched) {
+            decorated.__agyPluginsStreamPatched = true;
+            const origSub = decorated.subscribeToPlugins.bind(decorated);
+            decorated.subscribeToPlugins = function (req, opts) {
+              const stream = origSub(req, opts);
+              if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream;
+              return {
+                [Symbol.asyncIterator]() {
+                  const it = stream[Symbol.asyncIterator]();
+                  let yieldedFirst = false;
+                  return {
+                    async next() {
+                      if (!yieldedFirst) {
+                        yieldedFirst = true;
+                        let timer;
+                        const raceRes = await Promise.race([
+                          it.next().then((r) => ({ from: 'stream', r })),
+                          new Promise((resolve) => {
+                            timer = setTimeout(() => resolve({ from: 'timeout' }), 600);
+                          }),
+                        ]);
+                        clearTimeout(timer);
+                        if (raceRes.from === 'stream') return raceRes.r;
+                        try {
+                          const res = await decorated.getAllPlugins({ workspaceUris: [] });
+                          return { done: false, value: { plugins: res?.plugins || [] } };
+                        } catch {
+                          return it.next();
+                        }
+                      }
+                      return it.next();
+                    },
+                    return(v) {
+                      return typeof it.return === 'function' ? it.return(v) : Promise.resolve({ done: true, value: v });
+                    },
+                    throw(e) {
+                      return typeof it.throw === 'function' ? it.throw(e) : Promise.reject(e);
+                    },
+                  };
+                },
+              };
+            };
+          }
         }
         return decorated;
       };
@@ -125,6 +176,62 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
             }
           }
           fiber = fiber.return;
+        }
+      }
+    }
+  }
+
+  function ensureCustomizationsStoreLoaded() {
+    if (!document) return;
+    const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
+    for (const d of docs) {
+      const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
+      const rootEl = d.querySelector?.('#root, #app') || d.body?.firstElementChild;
+      const startNodes = [...views, rootEl].filter(Boolean);
+      for (const node of startNodes) {
+        const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$'));
+        const startFiber = fk ? node[fk] : null;
+        if (!startFiber) continue;
+        let up = startFiber;
+        let foundStore = null;
+        while (up) {
+          const val = up.memoizedProps?.value;
+          if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
+            foundStore = val;
+            break;
+          }
+          up = up.return;
+        }
+        if (!foundStore && node === rootEl) {
+          const stack = [startFiber];
+          const visited = new Set();
+          while (stack.length > 0 && visited.size < 2500) {
+            const f = stack.pop();
+            if (!f || visited.has(f)) continue;
+            visited.add(f);
+            const val = f.memoizedProps?.value;
+            if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
+              foundStore = val;
+              break;
+            }
+            if (f.sibling) stack.push(f.sibling);
+            if (f.child) stack.push(f.child);
+          }
+        }
+        if (foundStore) {
+          try {
+            if (typeof foundStore.disableStreaming === 'function' && !foundStore.streamingDisabled) {
+              foundStore.disableStreaming();
+            }
+            const st = typeof foundStore.state?.getState === 'function' ? foundStore.state.getState() : null;
+            if ((!foundStore.hasReceivedStreamSnapshot || st?.isLoadingPlugins) && !foundStore.__agyInitialRefreshTriggered) {
+              foundStore.__agyInitialRefreshTriggered = true;
+              Promise.resolve(foundStore.refresh()).catch(() => {
+                foundStore.__agyInitialRefreshTriggered = false;
+              });
+            }
+          } catch {}
+          break;
         }
       }
     }
@@ -369,10 +476,109 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
       async getAllCascadeTrajectories() {
         return await callJson('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {});
       },
+      async updateConversationAnnotations(req) {
+        return await callJson('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', req || {});
+      },
       async sendUserCascadeMessage(req) {
         return await callJson('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', req || {});
       },
     };
+  }
+
+  let lastDesktopTrajectorySyncTs = 0;
+  let desktopTrajectorySyncInFlight = false;
+
+  async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {
+    if (!cwStore || typeof cwStore.encodeRemoteAnnotationProfile !== 'function') return false;
+    let targetIds = [];
+    if (cascadeId && cascadeId !== 'remote-session') {
+      targetIds = [cascadeId];
+    } else if (!cascadeId) {
+      const activeView = viewOrEl || document?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+      const activeCid = activeView?.getAttribute?.('data-cascade-id') || window?.__agySniffedCascadeId;
+      if (activeCid && activeCid !== 'remote-session') {
+        targetIds = [activeCid];
+      }
+    }
+    if (!targetIds.length) return false;
+
+    for (const cid of targetIds) {
+      const profileStr = cwStore.encodeRemoteAnnotationProfile(cid);
+      if (!profileStr) continue;
+      const reqPayload = {
+        cascadeIds: [cid],
+        annotations: { activeProfile: profileStr },
+        mergeAnnotations: true,
+      };
+      const svc = getRemoteRpcServiceForElement(viewOrEl);
+      if (svc && typeof svc.updateConversationAnnotations === 'function') {
+        try {
+          await svc.updateConversationAnnotations(reqPayload);
+          continue;
+        } catch {}
+      }
+      const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
+      if (effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function') {
+        try {
+          await fetchFn('/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': effCsrf },
+            body: JSON.stringify(reqPayload),
+          });
+        } catch {}
+      }
+    }
+    return true;
+  }
+
+  function pullAndBackfillTrajectorySummaries(summaries, csrf, viewOrEl, onRemoteUpdated) {
+    if (!summaries || typeof summaries !== 'object' || typeof cwStore?.syncFromRemoteAnnotations !== 'function') {
+      return false;
+    }
+    const { changed, unsyncedLocalIds } = cwStore.syncFromRemoteAnnotations(summaries);
+    if (Array.isArray(unsyncedLocalIds) && unsyncedLocalIds.length > 0) {
+      for (const cid of unsyncedLocalIds) {
+        pushSessionCwToServer(cid, csrf, viewOrEl).catch?.(() => {});
+      }
+    }
+    if (changed && typeof onRemoteUpdated === 'function') {
+      try { onRemoteUpdated(); } catch {}
+    }
+    return changed;
+  }
+
+  function syncDesktopAnnotations(csrf, viewOrEl, onRemoteUpdated, force = false) {
+    const nativeView = document?.querySelector?.('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
+    if (!nativeView && document?.querySelector?.('ga-remote-control')) return;
+    const now = Date.now();
+    if (desktopTrajectorySyncInFlight || (!force && now - lastDesktopTrajectorySyncTs < 4000)) return;
+    const svc = getRemoteRpcServiceForElement(viewOrEl);
+    const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
+    const canCallSvc = svc && typeof svc.getAllCascadeTrajectories === 'function';
+    const canCallHttp = effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function';
+    if (!canCallSvc && !canCallHttp) return;
+
+    lastDesktopTrajectorySyncTs = now;
+    desktopTrajectorySyncInFlight = true;
+    const p = canCallSvc
+      ? svc.getAllCascadeTrajectories({})
+      : fetchFn('/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': effCsrf },
+          body: '{}',
+        }).then((r) => (r && r.ok !== false ? r.json() : null));
+
+    Promise.resolve(p)
+      .then((all) => {
+        const summaries = all?.trajectorySummaries;
+        if (summaries) {
+          pullAndBackfillTrajectorySummaries(summaries, effCsrf, viewOrEl, onRemoteUpdated);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        desktopTrajectorySyncInFlight = false;
+      });
   }
 
   function ensureRemoteHostView(onCascadeChange) {
@@ -428,6 +634,7 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
         const summaries = all?.trajectorySummaries || {};
         const entries = Object.entries(summaries);
         if (!entries.length) return;
+        const cwChanged = pullAndBackfillTrajectorySummaries(summaries, null, hostView);
         window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
         for (const [id, sum] of entries) {
           if (typeof sum?.stepCount === 'number') {
@@ -452,7 +659,7 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
           const nextSteps = window.__agyRcStepCountByCascade[resolvedId] ?? -1;
           const prevObservedSteps = hostView.__agyObservedStepCount;
           hostView.__agyObservedStepCount = nextSteps;
-          if (prevId !== resolvedId || prevObservedSteps !== nextSteps) {
+          if (prevId !== resolvedId || prevObservedSteps !== nextSteps || cwChanged) {
             hostView.setAttribute('data-cascade-id', resolvedId);
             if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
           }
@@ -507,11 +714,11 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
       while (curr) {
         const val = curr.memoizedProps?.value;
         if (val && typeof val === 'object') {
-          if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function') {
+          if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function') {
             return val;
           }
           const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
-          if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function')) {
+          if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function')) {
             return lsClient;
           }
         }
@@ -723,6 +930,7 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
 
   return {
     ensureContextWindowSelectorFlag,
+    ensureCustomizationsStoreLoaded,
     ensureRemoteHostView,
     getRemoteControlInstance,
     getModelSelectorContextForView,
@@ -732,6 +940,9 @@ function createHostBridge({ window, document, localStorage, cwStore }) {
     getSelectedModelKey,
     applyContextWindowToEngine,
     runCompactForInputBox,
+    pushSessionCwToServer,
+    pullAndBackfillTrajectorySummaries,
+    syncDesktopAnnotations,
   };
 }
 

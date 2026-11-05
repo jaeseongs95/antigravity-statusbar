@@ -126,6 +126,7 @@ const STYLE_CSS = `
       display: flex;
       flex-direction: column;
       min-width: 215px;
+      text-align: left;
     }
     .agy-ctx-menu-hdr {
       padding: 2px 10px 5px 10px;
@@ -356,6 +357,23 @@ const STYLE_CSS = `
       .agy-ctx-group-ctx {
         flex-basis: 100%;
       }
+      .agy-ctx-menu,
+      .agy-rc-host-box .agy-ctx-menu {
+        min-width: min(250px, calc(100vw - 24px));
+        max-width: calc(100vw - 16px);
+      }
+      .agy-ctx-menu-item {
+        padding: 7px 12px;
+        font-size: 12px;
+      }
+      .agy-ctx-custom-input {
+        font-size: 16px;
+        padding: 4px 8px;
+      }
+      .agy-ctx-custom-apply {
+        padding: 5px 10px;
+        font-size: 11.5px;
+      }
       .agy-ctx-modal-backdrop {
         padding: 8px;
       }
@@ -394,17 +412,24 @@ function buildDynamicCwWarnCss(underDefaultCwSet) {
 
 function ensureStyleElement(document, underDefaultCwSet) {
   if (!document) return;
-  const parent = document.head || document.documentElement;
-  if (!parent) return;
-  let styleEl = document.getElementById('agy-ctx-statusbar-style');
-  if (!styleEl) {
-    styleEl = document.createElement('style');
-    styleEl.id = 'agy-ctx-statusbar-style';
-    parent.appendChild(styleEl);
-  }
   const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
-  if (styleEl.textContent !== fullCss) {
-    styleEl.textContent = fullCss;
+  const docs = [document];
+  try {
+    const iframeDoc = document.querySelector?.('ga-remote-control iframe')?.contentDocument;
+    if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
+  } catch {}
+  for (const d of docs) {
+    const parent = d.head || d.documentElement;
+    if (!parent) continue;
+    let styleEl = d.getElementById('agy-ctx-statusbar-style');
+    if (!styleEl) {
+      styleEl = d.createElement('style');
+      styleEl.id = 'agy-ctx-statusbar-style';
+      parent.appendChild(styleEl);
+    }
+    if (styleEl.textContent !== fullCss) {
+      styleEl.textContent = fullCss;
+    }
   }
 }
 

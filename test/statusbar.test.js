@@ -693,6 +693,101 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
 
     sandbox.window.__agyStatusBarCleanup();
   });
+
+  it('recovers CustomizationsStore when SubscribeToPlugins hangs in Loading installed plugins...', async () => {
+    const { sandbox } = createDomSandbox();
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+
+    let refreshCalled = 0;
+    let disableStreamingCalled = 0;
+    const fakeCustomizationsStore = {
+      hasReceivedStreamSnapshot: false,
+      streamingDisabled: false,
+      state: {
+        getState: () => ({ isLoadingPlugins: !fakeCustomizationsStore.hasReceivedStreamSnapshot }),
+      },
+      disableStreaming() {
+        disableStreamingCalled += 1;
+        this.streamingDisabled = true;
+      },
+      receiveStreamedPlugins() {},
+      async refresh() {
+        refreshCalled += 1;
+        this.hasReceivedStreamSnapshot = true;
+      },
+    };
+
+    view.__reactFiber$test.return = {
+      memoizedProps: { value: fakeCustomizationsStore },
+      return: null,
+    };
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(disableStreamingCalled, 1, 'should disable broken SubscribeToPlugins streaming');
+    assert.equal(refreshCalled, 1, 'should trigger CustomizationsStore.refresh() fallback once');
+    assert.equal(fakeCustomizationsStore.hasReceivedStreamSnapshot, true);
+
+    sandbox.window.__agyStatusBarCleanup();
+  });
+
+  it('synchronizes per-session context window between Desktop nativeStorage and Mobile Remote Control via UpdateConversationAnnotations', async () => {
+    const { sandbox, getMountedBar } = createDomSandbox();
+    const cid = 'test-session-1';
+    let serverProfile = '384K|512K|1793842900000';
+    const annotationUpdates = [];
+
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    view.__reactFiber$test.memoizedProps.value.core = {
+      projectManagementService: {
+        lsClient: {
+          getAllCascadeTrajectories: async () => ({
+            trajectorySummaries: {
+              [cid]: {
+                stepCount: 42,
+                lastModifiedTime: '2026-11-05T01:40:00Z',
+                annotations: {
+                  lastUserViewTime: '2026-11-05T01:45:00Z',
+                  activeProfile: serverProfile,
+                },
+              },
+            },
+          }),
+          updateConversationAnnotations: async (req) => {
+            annotationUpdates.push(req);
+            serverProfile = req?.annotations?.activeProfile || serverProfile;
+            return {};
+          },
+        },
+      },
+    };
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.equal(api.getConversationContextWindow(view, cid), '384K', 'should adopt 384K from server annotations.activeProfile even when Redux seeded 256K');
+    const barEl = getMountedBar();
+    assert.ok(barEl);
+    const coreNode = barEl.querySelector('.agy-ctx-left').querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode);
+    assert.ok(coreNode.innerHTML.includes('[ 384k ▾ ]'), 'limit button should display [ 384k ▾ ] matching server annotation');
+
+    // Change context window to 256K -> should push UpdateConversationAnnotations to server
+    api.setConversationContextWindow(view, cid, '256K');
+    api.updateAll();
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(api.getConversationContextWindow(view, cid), '256K');
+    assert.ok(coreNode.innerHTML.includes('[ 256k ▾ ]'), 'limit button should update to [ 256k ▾ ]');
+    assert.ok(annotationUpdates.length >= 1, 'changing context window should call UpdateConversationAnnotations');
+    assert.deepEqual(annotationUpdates[annotationUpdates.length - 1].cascadeIds, [cid]);
+    assert.ok(String(annotationUpdates[annotationUpdates.length - 1].annotations.activeProfile).startsWith('256K|'));
+
+    sandbox.window.__agyStatusBarCleanup();
+  });
 });
 
 describe('ASAR exact-size transformation', () => {
