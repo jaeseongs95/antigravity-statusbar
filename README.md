@@ -16,16 +16,18 @@ Custom context window statusbar (`.agy-ctx-statusbar`), **`StatusBarAdapter` ext
   - External plugins or user scripts can dynamically add, replace, or remove buttons and widgets via `window.agyStatusBar.registerAdapter(adapter)`.
 - **Real-Time Context & Cache Telemetry**:
   - Displays current context token usage (`pct%`, `used / limit`), prompt cache hit rate (`cache %`), and `5h` / `7d` quota remaining directly inside the chat input box.
-- **Per-Session Arbitrary Context Limit (`32K` – `980K`)**:
+- **Per-Session Arbitrary Context Limit (`32K` – `980K`) & Backend Checkpointer Sync**:
   - Click `[ 256k ▾ ]` to open the per-session context limit menu.
   - Type any custom value between `32` and `980` (`K` tokens) or choose from presets (`128K`, `256K`, `384K`, `512K`, `750K`, `900K`).
+  - Injects `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`) into both JSON and Protobuf binary `SendUserCascadeMessage` requests so `language_server.exe`'s checkpointer (`GetCheckpointConfig`) honors the selected token limit (e.g. `384K`) instead of falling back to the `256K` model default, and immediately reflects `Compacting` post-compaction token reductions (`estimatedAfterCompaction`).
   - Stored per `cascadeId` across `localStorage`, cookies, and `nativeStorage`, while isolating Redux's global default so changing one conversation never pollutes other sessions.
   - Suppresses the yellow warning icon (`⚠️`) in the native model selector pill when the session limit is `<= 256K` while keeping the `· {cw}` badge visible.
 - **Zero-Offset `app.asar` & Sandboxed `preload.js` Auto-Patcher**:
   - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` while preserving exact byte lengths (`0` offset drift) and updating `ElectronAsarIntegrity` SHA-256 block hashes.
-- **Remote Control Web & Mobile Support (`https://antigravity.google.com/r/...`)**:
+- **Remote Control Web & Mobile Support + Host-Aware Companion Loading (`https://antigravity.google.com/r/...`)**:
   - Works in Antigravity Remote Control web sessions (desktop & mobile browsers) where `csrfToken` and local `/exa.language_server_pb...` HTTP endpoints are absent, by automatically bridging both the top-level `<ga-remote-control>` Angular host shell (`RemoteControlComponent.prototype.proxyCommand`) and the internal React Fiber WebRTC/WebChannel RPC service (`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`).
-  - Includes a built-in `// ==UserScript==` header in `dist/statusbar_autoinject.js` for Tampermonkey/AdGuard and supports one-tap Mobile Chrome bookmarklet execution (CSP `nonce` & `TrustedTypes` compliant):
+  - **Host-Aware One-Click Companion Loading**: Inspects the host PC's `~/.gemini/antigravity/statusbar_autoinject.js` via `LanguageServerService` (`GetCustomizationStates` / `ReadFile`) and automatically loads **only the companion plugins (`antigravity-mcp-manager`, `ko-thought-translator`) that are actually installed on the host** (supports 1 standalone plugin, any 2-plugin combination, or all 3 plugins, with offline host-bundle fallback).
+  - Includes a built-in `// ==UserScript==` header in `dist/statusbar_autoinject.js` for Tampermonkey/AdGuard and supports one-tap Chrome bookmarklet execution (CSP `nonce` & `TrustedTypes` compliant):
     ```javascript
     javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
     ```

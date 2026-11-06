@@ -11,55 +11,124 @@ const { createContextButtonAdapter } = require('./adapters/context-button');
 
 const STATUSBAR_VERSION = 'v15';
 
-function ensureRemoteCompanionScripts(win, doc, fetchFn) {
+function injectScriptText(win, doc, code) {
+  if (!code || !doc?.head) return false;
+  const s = doc.createElement('script');
+  const nonceEl = doc.querySelector?.('script[nonce]');
+  const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
+  if (nonce) s.nonce = nonce;
+  let policy = win.__agyTrustedTypesPolicy || null;
+  if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
+    try {
+      policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
+        createScript: (x) => x,
+      });
+      win.__agyTrustedTypesPolicy = policy;
+    } catch {}
+  }
+  s.text = policy ? policy.createScript(code) : code;
+  doc.head.appendChild(s);
+  return true;
+}
+
+function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
   try {
     const isRemoteWeb = Boolean(
       win?.location?.hostname && String(win.location.hostname).includes('antigravity.google.com')
     );
+    if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
     const effFetch = fetchFn || win?.fetch;
-    if (!isRemoteWeb || typeof effFetch !== 'function' || !doc?.head) return;
 
-    const loadScript = (flagKey, url) => {
-      if (win[flagKey]) return;
+    const loadScript = (flagKey, url, fallbackCode) => {
+      if (win[flagKey]) return Promise.resolve(false);
       win[flagKey] = true;
-      effFetch(`${url}?t=${Date.now()}`)
+      if (typeof effFetch !== 'function') {
+        if (fallbackCode) {
+          return Promise.resolve(injectScriptText(win, doc, fallbackCode));
+        }
+        win[flagKey] = false;
+        return Promise.resolve(false);
+      }
+      return Promise.resolve(
+        effFetch(`${url}?t=${Date.now()}`)
+      )
         .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
         .then((code) => {
-          if (!code) return;
-          const s = doc.createElement('script');
-          const nonceEl = doc.querySelector?.('script[nonce]');
-          const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
-          if (nonce) s.nonce = nonce;
-          let policy = win.__agyTrustedTypesPolicy || null;
-          if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-            try {
-              policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
-                createScript: (x) => x,
-              });
-              win.__agyTrustedTypesPolicy = policy;
-            } catch {}
+          const finalCode = code || fallbackCode || '';
+          if (!finalCode) {
+            win[flagKey] = false;
+            return false;
           }
-          s.text = policy ? policy.createScript(code) : code;
-          doc.head.appendChild(s);
+          return injectScriptText(win, doc, finalCode);
         })
         .catch(() => {
+          if (fallbackCode) {
+            return injectScriptText(win, doc, fallbackCode);
+          }
           win[flagKey] = false;
+          return false;
         });
     };
 
-    if (!win.agyMcpManager) {
-      loadScript(
-        '__agyLoadingMcpManagerCompanion',
-        'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'
-      );
-    }
-    if (!win.__agyKoLocalizerActive) {
-      loadScript(
-        '__agyLoadingKoTranslatorCompanion',
-        'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js'
-      );
-    }
-  } catch {}
+    const resolveHostInfo = async () => {
+      if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
+        return { resolved: true, ...win.__agyHostInstalledPlugins };
+      }
+      if (hostBridge && typeof hostBridge.fetchHostInstalledPluginInfo === 'function') {
+        const info = await hostBridge.fetchHostInstalledPluginInfo(
+          win.__APP_CONFIG__?.csrfToken,
+          doc.querySelector?.('[data-testid="conversation-view"]')
+        );
+        if (info && info.resolved) {
+          win.__agyHostInstalledPlugins = info;
+          return info;
+        }
+      }
+      return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
+    };
+
+    let attempts = 0;
+    const tryLoadInstalledCompanions = async () => {
+      attempts += 1;
+      const info = await resolveHostInfo();
+      if (!info.resolved) {
+        if (attempts < 5) {
+          const setTimeoutFn = win.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+          if (setTimeoutFn) {
+            const t = setTimeoutFn(tryLoadInstalledCompanions, 1500);
+            if (t && typeof t.unref === 'function') t.unref();
+          }
+        }
+        return info;
+      }
+
+      const tasks = [];
+      if (info.hasMcpManager && !win.agyMcpManager) {
+        tasks.push(
+          loadScript(
+            '__agyLoadingMcpManagerCompanion',
+            'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+            info.mcpManagerCode
+          )
+        );
+      }
+      if (info.hasKoTranslator && !win.__agyKoLocalizerActive) {
+        tasks.push(
+          loadScript(
+            '__agyLoadingKoTranslatorCompanion',
+            'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js',
+            info.koTranslatorCode
+          )
+        );
+      }
+      await Promise.all(tasks);
+      return info;
+    };
+
+    return tryLoadInstalledCompanions();
+  } catch {
+    return Promise.resolve(null);
+  }
 }
 
 function mountStatusBar(env = {}) {
@@ -106,7 +175,6 @@ function mountStatusBar(env = {}) {
   });
 
   refreshStyles();
-  ensureRemoteCompanionScripts(win, doc, fetchFn);
 
   const setHtml = createTrustedHtmlSetter(win, doc);
   hostBridge = createHostBridge({
@@ -116,6 +184,7 @@ function mountStatusBar(env = {}) {
     fetchFn,
     cwStore,
   });
+  ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge);
 
   const rpcClient = createRpcClient({
     window: win,

@@ -16,17 +16,19 @@
   - 외부 스크립트나 플러그인에서 `window.agyStatusBar.registerAdapter(adapter)` API로 새 버튼이나 상태 위젯을 코어 수정 없이 등록·교체·제거할 수 있습니다.
 - **실시간 컨텍스트·캐시·쿼터 표시**:
   - 현재 대화 세션의 컨텍스트 토큰 사용률(`pct%`, `used / limit`), 프롬프트 캐시 적중률(`cache %`), `5h` / `7d` 잔여 쿼터를 채팅 입력창 하단에서 실시간으로 보여줍니다.
-- **세션별 컨텍스트 한도 자유 입력 및 프리셋 선택 (`32K` – `980K`)**:
+- **세션별 컨텍스트 한도 자유 입력(`32K` – `980K`) 및 백엔드 체크포인터(`max_token_limit`) 실시간 동기화**:
   - 하단바의 `[ 256k ▾ ]` 버튼을 클릭하면 세션별 컨텍스트 한도 설정 메뉴가 열립니다.
   - `32`~`980` (`K` 토큰) 사이의 원하는 값을 직접 입력하거나 프리셋(`128K`, `256K`, `384K`, `512K`, `750K`, `900K`)을 선택할 수 있습니다.
+  - `SendUserCascadeMessage` 요청(JSON 및 Protobuf Binary) 전송 시 `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`)에 선택된 토큰 한도(예: `384000`)를 함께 주입하여 백엔드 `language_server.exe`의 `GetCheckpointConfig`가 기본값 `256K` 대신 사용자가 설정한 한도에서 `Compacting`을 수행하도록 동기화하며, `Compacting` 직후에도 `agentStateProvider`의 `estimatedAfterCompaction`을 즉시 반영해 상태바 토큰 수치를 실시간으로 갱신합니다.
   - 세션 식별자(`cascadeId`)별로 `localStorage`, 쿠키, `nativeStorage`에 영구 보존되며, Redux 전역 기본값을 격리해 특정 세션의 한도 변경이 다른 세션에 영향을 주지 않습니다.
   - 세션 한도가 `256K` 이하(`<= 256K`)일 때는 네이티브 모델 선택기의 `· {cw}` 배지는 유지하면서 노란색 주의 아이콘(`⚠️`)만 숨깁니다.
 - **오프셋 보존(`0` drift) `app.asar` 및 샌드박스 `preload.js` 자동 복구 패처**:
   - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 원본 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
   - 트레이에서 이미 실행 중인 프로세스에서 새 창을 열거나 앱이 업데이트된 직후에도 `app_storage.json` 동기화 및 실시간 CDP 주입으로 상태바를 즉시 복구합니다.
-- **원격 제어(Remote Control) 웹 및 모바일 브라우저 완벽 지원 (`https://antigravity.google.com/r/...`)**:
+- **원격 제어(Remote Control) 웹 지원 및 호스트 설치 맞춤형 스마트 통합 로드 (`https://antigravity.google.com/r/...`)**:
   - 로컬 HTTP 엔드포인트와 `csrfToken`이 없는 Remote Control 원격 웹 환경에서도 최상위 `<ga-remote-control>` Angular 호스트 셸(`RemoteControlComponent.prototype.proxyCommand`) 및 React Fiber 내부의 WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`)를 자동 브릿지하여 컨텍스트 사용량, 한도 선택, 캐시율, 잔여 쿼터, `[ compact ]`, `[ context ]` 모달이 동일하게 동작합니다.
-  - `dist/statusbar_autoinject.js` 상단에 Tampermonkey/AdGuard용 `// ==UserScript==` 헤더가 포함되어 있으며, 확장프로그램을 지원하지 않는 모바일 크롬에서는 아래 주소창 북마클릿(CSP `nonce` 및 `TrustedTypes` 정책 완벽 대응)으로 즉시 실행할 수 있습니다:
+  - **호스트 설치 맞춤형 동반 로드**: 원격 웹에서 북마클릿 실행 시 호스트 PC의 `~/.gemini/antigravity/statusbar_autoinject.js`를 `LanguageServerService`(`GetCustomizationStates` / `ReadFile`)로 확인하여 **호스트에 실제로 설치된 동반 플러그인(`antigravity-mcp-manager`, `ko-thought-translator`)만** 자동으로 함께 로드합니다(1개 단독 설치 시 해당 1개만 로드, 2개 또는 3개 설치 시 설치된 조합만 로드, 네트워크 차단 시 호스트 로컬 블록 폴백 지원).
+  - `dist/statusbar_autoinject.js` 상단에 Tampermonkey/AdGuard용 `// ==UserScript==` 헤더가 포함되어 있으며, 확장프로그램을 지원하지 않는 모바일·원격 크롬에서는 아래 북마클릿(CSP `nonce` 및 `TrustedTypes` 정책 완벽 대응)으로 즉시 실행할 수 있습니다:
     ```javascript
     javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
     ```

@@ -23,16 +23,20 @@ function getBucketRemainingFraction(b) {
 }
 
 function extractStatsFromMetas(metas) {
-  let used = 0, max = 256000, cacheRead = 0, inputTok = 0;
+  let used = 0, max = 256000, cacheRead = 0, inputTok = 0, lastMetaStepIndex = -1;
   let foundCtx = false, foundUsage = false;
   for (let i = metas.length - 1; i >= 0; i--) {
-    const cm = getChatModelFromMeta(metas[i]);
+    const m = metas[i];
+    const cm = getChatModelFromMeta(m);
     if (!cm) continue;
     if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
       const cwm = cm.chatStartMetadata.contextWindowMetadata;
       if (cwm.estimatedTokensUsed) {
         used = Number(cwm.estimatedTokensUsed);
         max = Number(cwm.maxContextTokens || 256000);
+        if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
+          lastMetaStepIndex = Number(m.stepIndices[m.stepIndices.length - 1]);
+        }
         foundCtx = true;
       }
     }
@@ -45,7 +49,7 @@ function extractStatsFromMetas(metas) {
   }
   const totalPrompt = cacheRead + inputTok;
   const cachePct = totalPrompt > 0 ? Math.round((cacheRead / totalPrompt) * 100) : 0;
-  return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, foundCtx, foundUsage };
+  return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, lastMetaStepIndex, foundCtx, foundUsage };
 }
 
 function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
@@ -163,7 +167,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
       return { metas, knownGenLen: metas.length };
     }
 
-    let cur = Math.ceil(sc * 0.52);
+    let cur = Math.ceil(sc * 0.42);
     while (cur > 0) {
       const metas = await callGenMeta(cur);
       if (metas.length > 0) {
@@ -171,7 +175,8 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
         knownGenLenMap.set(cascadeId, nextLen);
         return { metas, knownGenLen: nextLen };
       }
-      cur = Math.max(0, cur - 35);
+      const stepDown = Math.max(35, Math.floor(cur * 0.22));
+      cur = Math.max(0, cur - stepDown);
     }
 
     const metas0 = await callGenMeta(0);
@@ -181,19 +186,65 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     return { metas: metas0, knownGenLen: metas0.length };
   }
 
+  function applyRealtimeCompactionAndUsage(parsed, fullState) {
+    if (!fullState || typeof fullState !== 'object') return parsed;
+    const cwUsage = fullState.contextWindowUsage;
+    const compactedSteps = fullState.compactionInfo?.compactedAtStepIndices;
+    const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
+      ? Number(compactedSteps[compactedSteps.length - 1])
+      : -1;
+
+    const base = parsed || {
+      used: 0,
+      trajectoryMax: 256000,
+      cacheRead: 0,
+      inputTok: 0,
+      cachePct: 0,
+      lastMetaStepIndex: -1,
+      foundCtx: false,
+      foundUsage: false,
+    };
+
+    if (cwUsage && typeof cwUsage === 'object') {
+      const uMax = Number(cwUsage.maxContextTokens || 0);
+      if (uMax > 0) {
+        base.trajectoryMax = uMax;
+      }
+      const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
+      const uStep = Number(cwUsage.lastStepIndex ?? -1);
+      const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+
+      if (afterCompact > 0 && (latestCompactedStep >= base.lastMetaStepIndex || afterCompact < base.used)) {
+        base.used = afterCompact;
+        base.foundCtx = true;
+      } else if (uEst > 0 && (!base.foundCtx || (uStep >= 0 && base.lastMetaStepIndex >= 0 && uStep > base.lastMetaStepIndex))) {
+        base.used = uEst;
+        base.foundCtx = true;
+      }
+    }
+    return base;
+  }
+
   function fetchCascadeStats(cascadeId, csrf, inputBox) {
     if (!cascadeId || cascadeId === 'remote-session') {
       return Promise.resolve(null);
     }
     const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
-    const slice = asp?.getState?.()?.trajectorySlice;
+    const fullState = asp?.getState?.();
+    const slice = fullState?.trajectorySlice;
     const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
     const totalStepsLen = slice?.totalStepsLength ?? -1;
+    const compactedSteps = fullState?.compactionInfo?.compactedAtStepIndices;
+    const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
+      ? Number(compactedSteps[compactedSteps.length - 1])
+      : -1;
+    const cwAfterCompact = Number(fullState?.contextWindowUsage?.estimatedAfterCompaction || 0);
     const cached = stateCache.get(cascadeId);
     const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
-    const versionKey = `${totalGenLen}:${totalStepsLen}`;
+    const versionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
+    const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
 
-    if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < 30000)) {
+    if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
       return Promise.resolve(cached);
     }
 
@@ -268,6 +319,8 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           }
         }
 
+        parsed = applyRealtimeCompactionAndUsage(parsed, fullState);
+
         if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
           return cached || null;
         }
@@ -277,7 +330,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           window.__agyRcGenLenByCascade[cascadeId] = discoveredGenLen;
         }
 
-        const finalVersionKey = `${totalGenLen}:${totalStepsLen}`;
+        const finalVersionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
         const data = {
           used: parsed.used,
           trajectoryMax: parsed.trajectoryMax,

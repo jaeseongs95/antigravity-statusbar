@@ -633,6 +633,8 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(sentCompactPayload, 'clicking [ compact ] on ga-remote-control should send SendUserCascadeMessage via proxyCommand');
     assert.equal(sentCompactPayload.cascadeId, '1f3f7633-f0b7-4fc7-a958-9fb667c85623');
     assert.equal(sentCompactPayload.items[0].item.slashCommand.info.name, 'compact');
+    assert.equal(sentCompactPayload.cascadeConfig?.checkpointConfig?.contextWindow, '600K');
+    assert.equal(sentCompactPayload.cascadeConfig?.checkpointConfig?.maxTokenLimit, 600000, 'remote proxyCommand SendUserCascadeMessage must also inject maxTokenLimit: 600000');
 
     sandbox.window.__agyStatusBarCleanup();
   });
@@ -940,44 +942,257 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     sandbox.window.__agyStatusBarCleanup();
   });
 
-  it('automatically loads MCP Manager and KoTranslator companion bundles when bookmarklet is clicked on antigravity.google.com', async () => {
-    const appendedScripts = [];
-    const fetchedUrls = [];
-    const fakeDoc = {
-      head: {
-        appendChild(el) {
-          appendedScripts.push(el);
+  it('loads only the companion plugins actually installed on the host (1-plugin solo, 2-plugin combo, 3-plugin full, and offline host-block fallback)', async () => {
+    const makeEnv = (hostBundleContent, fetchShouldFail = false) => {
+      const appendedScripts = [];
+      const fetchedUrls = [];
+      const fakeDoc = {
+        head: {
+          appendChild(el) {
+            appendedScripts.push(el);
+          },
         },
-      },
-      querySelector(sel) {
-        if (sel === 'script[nonce]') return { nonce: 'test-csp-nonce' };
-        return null;
-      },
-      createElement(tag) {
-        return { tagName: tag.toUpperCase(), nonce: '', text: '' };
-      },
-    };
-    const fakeWin = {
-      location: { hostname: 'antigravity.google.com' },
-    };
-    const fakeFetch = async (url) => {
-      fetchedUrls.push(url);
-      return {
-        ok: true,
-        async text() {
-          return `// loaded ${url}`;
+        querySelector(sel) {
+          if (sel === 'script[nonce]') return { nonce: 'test-csp-nonce' };
+          return null;
+        },
+        createElement(tag) {
+          return { tagName: tag.toUpperCase(), nonce: '', text: '' };
         },
       };
+      const fakeWin = {
+        location: { hostname: 'antigravity.google.com' },
+      };
+      const fakeFetch = async (url) => {
+        fetchedUrls.push(url);
+        if (fetchShouldFail) throw new Error('network blocked');
+        return {
+          ok: true,
+          async text() {
+            return `// loaded from github: ${url}`;
+          },
+        };
+      };
+      const fakeHostBridge = {
+        async fetchHostInstalledPluginInfo() {
+          const hasMcp = hostBundleContent.includes('BEGIN_AGY_MCP_MANAGER_V1');
+          const hasKo = hostBundleContent.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2');
+          return {
+            resolved: true,
+            hasStatusbar: hostBundleContent.includes('mountStatusBar'),
+            hasMcpManager: hasMcp,
+            hasKoTranslator: hasKo,
+            mcpManagerCode: hasMcp ? '/* === BEGIN_AGY_MCP_MANAGER_V1 === */\nwindow.agyMcpManager={};\n/* === END_AGY_MCP_MANAGER_V1 === */' : '',
+            koTranslatorCode: hasKo ? '/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */\nwindow.__agyKoLocalizerActive=true;\n/* === END_AGY_KO_THOUGHT_LOCALIZER_V2 === */' : '',
+            hostBundleText: hostBundleContent,
+          };
+        },
+      };
+      return { fakeWin, fakeDoc, fakeFetch, fakeHostBridge, appendedScripts, fetchedUrls };
     };
 
-    ensureRemoteCompanionScripts(fakeWin, fakeDoc, fakeFetch);
-    await new Promise((r) => setTimeout(r, 20));
+    // Case 1: User installed ONLY statusbar (1 plugin solo) -> must NOT load MCP Manager or KoTranslator
+    {
+      const env1 = makeEnv('function mountStatusBar() {}');
+      await ensureRemoteCompanionScripts(env1.fakeWin, env1.fakeDoc, env1.fakeFetch, env1.fakeHostBridge);
+      assert.equal(env1.fetchedUrls.length, 0, 'solo statusbar user must not fetch un-installed companions');
+      assert.equal(env1.appendedScripts.length, 0, 'solo statusbar user must not inject un-installed companions');
+    }
 
-    assert.equal(fetchedUrls.length, 2);
-    assert.ok(fetchedUrls.some((u) => u.includes('mcp_manager_autoinject.js')));
-    assert.ok(fetchedUrls.some((u) => u.includes('ko_thought_autoinject.js')));
-    assert.equal(appendedScripts.length, 2);
-    assert.equal(appendedScripts[0].nonce, 'test-csp-nonce');
+    // Case 2A: User installed statusbar + MCP Manager (2 plugins) -> must load ONLY MCP Manager
+    {
+      const env2a = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */');
+      await ensureRemoteCompanionScripts(env2a.fakeWin, env2a.fakeDoc, env2a.fakeFetch, env2a.fakeHostBridge);
+      assert.equal(env2a.fetchedUrls.length, 1);
+      assert.ok(env2a.fetchedUrls[0].includes('mcp_manager_autoinject.js'));
+      assert.equal(env2a.appendedScripts.length, 1);
+    }
+
+    // Case 2B: User installed statusbar + KoTranslator (2 plugins) -> must load ONLY KoTranslator
+    {
+      const env2b = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
+      await ensureRemoteCompanionScripts(env2b.fakeWin, env2b.fakeDoc, env2b.fakeFetch, env2b.fakeHostBridge);
+      assert.equal(env2b.fetchedUrls.length, 1);
+      assert.ok(env2b.fetchedUrls[0].includes('ko_thought_autoinject.js'));
+      assert.equal(env2b.appendedScripts.length, 1);
+    }
+
+    // Case 3: User installed all 3 plugins -> loads both companions
+    {
+      const env3 = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
+      await ensureRemoteCompanionScripts(env3.fakeWin, env3.fakeDoc, env3.fakeFetch, env3.fakeHostBridge);
+      assert.equal(env3.fetchedUrls.length, 2);
+      assert.ok(env3.fetchedUrls.some((u) => u.includes('mcp_manager_autoinject.js')));
+      assert.ok(env3.fetchedUrls.some((u) => u.includes('ko_thought_autoinject.js')));
+      assert.equal(env3.appendedScripts.length, 2);
+      assert.equal(env3.appendedScripts[0].nonce, 'test-csp-nonce');
+    }
+
+    // Case 4: Offline / GitHub fetch blocked -> falls back to host ReadFile marker block code
+    {
+      const env4 = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */', true);
+      await ensureRemoteCompanionScripts(env4.fakeWin, env4.fakeDoc, env4.fakeFetch, env4.fakeHostBridge);
+      assert.equal(env4.appendedScripts.length, 1, 'should fall back to host bundle block when GitHub fetch fails');
+      assert.ok(env4.appendedScripts[0].text.includes('BEGIN_AGY_MCP_MANAGER_V1'));
+    }
+  });
+
+  it('injects cascadeConfig.checkpointConfig.maxTokenLimit into SendUserCascadeMessage (JSON and Protobuf binary) and updates stats immediately after Compacting', async () => {
+    const { sandbox, getMountedBar } = createDomSandbox();
+    const cid = 'test-session-1';
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+
+    // Extensible empty contextWindowOptions array (matches real GetUserStatus response)
+    const mutableModelCfg = { label: 'Gemini 4 Argon (Medium)', value: 1418, contextWindowOptions: [] };
+    let userStatusDispatchedCount = 0;
+    const reduxState = {
+      modelSelection: {
+        default: { model: 1418, contextWindow: '256K' },
+        byConversation: { [cid]: { model: 1418, contextWindow: '256K' } },
+      },
+      userStatus: {
+        cascadeModelConfigData: {
+          clientModelConfigs: [mutableModelCfg],
+        },
+      },
+    };
+    const reduxStore = {
+      getState: () => reduxState,
+      dispatch(action) {
+        if (action.type === 'userStatus/setUserStatus') {
+          userStatusDispatchedCount += 1;
+          reduxState.userStatus = action.payload;
+        }
+        if (action.type === 'modelSelection/modelPicked' && action.payload.conversationId) {
+          reduxState.modelSelection.byConversation[action.payload.conversationId] = action.payload;
+        }
+      },
+    };
+
+    let compacted = false;
+    let currentStepCount = 3257;
+    view.__reactFiber$test.return = {
+      memoizedProps: {
+        value: {
+          store: reduxStore,
+          cascadeContext: {
+            state: {
+              agentStateProvider: {
+                getState: () => ({
+                  trajectorySlice: {
+                    totalGeneratorMetadataLength: -1,
+                    totalStepsLength: currentStepCount,
+                  },
+                  compactionInfo: {
+                    compactedAtStepIndices: compacted ? [3258] : [],
+                  },
+                  contextWindowUsage: compacted
+                    ? {
+                        estimatedTokensUsed: 245038,
+                        estimatedAfterCompaction: 33388,
+                        maxContextTokens: 384000,
+                        lastStepIndex: 3258,
+                      }
+                    : {
+                        estimatedTokensUsed: 245038,
+                        maxContextTokens: 384000,
+                        lastStepIndex: 3257,
+                      },
+                }),
+              },
+            },
+          },
+        },
+      },
+      return: null,
+    };
+
+    let lastSentMessageReq = null;
+    let lastSentProtoBytes = null;
+    sandbox.fetch = async (url, init) => {
+      if (String(url).endsWith('/SendUserCascadeMessage')) {
+        if (typeof init?.body === 'string') {
+          lastSentMessageReq = JSON.parse(init.body);
+        } else if (init?.body instanceof Uint8Array) {
+          lastSentProtoBytes = init.body;
+        }
+        return { ok: true, json: async () => ({}) };
+      }
+      if (String(url).endsWith('/GetCascadeTrajectoryGeneratorMetadata')) {
+        return {
+          ok: true,
+          json: async () => ({
+            generatorMetadata: [
+              {
+                stepIndices: [3256, 3257],
+                chatModel: {
+                  chatStartMetadata: {
+                    contextWindowMetadata: {
+                      estimatedTokensUsed: 245038,
+                      maxContextTokens: 256000,
+                    },
+                  },
+                  usage: { cacheReadTokens: 242000, inputTokens: 3038 },
+                },
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    sandbox.window.fetch = sandbox.fetch;
+
+    const api = mountStatusBar(sandbox);
+    api.setConversationContextWindow(view, cid, '384K');
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.ok(userStatusDispatchedCount >= 1, 'must dispatch userStatus/setUserStatus with new clientModelConfig reference even when contextWindowOptions was an extensible []');
+    assert.notEqual(
+      reduxState.userStatus.cascadeModelConfigData.clientModelConfigs[0],
+      mutableModelCfg,
+      'updated clientModelConfig in Redux must be a new object reference to invalidate Reselect memoization'
+    );
+
+    const barEl = getMountedBar();
+    const coreNode = barEl.querySelector('.agy-ctx-left').querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode.innerHTML.includes('245k'), 'before compaction, should show 245k');
+    assert.ok(coreNode.innerHTML.includes('64%'), 'before compaction, 245k / 384k should be 64%');
+
+    // 1. Test JSON SendUserCascadeMessage interception
+    await sandbox.window.fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
+      method: 'POST',
+      body: JSON.stringify({ cascadeId: cid, items: [{ text: 'hello' }] }),
+    });
+    assert.ok(lastSentMessageReq, 'SendUserCascadeMessage JSON should be intercepted');
+    assert.equal(lastSentMessageReq.cascadeConfig?.checkpointConfig?.contextWindow, '384K');
+    assert.equal(lastSentMessageReq.cascadeConfig?.checkpointConfig?.maxTokenLimit, 384000, 'must inject maxTokenLimit: 384000 so language_server proto.Merge overrides 256000 default');
+
+    // 2. Test Protobuf binary SendUserCascadeMessage interception
+    const rawProtoReq = new TextEncoder().encode(`\x0a\x24${cid}`);
+    await sandbox.window.fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
+      method: 'POST',
+      body: rawProtoReq,
+    });
+    assert.ok(lastSentProtoBytes instanceof Uint8Array);
+    assert.ok(lastSentProtoBytes.length > rawProtoReq.length, 'Protobuf binary request must have cascade_config.checkpoint_config suffix appended');
+    const suffix = Array.from(lastSentProtoBytes.subarray(rawProtoReq.length));
+    // 0x2a (field 5 cascade_config), len, 0x12 (field 2 checkpoint_config), len, 0x28 (field 5 max_token_limit), varint(384000) = [0x80, 0xb8, 0x17]
+    assert.equal(suffix[0], 0x2a);
+    assert.equal(suffix[2], 0x12);
+    assert.equal(suffix[4], 0x28);
+    assert.deepEqual(suffix.slice(5, 8), [0x80, 0xb8, 0x17], 'varint encoding of 384000 must be [0x80, 0xb8, 0x17]');
+
+    // 3. Simulate Compacting completing at step 3258 -> statusbar must immediately reflect 33k (9%), NOT stay stuck at 245k (64%)
+    compacted = true;
+    currentStepCount = 3258;
+    api.updateAll();
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.ok(coreNode.innerHTML.includes('33k'), `after compaction, statusbar must update from 245k to 33k, got: ${coreNode.innerHTML}`);
+    assert.ok(coreNode.innerHTML.includes('9%'), `after compaction, percentage must update to 9% (33k/384k), got: ${coreNode.innerHTML}`);
+
+    sandbox.window.__agyStatusBarCleanup();
   });
 });
 

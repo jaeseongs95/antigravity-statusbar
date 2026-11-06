@@ -231,6 +231,7 @@
             try {
               nativeStorage.updateItems({
                 [STORAGE_MAP_KEY]: serialized,
+                [STORAGE_TS_MAP_KEY]: serializedTs,
               });
             } catch {}
           }
@@ -250,6 +251,7 @@
             try {
               nativeStorage.updateItems({
                 [DEFAULT_CW_KEY]: norm,
+                [STORAGE_TS_MAP_KEY]: serializedTs,
               });
             } catch {}
           }
@@ -326,7 +328,9 @@
         }
         if ((mapUpdated || defUpdated) && nativeStorage && typeof nativeStorage.updateItems === 'function') {
           try {
-            const payload = {};
+            const payload = {
+              [STORAGE_TS_MAP_KEY]: serializeSessionTsMap(),
+            };
             if (mapUpdated) payload[STORAGE_MAP_KEY] = serializeSessionMap();
             if (defUpdated) payload[DEFAULT_CW_KEY] = defaultCwCache;
             nativeStorage.updateItems(payload);
@@ -959,16 +963,20 @@
     }
 
     function extractStatsFromMetas(metas) {
-      let used = 0, max = 256000, cacheRead = 0, inputTok = 0;
+      let used = 0, max = 256000, cacheRead = 0, inputTok = 0, lastMetaStepIndex = -1;
       let foundCtx = false, foundUsage = false;
       for (let i = metas.length - 1; i >= 0; i--) {
-        const cm = getChatModelFromMeta(metas[i]);
+        const m = metas[i];
+        const cm = getChatModelFromMeta(m);
         if (!cm) continue;
         if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
           const cwm = cm.chatStartMetadata.contextWindowMetadata;
           if (cwm.estimatedTokensUsed) {
             used = Number(cwm.estimatedTokensUsed);
             max = Number(cwm.maxContextTokens || 256000);
+            if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
+              lastMetaStepIndex = Number(m.stepIndices[m.stepIndices.length - 1]);
+            }
             foundCtx = true;
           }
         }
@@ -981,7 +989,7 @@
       }
       const totalPrompt = cacheRead + inputTok;
       const cachePct = totalPrompt > 0 ? Math.round((cacheRead / totalPrompt) * 100) : 0;
-      return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, foundCtx, foundUsage };
+      return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, lastMetaStepIndex, foundCtx, foundUsage };
     }
 
     function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
@@ -1099,7 +1107,7 @@
           return { metas, knownGenLen: metas.length };
         }
 
-        let cur = Math.ceil(sc * 0.52);
+        let cur = Math.ceil(sc * 0.42);
         while (cur > 0) {
           const metas = await callGenMeta(cur);
           if (metas.length > 0) {
@@ -1107,7 +1115,8 @@
             knownGenLenMap.set(cascadeId, nextLen);
             return { metas, knownGenLen: nextLen };
           }
-          cur = Math.max(0, cur - 35);
+          const stepDown = Math.max(35, Math.floor(cur * 0.22));
+          cur = Math.max(0, cur - stepDown);
         }
 
         const metas0 = await callGenMeta(0);
@@ -1117,19 +1126,65 @@
         return { metas: metas0, knownGenLen: metas0.length };
       }
 
+      function applyRealtimeCompactionAndUsage(parsed, fullState) {
+        if (!fullState || typeof fullState !== 'object') return parsed;
+        const cwUsage = fullState.contextWindowUsage;
+        const compactedSteps = fullState.compactionInfo?.compactedAtStepIndices;
+        const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
+          ? Number(compactedSteps[compactedSteps.length - 1])
+          : -1;
+
+        const base = parsed || {
+          used: 0,
+          trajectoryMax: 256000,
+          cacheRead: 0,
+          inputTok: 0,
+          cachePct: 0,
+          lastMetaStepIndex: -1,
+          foundCtx: false,
+          foundUsage: false,
+        };
+
+        if (cwUsage && typeof cwUsage === 'object') {
+          const uMax = Number(cwUsage.maxContextTokens || 0);
+          if (uMax > 0) {
+            base.trajectoryMax = uMax;
+          }
+          const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
+          const uStep = Number(cwUsage.lastStepIndex ?? -1);
+          const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+
+          if (afterCompact > 0 && (latestCompactedStep >= base.lastMetaStepIndex || afterCompact < base.used)) {
+            base.used = afterCompact;
+            base.foundCtx = true;
+          } else if (uEst > 0 && (!base.foundCtx || (uStep >= 0 && base.lastMetaStepIndex >= 0 && uStep > base.lastMetaStepIndex))) {
+            base.used = uEst;
+            base.foundCtx = true;
+          }
+        }
+        return base;
+      }
+
       function fetchCascadeStats(cascadeId, csrf, inputBox) {
         if (!cascadeId || cascadeId === 'remote-session') {
           return Promise.resolve(null);
         }
         const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
-        const slice = asp?.getState?.()?.trajectorySlice;
+        const fullState = asp?.getState?.();
+        const slice = fullState?.trajectorySlice;
         const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
         const totalStepsLen = slice?.totalStepsLength ?? -1;
+        const compactedSteps = fullState?.compactionInfo?.compactedAtStepIndices;
+        const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
+          ? Number(compactedSteps[compactedSteps.length - 1])
+          : -1;
+        const cwAfterCompact = Number(fullState?.contextWindowUsage?.estimatedAfterCompaction || 0);
         const cached = stateCache.get(cascadeId);
         const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
-        const versionKey = `${totalGenLen}:${totalStepsLen}`;
+        const versionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
+        const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
 
-        if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < 30000)) {
+        if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
           return Promise.resolve(cached);
         }
 
@@ -1204,6 +1259,8 @@
               }
             }
 
+            parsed = applyRealtimeCompactionAndUsage(parsed, fullState);
+
             if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
               return cached || null;
             }
@@ -1213,7 +1270,7 @@
               window.__agyRcGenLenByCascade[cascadeId] = discoveredGenLen;
             }
 
-            const finalVersionKey = `${totalGenLen}:${totalStepsLen}`;
+            const finalVersionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
             const data = {
               used: parsed.used,
               trajectoryMax: parsed.trajectoryMax,
@@ -1439,18 +1496,20 @@
         if (toAdd.length === 0 && Array.isArray(modelObj.contextWindowOptions)) {
           return modelObj;
         }
-        if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
-          try {
-            modelObj.contextWindowOptions.push(...toAdd);
-            return modelObj;
-          } catch {}
-        }
         const nextArr = [...curArr, ...toAdd];
         try {
-          modelObj.contextWindowOptions = nextArr;
-          if (modelObj.contextWindowOptions === nextArr) return modelObj;
+          if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
+            modelObj.contextWindowOptions.push(...toAdd);
+          } else {
+            modelObj.contextWindowOptions = nextArr;
+          }
         } catch {}
         try {
+          const proto = Object.getPrototypeOf(modelObj);
+          if (proto && proto !== Object.prototype) {
+            const clone = Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr });
+            return clone;
+          }
           return { ...modelObj, contextWindowOptions: nextArr };
         } catch {
           return modelObj;
@@ -1458,6 +1517,11 @@
       }
 
       function ensureContextWindowSelectorFlag(extraCw) {
+        ensureFetchHook(window);
+        try {
+          const cwin = document?.querySelector?.('ga-remote-control iframe')?.contentWindow;
+          if (cwin) ensureFetchHook(cwin);
+        } catch {}
         if (!document) return;
         const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
         for (const d of docs) {
@@ -1641,18 +1705,24 @@
 
       function getCascadeContextForElement(el) {
         const effEl = resolveEffectiveInputBox(resolveEffectiveView(el));
-        if (!effEl) return null;
-        const fk = Object.keys(effEl).find((k) => k.startsWith('__reactFiber$'));
-        let curr = fk ? effEl[fk] : null;
-        while (curr) {
-          const val = curr.memoizedProps?.value;
-          if (val?.cascadeContext?.state?.agentStateProvider) {
-            return val.cascadeContext;
+        const candidates = [
+          effEl,
+          effEl?.closest?.('[data-testid="conversation-view"]'),
+          document?.querySelector?.('[data-testid="conversation-view"]'),
+        ].filter(Boolean);
+        for (const node of candidates) {
+          const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
+          let curr = fk ? node[fk] : null;
+          while (curr) {
+            const val = curr.memoizedProps?.value;
+            if (val?.cascadeContext?.state?.agentStateProvider) {
+              return val.cascadeContext;
+            }
+            if (val?.state?.agentStateProvider && (val?.debug || val?.cascadeContext !== undefined || val?.state)) {
+              return val;
+            }
+            curr = curr.return;
           }
-          if (val?.state?.agentStateProvider && val?.debug) {
-            return val;
-          }
-          curr = curr.return;
         }
         return null;
       }
@@ -1682,7 +1752,195 @@
         return Uint8Array.from(String(str).split('').map((c) => c.charCodeAt(0) & 0xff));
       }
 
+      function decodeBase64ToUtf8(b64) {
+        if (!b64 || typeof b64 !== 'string') return '';
+        try {
+          if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+            return Buffer.from(b64, 'base64').toString('utf8');
+          }
+          const atobFn = window?.atob || (typeof atob === 'function' ? atob : null);
+          if (atobFn) {
+            const bin = atobFn(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
+            return decodeBytesToText(bytes);
+          }
+        } catch {}
+        return '';
+      }
+
+      function encodeVarint(val) {
+        const out = [];
+        let v = Math.max(0, Math.floor(Number(val) || 0)) >>> 0;
+        while (v >= 0x80) {
+          out.push((v & 0x7f) | 0x80);
+          v >>>= 7;
+        }
+        out.push(v & 0x7f);
+        return out;
+      }
+
+      function buildSendMessageCheckpointSuffix(maxTokenLimit, contextWindow) {
+        // CheckpointConfig: field 5 (max_token_limit, uint32 varint) -> wire tag 0x28
+        const cpBytes = [0x28, ...encodeVarint(maxTokenLimit)];
+        if (contextWindow && typeof contextWindow === 'string') {
+          // CheckpointConfig: field 36 (context_window, string) -> wire tag (36 << 3) | 2 = 0x122 -> varint [0xa2, 0x02]
+          const cwBytes = Array.from(encodeTextToBytes(contextWindow));
+          cpBytes.push(0xa2, 0x02, ...encodeVarint(cwBytes.length), ...cwBytes);
+        }
+        // CascadeConfig: field 2 (checkpoint_config, bytes) -> wire tag 0x12
+        const ccBytes = [0x12, ...encodeVarint(cpBytes.length), ...cpBytes];
+        // SendUserCascadeMessageRequest: field 5 (cascade_config, bytes) -> wire tag 0x2a
+        return new Uint8Array([0x2a, ...encodeVarint(ccBytes.length), ...ccBytes]);
+      }
+
+      function resolveEffectiveCascadeId(body, rcInst) {
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        const fromBody = extractCascadeIdFromBody(body, ignoreUuid);
+        if (fromBody) return fromBody;
+        if (window?.__agySniffedCascadeId && window.__agySniffedCascadeId !== 'remote-session') {
+          return window.__agySniffedCascadeId;
+        }
+        const activeView = document?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+        const domCid = activeView?.getAttribute?.('data-cascade-id');
+        if (domCid && domCid !== 'remote-session') return domCid;
+        return null;
+      }
+
+      function injectCheckpointLimitIntoSendRequest(path, body, rcInst) {
+        if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body || !cwStore) {
+          return body;
+        }
+        try {
+          const cid = resolveEffectiveCascadeId(body, rcInst);
+          const cw = cwStore.getSavedContextWindow(cid);
+          const limit = cwStore.getLimit(cw);
+          if (!cw || !limit || limit <= 0) return body;
+
+          if (typeof body === 'string') {
+            const trimmed = body.trim();
+            if (trimmed.startsWith('{')) {
+              const j = JSON.parse(trimmed);
+              j.cascadeConfig = j.cascadeConfig || {};
+              j.cascadeConfig.checkpointConfig = {
+                ...(j.cascadeConfig.checkpointConfig || {}),
+                contextWindow: cw,
+                maxTokenLimit: limit,
+              };
+              return JSON.stringify(j);
+            }
+            return body;
+          }
+
+          if (typeof body === 'object' && !(body instanceof Uint8Array) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
+            return {
+              ...body,
+              cascadeConfig: {
+                ...(body.cascadeConfig || {}),
+                checkpointConfig: {
+                  ...(body.cascadeConfig?.checkpointConfig || {}),
+                  contextWindow: cw,
+                  maxTokenLimit: limit,
+                },
+              },
+            };
+          }
+
+          const u8 = body instanceof Uint8Array
+            ? body
+            : (body instanceof ArrayBuffer
+              ? new Uint8Array(body)
+              : (ArrayBuffer.isView(body) ? new Uint8Array(body.buffer, body.byteOffset, body.byteLength) : null));
+          if (!u8 || u8.length === 0) return body;
+
+          let firstNonWs = 0;
+          while (firstNonWs < u8.length && (u8[firstNonWs] === 0x20 || u8[firstNonWs] === 0x09 || u8[firstNonWs] === 0x0a || u8[firstNonWs] === 0x0d)) {
+            firstNonWs++;
+          }
+          if (firstNonWs < u8.length && u8[firstNonWs] === 0x7b) {
+            const text = decodeBytesToText(u8);
+            const j = JSON.parse(text);
+            j.cascadeConfig = j.cascadeConfig || {};
+            j.cascadeConfig.checkpointConfig = {
+              ...(j.cascadeConfig.checkpointConfig || {}),
+              contextWindow: cw,
+              maxTokenLimit: limit,
+            };
+            return encodeTextToBytes(JSON.stringify(j));
+          }
+
+          const suffix = buildSendMessageCheckpointSuffix(limit, cw);
+          if (u8.length >= 5 && u8[0] === 0) {
+            const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
+            if (frameLen === u8.length - 5) {
+              const newLen = frameLen + suffix.length;
+              const framed = new Uint8Array(5 + newLen);
+              framed[0] = 0;
+              framed[1] = (newLen >>> 24) & 0xff;
+              framed[2] = (newLen >>> 16) & 0xff;
+              framed[3] = (newLen >>> 8) & 0xff;
+              framed[4] = newLen & 0xff;
+              framed.set(u8.subarray(5), 5);
+              framed.set(suffix, 5 + frameLen);
+              return framed;
+            }
+          }
+
+          const merged = new Uint8Array(u8.length + suffix.length);
+          merged.set(u8, 0);
+          merged.set(suffix, u8.length);
+          return merged;
+        } catch {
+          return body;
+        }
+      }
+
+      function ensureFetchHook(targetWin) {
+        const w = targetWin || window;
+        if (!w || typeof w.fetch !== 'function' || w.fetch.__agyCwHooked) return;
+        try {
+          const origFetch = w.fetch;
+          const wrappedFetch = function (input, init) {
+            try {
+              const url = typeof input === 'string' ? input : (input && typeof input.url === 'string' ? input.url : '');
+              if (url && CONVO_RPC_RE.test(url) && init && init.body) {
+                sniffCascadeIdFromRpc(url, init.body, null);
+                if (/\/SendUserCascadeMessage$/i.test(url)) {
+                  init = { ...init, body: injectCheckpointLimitIntoSendRequest(url, init.body, null) };
+                }
+              }
+            } catch {}
+            return origFetch.call(this, input, init);
+          };
+          wrappedFetch.__agyCwHooked = true;
+          w.fetch = wrappedFetch;
+        } catch {}
+      }
+
+      function hookLsClient(lsClient) {
+        if (!lsClient || typeof lsClient !== 'object' || lsClient.__agyCwHooked) return lsClient;
+        try {
+          lsClient.__agyCwHooked = true;
+          if (typeof lsClient.sendUserCascadeMessage === 'function') {
+            const origSend = lsClient.sendUserCascadeMessage;
+            lsClient.sendUserCascadeMessage = function (req, ...rest) {
+              const nextReq = injectCheckpointLimitIntoSendRequest(
+                '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
+                req,
+                null
+              );
+              return origSend.call(this, nextReq, ...rest);
+            };
+          }
+        } catch {}
+        return lsClient;
+      }
+
       function extractCascadeIdFromBody(body, ignoreUuid) {
+        if (body && typeof body === 'object' && !(body instanceof Uint8Array) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
+          const cid = body.cascadeId || body.conversationId;
+          if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
+        }
         const text = decodeBytesToText(body);
         if (!text) return null;
         const trimmed = text.trim();
@@ -1708,12 +1966,16 @@
           const changed = window.__agySniffedCascadeId !== cid;
           window.__agySniffedCascadeId = cid;
           window.__agySniffedCascadeTs = Date.now();
-          if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
-            window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
-            window.__agyRcStepCountByCascade[cid] = (window.__agyRcStepCountByCascade[cid] || 0) + 1;
+          if (/\/(SendUserCascadeMessage|StartCascade|StreamCascadeReactiveUpdates|StreamAgentStateUpdates)$/i.test(path)) {
+            lastRcTrajectoryPollTs = 0;
+            if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
+              window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
+              window.__agyRcStepCountByCascade[cid] = (window.__agyRcStepCountByCascade[cid] || 0) + 1;
+            }
             setTimeout(() => {
+              lastRcTrajectoryPollTs = 0;
               if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
-            }, 1500);
+            }, 1200);
           }
           if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
             window.__agyOnCascadeSniffed(cid);
@@ -1746,10 +2008,11 @@
         for (const mName of ['proxyCommand', 'streamProxyCommand']) {
           if (typeof proto[mName] === 'function') {
             const origFn = proto[mName];
-            proto[mName] = function (path, body) {
+            proto[mName] = function (path, body, ...rest) {
               window.__agyRemoteControlInstance = this;
               sniffCascadeIdFromRpc(path, body, this);
-              return origFn.apply(this, arguments);
+              const nextBody = injectCheckpointLimitIntoSendRequest(path, body, this);
+              return origFn.call(this, path, nextBody, ...rest);
             };
           }
         }
@@ -1760,8 +2023,11 @@
             window.__agyRemoteControlInstance = this;
             if (msg && typeof msg.path === 'string') {
               sniffCascadeIdFromRpc(msg.path, msg.body, this);
+              if (/\/SendUserCascadeMessage$/i.test(msg.path) && msg.body) {
+                msg = { ...msg, body: injectCheckpointLimitIntoSendRequest(msg.path, msg.body, this) };
+              }
             }
-            return origPort.apply(this, arguments);
+            return origPort.call(this, msg);
           };
         }
       }
@@ -1820,7 +2086,10 @@
       function createRcServiceAdapter(rcInst) {
         async function callJson(rpcPath, reqObj) {
           if (!rcInst || typeof rcInst.proxyCommand !== 'function') return null;
-          const bytes = encodeTextToBytes(JSON.stringify(reqObj || {}));
+          const payloadObj = /\/SendUserCascadeMessage$/i.test(rpcPath)
+            ? injectCheckpointLimitIntoSendRequest(rpcPath, reqObj || {}, rcInst)
+            : (reqObj || {});
+          const bytes = encodeTextToBytes(JSON.stringify(payloadObj));
           const res = await rcInst.proxyCommand(rpcPath, bytes);
           if (!res || !res.payload) return null;
           const text = decodeBytesToText(res.payload);
@@ -1855,6 +2124,138 @@
           async sendUserCascadeMessage(req) {
             return await callJson('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', req || {});
           },
+          async getCustomizationStates(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/GetCustomizationStates', req || {});
+          },
+          async getAllSkills(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/GetAllSkills', req || {});
+          },
+          async getAllPlugins(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/GetAllPlugins', req || {});
+          },
+          async readFile(req) {
+            return await callJson('/exa.language_server_pb.LanguageServerService/ReadFile', req || {});
+          },
+        };
+      }
+
+      function extractMarkerBlock(bundleText, beginMarker, endMarker) {
+        if (!bundleText || typeof bundleText !== 'string') return '';
+        const startIdx = bundleText.indexOf(beginMarker);
+        if (startIdx === -1) return '';
+        const endIdx = bundleText.indexOf(endMarker, startIdx);
+        if (endIdx === -1) return bundleText.slice(startIdx);
+        return bundleText.slice(startIdx, endIdx + endMarker.length);
+      }
+
+      async function fetchHostInstalledPluginInfo(csrf, viewOrEl) {
+        const svc = getRemoteRpcServiceForElement(viewOrEl);
+        const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
+        const canCallHttp = Boolean(effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function');
+
+        async function callRpc(methodName, rpcPath, reqObj) {
+          if (svc && typeof svc[methodName] === 'function') {
+            try {
+              const r = await svc[methodName](reqObj || {});
+              if (r) return r;
+            } catch {}
+          }
+          if (svc && typeof svc.callJson === 'function') {
+            try {
+              const r = await svc.callJson(rpcPath, reqObj || {});
+              if (r) return r;
+            } catch {}
+          }
+          if (canCallHttp) {
+            try {
+              const res = await fetchFn(rpcPath, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': effCsrf },
+                body: JSON.stringify(reqObj || {}),
+              });
+              if (res && res.ok !== false) return await res.json();
+            } catch {}
+          }
+          return null;
+        }
+
+        const [statesRes, pluginsRes] = await Promise.all([
+          callRpc('getCustomizationStates', '/exa.language_server_pb.LanguageServerService/GetCustomizationStates', {}),
+          callRpc('getAllPlugins', '/exa.language_server_pb.LanguageServerService/GetAllPlugins', {}),
+        ]);
+
+        const candidatePaths = [];
+        if (Array.isArray(statesRes?.states)) {
+          for (const s of statesRes.states) {
+            if (s?.path) candidatePaths.push(s.path);
+          }
+        }
+        const pluginNames = new Set();
+        if (Array.isArray(pluginsRes?.plugins)) {
+          for (const p of pluginsRes.plugins) {
+            if (p?.name) pluginNames.add(String(p.name));
+            if (p?.path) candidatePaths.push(p.path);
+          }
+        }
+        if (!candidatePaths.length) {
+          const skillsRes = await callRpc('getAllSkills', '/exa.language_server_pb.LanguageServerService/GetAllSkills', {});
+          if (Array.isArray(skillsRes?.skills)) {
+            for (const sk of skillsRes.skills) {
+              if (sk?.path) candidatePaths.push(sk.path);
+            }
+          }
+        }
+
+        let geminiDir = null;
+        for (const rawPath of candidatePaths) {
+          const norm = String(rawPath).replace(/^file:\/\/\/?/i, '').replace(/\\/g, '/');
+          const idx = norm.indexOf('/.gemini/');
+          if (idx !== -1) {
+            const prefix = String(rawPath).startsWith('file:///') && norm.startsWith('Users/') ? '/' : (norm.startsWith('/') ? '' : '');
+            geminiDir = (prefix + norm.slice(0, idx + 8)).replace(/^\/+([A-Za-z]:\/)/, '$1');
+            break;
+          }
+        }
+
+        let hostBundleText = '';
+        if (geminiDir) {
+          const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
+          const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
+          const rf = await callRpc('readFile', '/exa.language_server_pb.LanguageServerService/ReadFile', { uri });
+          if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
+            hostBundleText = decodeBase64ToUtf8(rf.content);
+          }
+        }
+
+        const mcpBegin = ['/* === BEGIN_AGY_MCP', 'MANAGER_V1 === */'].join('_');
+        const mcpEnd = ['/* === END_AGY_MCP', 'MANAGER_V1 === */'].join('_');
+        const koBegin = ['/* === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+        const koEnd = ['/* === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+
+        const hasMcpMarker = hostBundleText.includes(['BEGIN_AGY_MCP', 'MANAGER_V1'].join('_'));
+        const hasKoMarker = hostBundleText.includes(['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_'));
+        const hasStatusbarMarker = hostBundleText.includes('mountStatusBar') || hostBundleText.includes('agy-ctx-statusbar');
+
+        const hasStatusbar = hasStatusbarMarker || pluginNames.has('antigravity-statusbar');
+        const hasMcpManager = hasMcpMarker || pluginNames.has('antigravity-mcp-manager');
+        const hasKoTranslator = hasKoMarker || pluginNames.has('ko-thought-translator');
+
+        const mcpManagerCode = hasMcpMarker
+          ? extractMarkerBlock(hostBundleText, mcpBegin, mcpEnd)
+          : '';
+        const koTranslatorCode = hasKoMarker
+          ? extractMarkerBlock(hostBundleText, koBegin, koEnd)
+          : '';
+
+        return {
+          resolved: Boolean(hostBundleText || candidatePaths.length > 0 || pluginNames.size > 0),
+          geminiDir,
+          hasStatusbar,
+          hasMcpManager,
+          hasKoTranslator,
+          mcpManagerCode,
+          koTranslatorCode,
+          hostBundleText,
         };
       }
 
@@ -2011,7 +2412,7 @@
         }
 
         const now = Date.now();
-        if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 4000 || nextAttr === 'remote-session')) {
+        if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 2500 || nextAttr === 'remote-session')) {
           lastRcTrajectoryPollTs = now;
           rcTrajectoryPollInFlight = true;
           createRcServiceAdapter(rcInst).getAllCascadeTrajectories().then((all) => {
@@ -2074,7 +2475,7 @@
           return {
             getState: () => ({
               trajectorySlice: {
-                totalGeneratorMetadataLength: typeof knownGenLen === 'number' ? knownGenLen : -1,
+                totalGeneratorMetadataLength: -1,
                 totalStepsLength: typeof steps === 'number' ? steps : -1,
               },
             }),
@@ -2085,12 +2486,12 @@
 
       function getRemoteRpcServiceForElement(el) {
         if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-          return window.__agyCapturedLsClient;
+          return hookLsClient(window.__agyCapturedLsClient);
         }
         try {
           const cwin = document?.querySelector?.('ga-remote-control iframe')?.contentWindow;
           if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-            return cwin.__agyCapturedLsClient;
+            return hookLsClient(cwin.__agyCapturedLsClient);
           }
         } catch {}
         const cdoc = getAccessibleRemoteIframeDoc();
@@ -2107,11 +2508,11 @@
             const val = curr.memoizedProps?.value;
             if (val && typeof val === 'object') {
               if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function') {
-                return val;
+                return hookLsClient(val);
               }
               const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
               if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function')) {
-                return lsClient;
+                return hookLsClient(lsClient);
               }
             }
             curr = curr.return;
@@ -2355,6 +2756,9 @@
         pushSessionCwToServer,
         pullAndBackfillTrajectorySummaries,
         syncDesktopAnnotations,
+        fetchHostInstalledPluginInfo,
+        injectCheckpointLimitIntoSendRequest,
+        buildSendMessageCheckpointSuffix,
       };
     }
 
@@ -3147,55 +3551,124 @@
 
     const STATUSBAR_VERSION = 'v15';
 
-    function ensureRemoteCompanionScripts(win, doc, fetchFn) {
+    function injectScriptText(win, doc, code) {
+      if (!code || !doc?.head) return false;
+      const s = doc.createElement('script');
+      const nonceEl = doc.querySelector?.('script[nonce]');
+      const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
+      if (nonce) s.nonce = nonce;
+      let policy = win.__agyTrustedTypesPolicy || null;
+      if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
+        try {
+          policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
+            createScript: (x) => x,
+          });
+          win.__agyTrustedTypesPolicy = policy;
+        } catch {}
+      }
+      s.text = policy ? policy.createScript(code) : code;
+      doc.head.appendChild(s);
+      return true;
+    }
+
+    function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
       try {
         const isRemoteWeb = Boolean(
           win?.location?.hostname && String(win.location.hostname).includes('antigravity.google.com')
         );
+        if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
         const effFetch = fetchFn || win?.fetch;
-        if (!isRemoteWeb || typeof effFetch !== 'function' || !doc?.head) return;
 
-        const loadScript = (flagKey, url) => {
-          if (win[flagKey]) return;
+        const loadScript = (flagKey, url, fallbackCode) => {
+          if (win[flagKey]) return Promise.resolve(false);
           win[flagKey] = true;
-          effFetch(`${url}?t=${Date.now()}`)
+          if (typeof effFetch !== 'function') {
+            if (fallbackCode) {
+              return Promise.resolve(injectScriptText(win, doc, fallbackCode));
+            }
+            win[flagKey] = false;
+            return Promise.resolve(false);
+          }
+          return Promise.resolve(
+            effFetch(`${url}?t=${Date.now()}`)
+          )
             .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
             .then((code) => {
-              if (!code) return;
-              const s = doc.createElement('script');
-              const nonceEl = doc.querySelector?.('script[nonce]');
-              const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
-              if (nonce) s.nonce = nonce;
-              let policy = win.__agyTrustedTypesPolicy || null;
-              if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-                try {
-                  policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
-                    createScript: (x) => x,
-                  });
-                  win.__agyTrustedTypesPolicy = policy;
-                } catch {}
+              const finalCode = code || fallbackCode || '';
+              if (!finalCode) {
+                win[flagKey] = false;
+                return false;
               }
-              s.text = policy ? policy.createScript(code) : code;
-              doc.head.appendChild(s);
+              return injectScriptText(win, doc, finalCode);
             })
             .catch(() => {
+              if (fallbackCode) {
+                return injectScriptText(win, doc, fallbackCode);
+              }
               win[flagKey] = false;
+              return false;
             });
         };
 
-        if (!win.agyMcpManager) {
-          loadScript(
-            '__agyLoadingMcpManagerCompanion',
-            'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'
-          );
-        }
-        if (!win.__agyKoLocalizerActive) {
-          loadScript(
-            '__agyLoadingKoTranslatorCompanion',
-            'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js'
-          );
-        }
-      } catch {}
+        const resolveHostInfo = async () => {
+          if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
+            return { resolved: true, ...win.__agyHostInstalledPlugins };
+          }
+          if (hostBridge && typeof hostBridge.fetchHostInstalledPluginInfo === 'function') {
+            const info = await hostBridge.fetchHostInstalledPluginInfo(
+              win.__APP_CONFIG__?.csrfToken,
+              doc.querySelector?.('[data-testid="conversation-view"]')
+            );
+            if (info && info.resolved) {
+              win.__agyHostInstalledPlugins = info;
+              return info;
+            }
+          }
+          return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
+        };
+
+        let attempts = 0;
+        const tryLoadInstalledCompanions = async () => {
+          attempts += 1;
+          const info = await resolveHostInfo();
+          if (!info.resolved) {
+            if (attempts < 5) {
+              const setTimeoutFn = win.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+              if (setTimeoutFn) {
+                const t = setTimeoutFn(tryLoadInstalledCompanions, 1500);
+                if (t && typeof t.unref === 'function') t.unref();
+              }
+            }
+            return info;
+          }
+
+          const tasks = [];
+          if (info.hasMcpManager && !win.agyMcpManager) {
+            tasks.push(
+              loadScript(
+                '__agyLoadingMcpManagerCompanion',
+                'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+                info.mcpManagerCode
+              )
+            );
+          }
+          if (info.hasKoTranslator && !win.__agyKoLocalizerActive) {
+            tasks.push(
+              loadScript(
+                '__agyLoadingKoTranslatorCompanion',
+                'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js',
+                info.koTranslatorCode
+              )
+            );
+          }
+          await Promise.all(tasks);
+          return info;
+        };
+
+        return tryLoadInstalledCompanions();
+      } catch {
+        return Promise.resolve(null);
+      }
     }
 
     function mountStatusBar(env = {}) {
@@ -3242,7 +3715,6 @@
       });
 
       refreshStyles();
-      ensureRemoteCompanionScripts(win, doc, fetchFn);
 
       const setHtml = createTrustedHtmlSetter(win, doc);
       hostBridge = createHostBridge({
@@ -3252,6 +3724,7 @@
         fetchFn,
         cwStore,
       });
+      ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge);
 
       const rpcClient = createRpcClient({
         window: win,

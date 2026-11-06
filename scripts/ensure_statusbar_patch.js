@@ -359,7 +359,11 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
     }, timeoutMs);
 
     const immediateExpr = `(() => {
-      if (document.querySelector('.agy-ctx-statusbar') && window.__agyStatusBarCleanup && window.__agyStatusBarHash === ${JSON.stringify(scriptHash)}) {
+      const hasActivePlugin =
+        Boolean(document.querySelector('.agy-ctx-statusbar') && window.__agyStatusBarCleanup) ||
+        Boolean(window.agyMcpManager) ||
+        Boolean(window.__agyKoThoughtCleanup);
+      if (hasActivePlugin && window.__agyStatusBarHash === ${JSON.stringify(scriptHash)}) {
         return 'ALREADY_ACTIVE';
       }
       ${scriptCode}

@@ -215,6 +215,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
         try {
           nativeStorage.updateItems({
             [STORAGE_MAP_KEY]: serialized,
+            [STORAGE_TS_MAP_KEY]: serializedTs,
           });
         } catch {}
       }
@@ -234,6 +235,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
         try {
           nativeStorage.updateItems({
             [DEFAULT_CW_KEY]: norm,
+            [STORAGE_TS_MAP_KEY]: serializedTs,
           });
         } catch {}
       }
@@ -310,7 +312,9 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     }
     if ((mapUpdated || defUpdated) && nativeStorage && typeof nativeStorage.updateItems === 'function') {
       try {
-        const payload = {};
+        const payload = {
+          [STORAGE_TS_MAP_KEY]: serializeSessionTsMap(),
+        };
         if (mapUpdated) payload[STORAGE_MAP_KEY] = serializeSessionMap();
         if (defUpdated) payload[DEFAULT_CW_KEY] = defaultCwCache;
         nativeStorage.updateItems(payload);
