@@ -1733,13 +1733,26 @@
       let lastRcTrajectoryPollTs = 0;
       let rcTrajectoryPollInFlight = false;
 
+      function toUint8Slice(body) {
+        if (!body) return null;
+        if (body instanceof Uint8Array) return body;
+        if (body instanceof ArrayBuffer) return new Uint8Array(body);
+        if (ArrayBuffer.isView(body)) {
+          return new Uint8Array(body.buffer, body.byteOffset || 0, body.byteLength ?? body.buffer.byteLength);
+        }
+        if (body.buffer instanceof ArrayBuffer) {
+          return new Uint8Array(body.buffer, body.byteOffset || 0, body.byteLength ?? body.buffer.byteLength);
+        }
+        return null;
+      }
+
       function decodeBytesToText(body) {
         if (!body) return '';
         if (typeof body === 'string') return body;
         try {
           const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
           if (TD) {
-            const u8 = body instanceof Uint8Array ? body : (body.buffer ? new Uint8Array(body.buffer) : new Uint8Array(body));
+            const u8 = toUint8Slice(body) || new Uint8Array(body);
             return new TD('utf-8').decode(u8);
           }
         } catch {}
@@ -1807,6 +1820,40 @@
         return null;
       }
 
+      function findFirstNonWsByte(u8) {
+        if (!u8 || u8.length === 0) return -1;
+        let i = 0;
+        // Skip UTF-8 BOM (EF BB BF) if present
+        if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
+          i = 3;
+        }
+        while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x09 || u8[i] === 0x0a || u8[i] === 0x0d)) {
+          i++;
+        }
+        return i < u8.length ? u8[i] : -1;
+      }
+
+      function endsWithByteSequence(u8, seq) {
+        if (!u8 || !seq || u8.length < seq.length) return false;
+        const offset = u8.length - seq.length;
+        for (let i = 0; i < seq.length; i++) {
+          if (u8[offset + i] !== seq[i]) return false;
+        }
+        return true;
+      }
+
+      function buildConnectFramedBytes(flagByte, payloadBytes) {
+        const len = payloadBytes.length;
+        const framed = new Uint8Array(5 + len);
+        framed[0] = flagByte & 0xff;
+        framed[1] = (len >>> 24) & 0xff;
+        framed[2] = (len >>> 16) & 0xff;
+        framed[3] = (len >>> 8) & 0xff;
+        framed[4] = len & 0xff;
+        framed.set(payloadBytes, 5);
+        return framed;
+      }
+
       function injectCheckpointLimitIntoSendRequest(path, body, rcInst) {
         if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body || !cwStore) {
           return body;
@@ -1817,75 +1864,85 @@
           const limit = cwStore.getLimit(cw);
           if (!cw || !limit || limit <= 0) return body;
 
-          if (typeof body === 'string') {
-            const trimmed = body.trim();
-            if (trimmed.startsWith('{')) {
-              const j = JSON.parse(trimmed);
-              j.cascadeConfig = j.cascadeConfig || {};
-              j.cascadeConfig.checkpointConfig = {
-                ...(j.cascadeConfig.checkpointConfig || {}),
-                contextWindow: cw,
-                maxTokenLimit: limit,
-              };
-              return JSON.stringify(j);
-            }
-            return body;
-          }
-
-          if (typeof body === 'object' && !(body instanceof Uint8Array) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
-            return {
-              ...body,
-              cascadeConfig: {
-                ...(body.cascadeConfig || {}),
-                checkpointConfig: {
-                  ...(body.cascadeConfig?.checkpointConfig || {}),
-                  contextWindow: cw,
-                  maxTokenLimit: limit,
-                },
-              },
-            };
-          }
-
-          const u8 = body instanceof Uint8Array
-            ? body
-            : (body instanceof ArrayBuffer
-              ? new Uint8Array(body)
-              : (ArrayBuffer.isView(body) ? new Uint8Array(body.buffer, body.byteOffset, body.byteLength) : null));
-          if (!u8 || u8.length === 0) return body;
-
-          let firstNonWs = 0;
-          while (firstNonWs < u8.length && (u8[firstNonWs] === 0x20 || u8[firstNonWs] === 0x09 || u8[firstNonWs] === 0x0a || u8[firstNonWs] === 0x0d)) {
-            firstNonWs++;
-          }
-          if (firstNonWs < u8.length && u8[firstNonWs] === 0x7b) {
-            const text = decodeBytesToText(u8);
-            const j = JSON.parse(text);
+          const applyCheckpointToJsonObj = (j) => {
+            if (!j || typeof j !== 'object') return j;
             j.cascadeConfig = j.cascadeConfig || {};
             j.cascadeConfig.checkpointConfig = {
               ...(j.cascadeConfig.checkpointConfig || {}),
               contextWindow: cw,
               maxTokenLimit: limit,
             };
+            return j;
+          };
+
+          if (typeof body === 'string') {
+            const trimmed = body.trim();
+            if (trimmed.startsWith('{')) {
+              const j = applyCheckpointToJsonObj(JSON.parse(trimmed));
+              return JSON.stringify(j);
+            }
+            return body;
+          }
+
+          const u8 = toUint8Slice(body);
+          if (!u8) {
+            if (typeof body === 'object') {
+              return {
+                ...body,
+                cascadeConfig: {
+                  ...(body.cascadeConfig || {}),
+                  checkpointConfig: {
+                    ...(body.cascadeConfig?.checkpointConfig || {}),
+                    contextWindow: cw,
+                    maxTokenLimit: limit,
+                  },
+                },
+              };
+            }
+            return body;
+          }
+          if (u8.length === 0) return body;
+
+          // 1. Unframed UTF-8 JSON bytes (`{...}`)
+          if (findFirstNonWsByte(u8) === 0x7b) {
+            const text = decodeBytesToText(u8);
+            const j = applyCheckpointToJsonObj(JSON.parse(text));
             return encodeTextToBytes(JSON.stringify(j));
           }
 
           const suffix = buildSendMessageCheckpointSuffix(limit, cw);
-          if (u8.length >= 5 && u8[0] === 0) {
+
+          // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
+          if (u8.length >= 5 && (u8[0] === 0 || u8[0] === 1)) {
             const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
             if (frameLen === u8.length - 5) {
-              const newLen = frameLen + suffix.length;
-              const framed = new Uint8Array(5 + newLen);
-              framed[0] = 0;
-              framed[1] = (newLen >>> 24) & 0xff;
-              framed[2] = (newLen >>> 16) & 0xff;
-              framed[3] = (newLen >>> 8) & 0xff;
-              framed[4] = newLen & 0xff;
-              framed.set(u8.subarray(5), 5);
-              framed.set(suffix, 5 + frameLen);
-              return framed;
+              if (u8[0] !== 0) {
+                // Compressed frame: never append raw bytes
+                return body;
+              }
+              const payload = u8.subarray(5);
+              if (findFirstNonWsByte(payload) === 0x7b) {
+                // Connect-Framed JSON (`0x00` + 4B len + `{"cascadeId":...}`)!
+                // Parse JSON, inject checkpointConfig, re-encode JSON, and update 5-byte frame header length!
+                const text = decodeBytesToText(payload);
+                const j = applyCheckpointToJsonObj(JSON.parse(text));
+                const newPayload = encodeTextToBytes(JSON.stringify(j));
+                return buildConnectFramedBytes(0, newPayload);
+              }
+              if (endsWithByteSequence(payload, suffix)) {
+                return body;
+              }
+              const newPayload = new Uint8Array(payload.length + suffix.length);
+              newPayload.set(payload, 0);
+              newPayload.set(suffix, payload.length);
+              return buildConnectFramedBytes(0, newPayload);
             }
           }
 
+          // 3. Unframed Protobuf binary (idempotent guard against double injection)
+          if (endsWithByteSequence(u8, suffix)) {
+            return body;
+          }
           const merged = new Uint8Array(u8.length + suffix.length);
           merged.set(u8, 0);
           merged.set(suffix, u8.length);
@@ -1895,36 +1952,66 @@
         }
       }
 
+      window.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
+      window.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
+
       function ensureFetchHook(targetWin) {
         const w = targetWin || window;
-        if (!w || typeof w.fetch !== 'function' || w.fetch.__agyCwHooked) return;
+        if (!w || typeof w.fetch !== 'function') return;
+        w.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
+        w.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
+        if (w.fetch.__agyCwHookV2) return;
         try {
-          const origFetch = w.fetch;
+          const prevFetch = w.__agyOrigFetch || w.fetch;
+          const isLegacyV1Hook = Boolean(prevFetch.__agyCwHooked && !prevFetch.__agyCwHookV2);
+          if (!isLegacyV1Hook && !w.__agyOrigFetch) {
+            w.__agyOrigFetch = prevFetch;
+          }
           const wrappedFetch = function (input, init) {
+            let nextInput = input;
+            let nextInit = init;
             try {
-              const url = typeof input === 'string' ? input : (input && typeof input.url === 'string' ? input.url : '');
-              if (url && CONVO_RPC_RE.test(url) && init && init.body) {
-                sniffCascadeIdFromRpc(url, init.body, null);
+              const url = typeof input === 'string'
+                ? input
+                : (input && typeof input.url === 'string'
+                  ? input.url
+                  : (input && typeof input.href === 'string' ? input.href : ''));
+              const sniffFn = w.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
+              const injectFn = w.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
+              if (url && CONVO_RPC_RE.test(url) && nextInit && nextInit.body) {
+                sniffFn(url, nextInit.body, null);
                 if (/\/SendUserCascadeMessage$/i.test(url)) {
-                  init = { ...init, body: injectCheckpointLimitIntoSendRequest(url, init.body, null) };
+                  nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
+                  // If wrapping over a legacy v1.3.8 hook in an un-reloaded window, pass a URL object
+                  // so v1.3.8's `typeof input === 'string' || typeof input.url === 'string'` check is bypassed!
+                  if (isLegacyV1Hook && typeof URL === 'function') {
+                    try {
+                      nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
+                    } catch {}
+                  }
                 }
               }
             } catch {}
-            return origFetch.call(this, input, init);
+            return prevFetch.call(this, nextInput, nextInit);
           };
           wrappedFetch.__agyCwHooked = true;
+          wrappedFetch.__agyCwHookV2 = true;
           w.fetch = wrappedFetch;
         } catch {}
       }
 
       function hookLsClient(lsClient) {
-        if (!lsClient || typeof lsClient !== 'object' || lsClient.__agyCwHooked) return lsClient;
+        if (!lsClient || typeof lsClient !== 'object') return lsClient;
+        if (lsClient.__agyCwHookV2) return lsClient;
         try {
           lsClient.__agyCwHooked = true;
+          lsClient.__agyCwHookV2 = true;
           if (typeof lsClient.sendUserCascadeMessage === 'function') {
-            const origSend = lsClient.sendUserCascadeMessage;
+            const origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
+            lsClient.__agyOrigSendUserCascadeMessage = origSend;
             lsClient.sendUserCascadeMessage = function (req, ...rest) {
-              const nextReq = injectCheckpointLimitIntoSendRequest(
+              const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
+              const nextReq = injectFn(
                 '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
                 req,
                 null
@@ -1937,11 +2024,19 @@
       }
 
       function extractCascadeIdFromBody(body, ignoreUuid) {
-        if (body && typeof body === 'object' && !(body instanceof Uint8Array) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
+        const u8 = toUint8Slice(body);
+        if (!u8 && body && typeof body === 'object') {
           const cid = body.cascadeId || body.conversationId;
           if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
         }
-        const text = decodeBytesToText(body);
+        let targetBody = u8 || body;
+        if (u8 && u8.length >= 5 && u8[0] === 0) {
+          const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
+          if (frameLen === u8.length - 5) {
+            targetBody = u8.subarray(5);
+          }
+        }
+        const text = decodeBytesToText(targetBody);
         if (!text) return null;
         const trimmed = text.trim();
         if (trimmed.startsWith('{')) {
@@ -1984,11 +2079,13 @@
       }
 
       function hookRemoteControlPrototype(proto) {
-        if (!proto || proto.__agyHooked) return;
+        if (!proto || proto.__agyHookV2) return;
         proto.__agyHooked = true;
+        proto.__agyHookV2 = true;
 
         if (typeof proto.handleIframeMessage === 'function') {
-          const origMsg = proto.handleIframeMessage;
+          const origMsg = proto.__agyOrigHandleIframeMessage || proto.handleIframeMessage;
+          proto.__agyOrigHandleIframeMessage = origMsg;
           proto.handleIframeMessage = function (ev) {
             window.__agyRemoteControlInstance = this;
             if (ev && ev.data === '__agy_probe__') return;
@@ -2007,24 +2104,31 @@
 
         for (const mName of ['proxyCommand', 'streamProxyCommand']) {
           if (typeof proto[mName] === 'function') {
-            const origFn = proto[mName];
+            const origKey = `__agyOrig_${mName}`;
+            const origFn = proto[origKey] || proto[mName];
+            proto[origKey] = origFn;
             proto[mName] = function (path, body, ...rest) {
               window.__agyRemoteControlInstance = this;
-              sniffCascadeIdFromRpc(path, body, this);
-              const nextBody = injectCheckpointLimitIntoSendRequest(path, body, this);
+              const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
+              const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
+              sniffFn(path, body, this);
+              const nextBody = injectFn(path, body, this);
               return origFn.call(this, path, nextBody, ...rest);
             };
           }
         }
 
         if (typeof proto.handlePortRequest === 'function') {
-          const origPort = proto.handlePortRequest;
+          const origPort = proto.__agyOrigHandlePortRequest || proto.handlePortRequest;
+          proto.__agyOrigHandlePortRequest = origPort;
           proto.handlePortRequest = function (msg) {
             window.__agyRemoteControlInstance = this;
             if (msg && typeof msg.path === 'string') {
-              sniffCascadeIdFromRpc(msg.path, msg.body, this);
+              const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
+              const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
+              sniffFn(msg.path, msg.body, this);
               if (/\/SendUserCascadeMessage$/i.test(msg.path) && msg.body) {
-                msg = { ...msg, body: injectCheckpointLimitIntoSendRequest(msg.path, msg.body, this) };
+                msg = { ...msg, body: injectFn(msg.path, msg.body, this) };
               }
             }
             return origPort.call(this, msg);

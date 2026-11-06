@@ -1159,7 +1159,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(coreNode.innerHTML.includes('245k'), 'before compaction, should show 245k');
     assert.ok(coreNode.innerHTML.includes('64%'), 'before compaction, 245k / 384k should be 64%');
 
-    // 1. Test JSON SendUserCascadeMessage interception
+    // 1. Test JSON SendUserCascadeMessage interception (string body)
     await sandbox.window.fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
       method: 'POST',
       body: JSON.stringify({ cascadeId: cid, items: [{ text: 'hello' }] }),
@@ -1167,6 +1167,52 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(lastSentMessageReq, 'SendUserCascadeMessage JSON should be intercepted');
     assert.equal(lastSentMessageReq.cascadeConfig?.checkpointConfig?.contextWindow, '384K');
     assert.equal(lastSentMessageReq.cascadeConfig?.checkpointConfig?.maxTokenLimit, 384000, 'must inject maxTokenLimit: 384000 so language_server proto.Merge overrides 256000 default');
+
+    // 1-B. Test Unframed UTF-8 JSON Uint8Array body (must NOT append binary 0x2a '*'!)
+    const jsonBytesReq = new TextEncoder().encode(JSON.stringify({ cascadeId: cid, items: [{ text: 'json-u8' }] }));
+    await sandbox.window.fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
+      method: 'POST',
+      body: jsonBytesReq,
+    });
+    assert.ok(lastSentProtoBytes instanceof Uint8Array);
+    const decodedUnframedJson = new TextDecoder().decode(lastSentProtoBytes);
+    assert.ok(!decodedUnframedJson.endsWith('*'), 'Unframed JSON Uint8Array must never have 0x2a (*) appended');
+    const parsedUnframedJson = JSON.parse(decodedUnframedJson);
+    assert.equal(parsedUnframedJson.cascadeConfig?.checkpointConfig?.maxTokenLimit, 384000);
+
+    // 1-C. Test Connect 5-byte Framed UTF-8 JSON Uint8Array (`[0x00, len3..0]` + JSON, exact reproduction of line 1:787 invalid value *!)
+    const framedOrigJsonBytes = new TextEncoder().encode(
+      JSON.stringify({
+        cascadeId: cid,
+        items: [{ text: '혹시 띵킹켜는거 어디붙는지 봐줄래?' }],
+        cascadeConfig: { checkpointConfig: { contextWindow: '384K' } },
+      })
+    );
+    const framedJsonReq = new Uint8Array(5 + framedOrigJsonBytes.length);
+    framedJsonReq[0] = 0;
+    framedJsonReq[1] = (framedOrigJsonBytes.length >>> 24) & 0xff;
+    framedJsonReq[2] = (framedOrigJsonBytes.length >>> 16) & 0xff;
+    framedJsonReq[3] = (framedOrigJsonBytes.length >>> 8) & 0xff;
+    framedJsonReq[4] = framedOrigJsonBytes.length & 0xff;
+    framedJsonReq.set(framedOrigJsonBytes, 5);
+
+    await sandbox.window.fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
+      method: 'POST',
+      body: framedJsonReq,
+    });
+    assert.ok(lastSentProtoBytes instanceof Uint8Array);
+    assert.equal(lastSentProtoBytes[0], 0);
+    const newFrameLen =
+      ((lastSentProtoBytes[1] << 24) >>> 0) +
+      (lastSentProtoBytes[2] << 16) +
+      (lastSentProtoBytes[3] << 8) +
+      lastSentProtoBytes[4];
+    assert.equal(newFrameLen, lastSentProtoBytes.length - 5, '5-byte Connect frame length header must match new JSON payload byte length');
+    const decodedFramedJson = new TextDecoder().decode(lastSentProtoBytes.subarray(5));
+    assert.ok(!decodedFramedJson.includes('*'), 'Connect-framed JSON must NEVER have binary 0x2a (*) appended after JSON');
+    const parsedFramedJson = JSON.parse(decodedFramedJson);
+    assert.equal(parsedFramedJson.cascadeConfig?.checkpointConfig?.maxTokenLimit, 384000);
+    assert.equal(parsedFramedJson.cascadeConfig?.checkpointConfig?.contextWindow, '384K');
 
     // 2. Test Protobuf binary SendUserCascadeMessage interception
     const rawProtoReq = new TextEncoder().encode(`\x0a\x24${cid}`);
@@ -1176,12 +1222,20 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     });
     assert.ok(lastSentProtoBytes instanceof Uint8Array);
     assert.ok(lastSentProtoBytes.length > rawProtoReq.length, 'Protobuf binary request must have cascade_config.checkpoint_config suffix appended');
+    const firstInjectedProtoLen = lastSentProtoBytes.length;
     const suffix = Array.from(lastSentProtoBytes.subarray(rawProtoReq.length));
     // 0x2a (field 5 cascade_config), len, 0x12 (field 2 checkpoint_config), len, 0x28 (field 5 max_token_limit), varint(384000) = [0x80, 0xb8, 0x17]
     assert.equal(suffix[0], 0x2a);
     assert.equal(suffix[2], 0x12);
     assert.equal(suffix[4], 0x28);
     assert.deepEqual(suffix.slice(5, 8), [0x80, 0xb8, 0x17], 'varint encoding of 384000 must be [0x80, 0xb8, 0x17]');
+
+    // 2-B. Idempotency: passing already-injected Protobuf bytes a second time (e.g. handlePortRequest -> proxyCommand) must not double-append
+    await sandbox.window.fetch('/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage', {
+      method: 'POST',
+      body: lastSentProtoBytes,
+    });
+    assert.equal(lastSentProtoBytes.length, firstInjectedProtoLen, 'Protobuf suffix injection must be idempotent');
 
     // 3. Simulate Compacting completing at step 3258 -> statusbar must immediately reflect 33k (9%), NOT stay stuck at 245k (64%)
     compacted = true;
