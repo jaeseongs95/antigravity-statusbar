@@ -21,7 +21,7 @@
 
 ## 개요 및 핵심 기능
 
-- **실시간 컨텍스트·캐시·쿼터 표시 및 `Compacting` 직후 즉시 반영**:
+- **실시간 컨텍스트·캐시·쿼터 표시 및 `Compacting` 직후 반영**:
   - 현재 대화 세션의 컨텍스트 토큰 사용률(`pct%`, `used / limit`), 프롬프트 캐시 적중률(`cache %`), `5h` / `7d` 잔여 쿼터를 채팅 입력창 하단에서 실시간으로 보여줍니다.
   - 대화 압축(`Compacting`)이 완료된 직후 새 메시지를 보내기 전에도 `agentStateProvider.getContextEstimate().estimatedAfterCompaction` 수치를 상태바와 `[ context ]` 디버그 모달 양쪽에 즉시 반영합니다.
 - **세션별 컨텍스트 한도 자유 입력(`32K` – `980K`) 및 백엔드 체크포인터(`max_token_limit`) 동기화**:
@@ -33,7 +33,7 @@
   - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
   - 이미 실행 중인 Antigravity 창에도 Chrome DevTools Protocol(CDP)로 즉시 주입되어 앱을 재시작할 필요가 없습니다.
 - **원격 제어 웹(`https://antigravity.google.com/r/...`) 및 호스트 설치 맞춤형 동반 로드**:
-  - 최상위 `<ga-remote-control>` Angular 호스트 셸(`RemoteControlComponent.prototype.proxyCommand`)과 내부 React Fiber WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`)를 자동 브릿지합니다.
+  - 최상위 `<ga-remote-control>` Angular 호스트 셸(`RemoteControlComponent.prototype.proxyCommand`)과 내부 React Fiber WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`)를 자동으로 연결합니다.
   - 원격 웹에서 북마클릿 실행 시 호스트 PC에 실제로 설치된 동반 플러그인(`antigravity-mcp-manager`, `ko-thought-translator`)만 감지해 함께 로드합니다.
 - **플러그형 `StatusBarAdapter` 확장 구조 (`v7`)**:
   - 코어 슬롯(`.agy-ctx-left`, `.agy-ctx-right`)과 개별 위젯/버튼(`core-metrics`, `[ compact ]`, `[ context ]`)을 분리하여 `window.agyStatusBar.registerAdapter(adapter)`로 손쉽게 커스텀 위젯을 추가·제거할 수 있습니다.
@@ -99,7 +99,7 @@ javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravit
 
 | 표시 항목 / 버튼 | 위치 | 설명 |
 | :--- | :--- | :--- |
-| **`{pct}% · {used} / [ {limit} ▾ ]`** | 좌측 슬롯 | 현재 대화의 컨텍스트 토큰 사용률과 사용량을 실시간 표시합니다. **`[ {limit} ▾ ]`**를 클릭하면 세션별 토큰 한도(`128K`~`900K` 프리셋 및 `32K`~`980K` 직접 입력)를 즉시 변경할 수 있습니다. |
+| **`{pct}% · {used} / [ {limit} ▾ ]`** | 좌측 슬롯 | 현재 대화의 컨텍스트 토큰 사용률과 사용량을 실시간으로 표시합니다. **`[ {limit} ▾ ]`**를 클릭하면 세션별 토큰 한도(`128K`~`900K` 프리셋 및 `32K`~`980K` 직접 입력)를 즉시 변경할 수 있습니다. |
 | **`cache {pct}%`** | 좌측 슬롯 | 최근 모델 응답의 프롬프트 캐시 적중률(`cacheReadTokens / inputTokens`)을 표시합니다. |
 | **`5h {pct}% · 7d {pct}%`** | 좌측 슬롯 | `LanguageServerService.retrieveUserQuotaSummary`에서 조회한 5시간 / 7일 잔여 쿼터 비율을 표시합니다. |
 | **`[ compact ]`** | 우측 슬롯 | 현재 대화방에 `/compact` 명령을 전송해 컨텍스트를 압축하고, 압축 직후 줄어든 토큰 추정치를 즉시 반영합니다. |
