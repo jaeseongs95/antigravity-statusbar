@@ -20,6 +20,8 @@ const TARGET_PATCHER = path.join(AGY_DIR, 'ensure_statusbar_patch.js');
 
 const SRC_PATCHER = path.join(__dirname, 'ensure_statusbar_patch.js');
 
+const MCP_BEGIN = '// === BEGIN_AGY_MCP_MANAGER_V1 ===';
+const MCP_END = '// === END_AGY_MCP_MANAGER_V1 ===';
 const KO_BEGIN = '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===';
 const KO_END = '// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===';
 
@@ -29,9 +31,15 @@ function install() {
 
   let baseCode = fs.readFileSync(outFile, 'utf8').replace(/\r\n/g, '\n').trimEnd() + '\n';
 
-  // Preserve embedded ko-thought-translator block if already present in the user's installation
+  // Preserve embedded antigravity-mcp-manager and ko-thought-translator blocks if already present
   if (fs.existsSync(TARGET_AUTOINJECT)) {
     const existing = fs.readFileSync(TARGET_AUTOINJECT, 'utf8');
+    const mcpB = existing.indexOf(MCP_BEGIN);
+    const mcpE = existing.indexOf(MCP_END);
+    if (mcpB !== -1 && mcpE !== -1 && mcpE > mcpB) {
+      const mcpBlock = existing.slice(mcpB, mcpE + MCP_END.length);
+      baseCode += `\n${mcpBlock}\n`;
+    }
     const bIdx = existing.indexOf(KO_BEGIN);
     const eIdx = existing.indexOf(KO_END);
     if (bIdx !== -1 && eIdx !== -1 && eIdx > bIdx) {
