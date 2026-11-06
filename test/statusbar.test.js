@@ -14,7 +14,7 @@ const {
 const { normalizeAdapter, createAdapterRegistry } = require('../src/adapter-registry.js');
 const { extractStatsFromMetas } = require('../src/rpc-client.js');
 const { buildDynamicCwWarnCss, fmtK, fmtNum, escHtml } = require('../src/dom-styles.js');
-const { mountStatusBar, STATUSBAR_VERSION } = require('../src/index.js');
+const { mountStatusBar, ensureRemoteCompanionScripts, STATUSBAR_VERSION } = require('../src/index.js');
 
 const {
   PATCH_MARKER,
@@ -938,6 +938,46 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.equal(api.getConversationContextWindow(view, 'remote-session'), '640K');
 
     sandbox.window.__agyStatusBarCleanup();
+  });
+
+  it('automatically loads MCP Manager and KoTranslator companion bundles when bookmarklet is clicked on antigravity.google.com', async () => {
+    const appendedScripts = [];
+    const fetchedUrls = [];
+    const fakeDoc = {
+      head: {
+        appendChild(el) {
+          appendedScripts.push(el);
+        },
+      },
+      querySelector(sel) {
+        if (sel === 'script[nonce]') return { nonce: 'test-csp-nonce' };
+        return null;
+      },
+      createElement(tag) {
+        return { tagName: tag.toUpperCase(), nonce: '', text: '' };
+      },
+    };
+    const fakeWin = {
+      location: { hostname: 'antigravity.google.com' },
+    };
+    const fakeFetch = async (url) => {
+      fetchedUrls.push(url);
+      return {
+        ok: true,
+        async text() {
+          return `// loaded ${url}`;
+        },
+      };
+    };
+
+    ensureRemoteCompanionScripts(fakeWin, fakeDoc, fakeFetch);
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(fetchedUrls.length, 2);
+    assert.ok(fetchedUrls.some((u) => u.includes('mcp_manager_autoinject.js')));
+    assert.ok(fetchedUrls.some((u) => u.includes('ko_thought_autoinject.js')));
+    assert.equal(appendedScripts.length, 2);
+    assert.equal(appendedScripts[0].nonce, 'test-csp-nonce');
   });
 });
 

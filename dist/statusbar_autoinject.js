@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.6
+// @version      1.3.7
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -3145,7 +3145,58 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v14';
+    const STATUSBAR_VERSION = 'v15';
+
+    function ensureRemoteCompanionScripts(win, doc, fetchFn) {
+      try {
+        const isRemoteWeb = Boolean(
+          win?.location?.hostname && String(win.location.hostname).includes('antigravity.google.com')
+        );
+        const effFetch = fetchFn || win?.fetch;
+        if (!isRemoteWeb || typeof effFetch !== 'function' || !doc?.head) return;
+
+        const loadScript = (flagKey, url) => {
+          if (win[flagKey]) return;
+          win[flagKey] = true;
+          effFetch(`${url}?t=${Date.now()}`)
+            .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
+            .then((code) => {
+              if (!code) return;
+              const s = doc.createElement('script');
+              const nonceEl = doc.querySelector?.('script[nonce]');
+              const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
+              if (nonce) s.nonce = nonce;
+              let policy = win.__agyTrustedTypesPolicy || null;
+              if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
+                try {
+                  policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
+                    createScript: (x) => x,
+                  });
+                  win.__agyTrustedTypesPolicy = policy;
+                } catch {}
+              }
+              s.text = policy ? policy.createScript(code) : code;
+              doc.head.appendChild(s);
+            })
+            .catch(() => {
+              win[flagKey] = false;
+            });
+        };
+
+        if (!win.agyMcpManager) {
+          loadScript(
+            '__agyLoadingMcpManagerCompanion',
+            'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'
+          );
+        }
+        if (!win.__agyKoLocalizerActive) {
+          loadScript(
+            '__agyLoadingKoTranslatorCompanion',
+            'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js'
+          );
+        }
+      } catch {}
+    }
 
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -3191,6 +3242,7 @@
       });
 
       refreshStyles();
+      ensureRemoteCompanionScripts(win, doc, fetchFn);
 
       const setHtml = createTrustedHtmlSetter(win, doc);
       hostBridge = createHostBridge({
@@ -3458,6 +3510,7 @@
 
     module.exports = {
       STATUSBAR_VERSION,
+      ensureRemoteCompanionScripts,
       mountStatusBar,
     };
 

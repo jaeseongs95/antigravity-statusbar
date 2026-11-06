@@ -9,7 +9,58 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v14';
+const STATUSBAR_VERSION = 'v15';
+
+function ensureRemoteCompanionScripts(win, doc, fetchFn) {
+  try {
+    const isRemoteWeb = Boolean(
+      win?.location?.hostname && String(win.location.hostname).includes('antigravity.google.com')
+    );
+    const effFetch = fetchFn || win?.fetch;
+    if (!isRemoteWeb || typeof effFetch !== 'function' || !doc?.head) return;
+
+    const loadScript = (flagKey, url) => {
+      if (win[flagKey]) return;
+      win[flagKey] = true;
+      effFetch(`${url}?t=${Date.now()}`)
+        .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
+        .then((code) => {
+          if (!code) return;
+          const s = doc.createElement('script');
+          const nonceEl = doc.querySelector?.('script[nonce]');
+          const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
+          if (nonce) s.nonce = nonce;
+          let policy = win.__agyTrustedTypesPolicy || null;
+          if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
+            try {
+              policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
+                createScript: (x) => x,
+              });
+              win.__agyTrustedTypesPolicy = policy;
+            } catch {}
+          }
+          s.text = policy ? policy.createScript(code) : code;
+          doc.head.appendChild(s);
+        })
+        .catch(() => {
+          win[flagKey] = false;
+        });
+    };
+
+    if (!win.agyMcpManager) {
+      loadScript(
+        '__agyLoadingMcpManagerCompanion',
+        'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'
+      );
+    }
+    if (!win.__agyKoLocalizerActive) {
+      loadScript(
+        '__agyLoadingKoTranslatorCompanion',
+        'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js'
+      );
+    }
+  } catch {}
+}
 
 function mountStatusBar(env = {}) {
   const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -55,6 +106,7 @@ function mountStatusBar(env = {}) {
   });
 
   refreshStyles();
+  ensureRemoteCompanionScripts(win, doc, fetchFn);
 
   const setHtml = createTrustedHtmlSetter(win, doc);
   hostBridge = createHostBridge({
@@ -322,5 +374,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
 module.exports = {
   STATUSBAR_VERSION,
+  ensureRemoteCompanionScripts,
   mountStatusBar,
 };
