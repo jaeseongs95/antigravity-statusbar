@@ -131,6 +131,7 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       }
     }
 
+    const orderedEls = [];
     for (const adapter of adapters) {
       let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
       if (typeof adapter.render === 'function') {
@@ -172,6 +173,35 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
         if (resolvedTitle && itemEl.getAttribute('title') !== resolvedTitle) {
           itemEl.setAttribute('title', resolvedTitle);
           itemEl.title = resolvedTitle;
+        }
+      }
+      if (itemEl) orderedEls.push(itemEl);
+    }
+
+    if (orderedEls.length > 1 && Array.isArray(slotEl.children)) {
+      let outOfOrder = false;
+      for (let i = 0; i < orderedEls.length; i++) {
+        if (slotEl.children[i] !== orderedEls[i]) {
+          outOfOrder = true;
+          break;
+        }
+      }
+      if (outOfOrder) {
+        for (const el of orderedEls) {
+          slotEl.appendChild(el);
+        }
+      }
+    } else if (orderedEls.length > 1 && typeof slotEl.insertBefore === 'function' && slotEl.children) {
+      let outOfOrder = false;
+      for (let i = 0; i < orderedEls.length; i++) {
+        if (slotEl.children[i] !== orderedEls[i]) {
+          outOfOrder = true;
+          break;
+        }
+      }
+      if (outOfOrder) {
+        for (const el of orderedEls) {
+          slotEl.appendChild(el);
         }
       }
     }

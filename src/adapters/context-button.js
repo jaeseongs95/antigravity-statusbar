@@ -14,7 +14,11 @@ function createContextButtonAdapter({
   async function openOrToggleDebugModal(view, inputBox) {
     const existingModal = document.getElementById('agy-ctx-debug-modal');
     if (existingModal) {
-      existingModal.remove();
+      if (typeof existingModal.__agyCleanup === 'function') {
+        existingModal.__agyCleanup();
+      } else {
+        existingModal.remove();
+      }
       return;
     }
 
@@ -64,8 +68,9 @@ function createContextButtonAdapter({
 
     const closeModal = () => {
       backdrop.remove();
-      window.removeEventListener('keydown', onKeyDown);
+      window?.removeEventListener?.('keydown', onKeyDown);
     };
+    backdrop.__agyCleanup = closeModal;
     const onKeyDown = (e) => {
       if (e.key === 'Escape') closeModal();
     };
@@ -139,7 +144,27 @@ function createContextButtonAdapter({
         const allMetas = t?.trajectory?.generatorMetadata || [];
         metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
       }
-      const parsed = extractStatsFromMetas(metas);
+      let parsed = extractStatsFromMetas(metas);
+      const fullState = asp?.getState?.();
+      if (fullState && typeof fullState === 'object') {
+        const cwUsage = fullState.contextWindowUsage;
+        const compactedSteps = fullState.compactionInfo?.compactedAtStepIndices;
+        const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
+          ? Number(compactedSteps[compactedSteps.length - 1])
+          : -1;
+        if (cwUsage && typeof cwUsage === 'object') {
+          const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
+          const uStep = Number(cwUsage.lastStepIndex ?? -1);
+          const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+          if (afterCompact > 0 && (latestCompactedStep >= parsed.lastMetaStepIndex || afterCompact < parsed.used)) {
+            parsed.used = afterCompact;
+            parsed.foundCtx = true;
+          } else if (uEst > 0 && (!parsed.foundCtx || (uStep >= 0 && parsed.lastMetaStepIndex >= 0 && uStep > parsed.lastMetaStepIndex))) {
+            parsed.used = uEst;
+            parsed.foundCtx = true;
+          }
+        }
+      }
 
       let latestCwm = null;
       let latestSections = [];
@@ -150,7 +175,7 @@ function createContextButtonAdapter({
         if (!latestModel && (cm.modelDisplayName || cm.responseModel || cm.model)) {
           latestModel = cm.modelDisplayName || cm.responseModel || cm.model;
         }
-        if (!latestCwm && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) {
+        if (!latestCwm && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed !== undefined && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed !== null) {
           latestCwm = cm.chatStartMetadata.contextWindowMetadata;
         }
         if (!latestSections.length && Array.isArray(cm.promptSections) && cm.promptSections.length > 0) {

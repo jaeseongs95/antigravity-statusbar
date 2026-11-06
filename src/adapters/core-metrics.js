@@ -15,7 +15,11 @@ function createCoreMetricsAdapter({
   function showContextMenu(barEl, view, cascadeId, limitBtn) {
     const existing = barEl.querySelector('.agy-ctx-menu');
     if (existing) {
-      existing.remove();
+      if (typeof existing.__agyCleanup === 'function') {
+        existing.__agyCleanup();
+      } else {
+        existing.remove();
+      }
       return;
     }
 
@@ -56,7 +60,12 @@ function createCoreMetricsAdapter({
     } catch {}
     const winObj = document?.defaultView || null;
 
+    let attachTimer = null;
     const closeMenu = () => {
+      if (attachTimer !== null) {
+        clearTimeout(attachTimer);
+        attachTimer = null;
+      }
       menu.remove();
       for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
         document?.removeEventListener?.(evt, outsideHandler, true);
@@ -64,6 +73,7 @@ function createCoreMetricsAdapter({
       }
       try { winObj?.removeEventListener?.('blur', closeMenu); } catch {}
     };
+    menu.__agyCleanup = closeMenu;
 
     const inputEl = customRow.querySelector('.agy-ctx-custom-input');
     const applyBtn = customRow.querySelector('.agy-ctx-custom-apply');
@@ -127,7 +137,9 @@ function createCoreMetricsAdapter({
         closeMenu();
       }
     };
-    setTimeout(() => {
+    attachTimer = setTimeout(() => {
+      attachTimer = null;
+      if (!menu.isConnected && menu.parentNode !== barEl) return;
       for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
         document?.addEventListener?.(evt, outsideHandler, true);
         try { iframeDoc?.addEventListener?.(evt, outsideHandler, true); } catch {}
@@ -183,7 +195,7 @@ function createCoreMetricsAdapter({
       const html = `
         <span class="agy-ctx-group agy-ctx-group-ctx">
           <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-          <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${limitTitle}">[ ${currentCw.toLowerCase()} ▾ ]</button></span>
+          <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
           <span class="agy-ctx-sep">·</span>
           <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
         </span>

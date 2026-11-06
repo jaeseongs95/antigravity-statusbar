@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
-// @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.7
+// @namespace    https://github.com/superselect321/antigravity-statusbar
+// @version      1.3.10
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -360,12 +360,15 @@
         const norm = normalize(rawCw);
         if (norm) {
           sessionCwMap.set(cascadeId, norm);
+          if (!sessionCwTsMap.has(cascadeId)) {
+            sessionCwTsMap.set(cascadeId, Date.now());
+          }
         }
       }
 
       function migrateSessionOverride(fromCascadeId, toCascadeId) {
         if (!fromCascadeId || !toCascadeId || fromCascadeId === toCascadeId) return null;
-        const ts = sessionCwTsMap.get(fromCascadeId) || 0;
+        const ts = sessionCwTsMap.get(fromCascadeId) || 1;
         const cw = sessionCwMap.get(fromCascadeId);
         if (!cw || ts < 1) return null;
         sessionCwMap.delete(fromCascadeId);
@@ -378,7 +381,7 @@
       }
 
       function getDefaultCw() {
-        return normalize(defaultCwCache) || '256K';
+        return normalize(defaultCwCache) || '512K';
       }
 
       return {
@@ -903,7 +906,8 @@
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function fmtResetTime(iso) {
@@ -971,7 +975,7 @@
         if (!cm) continue;
         if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
           const cwm = cm.chatStartMetadata.contextWindowMetadata;
-          if (cwm.estimatedTokensUsed) {
+          if (cwm.estimatedTokensUsed !== undefined && cwm.estimatedTokensUsed !== null) {
             used = Number(cwm.estimatedTokensUsed);
             max = Number(cwm.maxContextTokens || 256000);
             if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
@@ -1298,6 +1302,7 @@
         fetchQuota,
         fetchCascadeStats,
         fetchTailMetasBounded,
+        applyRealtimeCompactionAndUsage,
         getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
         getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
         getLatestQuota: () => quotaData,
@@ -1394,25 +1399,36 @@
                     [Symbol.asyncIterator]() {
                       const it = stream[Symbol.asyncIterator]();
                       let yieldedFirst = false;
+                      let pendingFirstNext = null;
                       return {
                         async next() {
                           if (!yieldedFirst) {
                             yieldedFirst = true;
                             let timer;
+                            const firstPromise = it.next();
+                            firstPromise.catch(() => {});
                             const raceRes = await Promise.race([
-                              it.next().then((r) => ({ from: 'stream', r })),
+                              firstPromise.then((r) => ({ from: 'stream', r })),
                               new Promise((resolve) => {
                                 timer = setTimeout(() => resolve({ from: 'timeout' }), 600);
                               }),
                             ]);
                             clearTimeout(timer);
                             if (raceRes.from === 'stream') return raceRes.r;
+                            pendingFirstNext = firstPromise;
                             try {
                               const res = await decorated.getAllPlugins({ workspaceUris: [] });
                               return { done: false, value: { plugins: res?.plugins || [] } };
                             } catch {
-                              return it.next();
+                              const p = pendingFirstNext;
+                              pendingFirstNext = null;
+                              return p;
                             }
+                          }
+                          if (pendingFirstNext) {
+                            const p = pendingFirstNext;
+                            pendingFirstNext = null;
+                            return p;
                           }
                           return it.next();
                         },
@@ -1887,17 +1903,22 @@
           const u8 = toUint8Slice(body);
           if (!u8) {
             if (typeof body === 'object') {
-              return {
-                ...body,
-                cascadeConfig: {
-                  ...(body.cascadeConfig || {}),
-                  checkpointConfig: {
-                    ...(body.cascadeConfig?.checkpointConfig || {}),
-                    contextWindow: cw,
-                    maxTokenLimit: limit,
-                  },
-                },
-              };
+              const cloned = typeof body.clone === 'function'
+                ? body.clone()
+                : Object.assign(Object.create(Object.getPrototypeOf(body)), body);
+              const prevCc = body.cascadeConfig;
+              const nextCc = prevCc && typeof prevCc === 'object'
+                ? (typeof prevCc.clone === 'function' ? prevCc.clone() : Object.assign(Object.create(Object.getPrototypeOf(prevCc)), prevCc))
+                : {};
+              const prevCp = prevCc?.checkpointConfig;
+              const nextCp = prevCp && typeof prevCp === 'object'
+                ? (typeof prevCp.clone === 'function' ? prevCp.clone() : Object.assign(Object.create(Object.getPrototypeOf(prevCp)), prevCp))
+                : {};
+              nextCp.contextWindow = cw;
+              nextCp.maxTokenLimit = limit;
+              nextCc.checkpointConfig = nextCp;
+              cloned.cascadeConfig = nextCc;
+              return cloned;
             }
             return body;
           }
@@ -1915,28 +1936,30 @@
           // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
           if (u8.length >= 5 && (u8[0] === 0 || u8[0] === 1)) {
             const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
-            if (frameLen === u8.length - 5) {
-              if (u8[0] !== 0) {
-                // Compressed frame: never append raw bytes
-                return body;
-              }
-              const payload = u8.subarray(5);
-              if (findFirstNonWsByte(payload) === 0x7b) {
-                // Connect-Framed JSON (`0x00` + 4B len + `{"cascadeId":...}`)!
-                // Parse JSON, inject checkpointConfig, re-encode JSON, and update 5-byte frame header length!
-                const text = decodeBytesToText(payload);
-                const j = applyCheckpointToJsonObj(JSON.parse(text));
-                const newPayload = encodeTextToBytes(JSON.stringify(j));
-                return buildConnectFramedBytes(0, newPayload);
-              }
-              if (endsWithByteSequence(payload, suffix)) {
-                return body;
-              }
-              const newPayload = new Uint8Array(payload.length + suffix.length);
-              newPayload.set(payload, 0);
-              newPayload.set(suffix, payload.length);
+            if (frameLen !== u8.length - 5) {
+              // Incomplete or multi-frame Connect envelope: never append unframed raw bytes
+              return body;
+            }
+            if (u8[0] !== 0) {
+              // Compressed frame: never append raw bytes
+              return body;
+            }
+            const payload = u8.subarray(5);
+            if (findFirstNonWsByte(payload) === 0x7b) {
+              // Connect-Framed JSON (`0x00` + 4B len + `{"cascadeId":...}`)!
+              // Parse JSON, inject checkpointConfig, re-encode JSON, and update 5-byte frame header length!
+              const text = decodeBytesToText(payload);
+              const j = applyCheckpointToJsonObj(JSON.parse(text));
+              const newPayload = encodeTextToBytes(JSON.stringify(j));
               return buildConnectFramedBytes(0, newPayload);
             }
+            if (endsWithByteSequence(payload, suffix)) {
+              return body;
+            }
+            const newPayload = new Uint8Array(payload.length + suffix.length);
+            newPayload.set(payload, 0);
+            newPayload.set(suffix, payload.length);
+            return buildConnectFramedBytes(0, newPayload);
           }
 
           // 3. Unframed Protobuf binary (idempotent guard against double injection)
@@ -1978,17 +2001,30 @@
                   : (input && typeof input.href === 'string' ? input.href : ''));
               const sniffFn = w.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
               const injectFn = w.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-              if (url && CONVO_RPC_RE.test(url) && nextInit && nextInit.body) {
-                sniffFn(url, nextInit.body, null);
-                if (/\/SendUserCascadeMessage$/i.test(url)) {
-                  nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
-                  // If wrapping over a legacy v1.3.8 hook in an un-reloaded window, pass a URL object
-                  // so v1.3.8's `typeof input === 'string' || typeof input.url === 'string'` check is bypassed!
-                  if (isLegacyV1Hook && typeof URL === 'function') {
-                    try {
-                      nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
-                    } catch {}
+              if (url && CONVO_RPC_RE.test(url)) {
+                if (nextInit && nextInit.body) {
+                  sniffFn(url, nextInit.body, null);
+                  if (/\/SendUserCascadeMessage$/i.test(url)) {
+                    nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
+                    // If wrapping over a legacy v1.3.8 hook in an un-reloaded window, pass a URL object
+                    // so v1.3.8's `typeof input === 'string' || typeof input.url === 'string'` check is bypassed!
+                    if (isLegacyV1Hook && typeof URL === 'function') {
+                      try {
+                        nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
+                      } catch {}
+                    }
                   }
+                } else if (input && typeof input === 'object' && typeof input.arrayBuffer === 'function' && typeof input.clone === 'function' && /\/SendUserCascadeMessage$/i.test(url)) {
+                  return input.clone().arrayBuffer().then((ab) => {
+                    const rawBytes = new Uint8Array(ab);
+                    sniffFn(url, rawBytes, null);
+                    const injectedBody = injectFn(url, rawBytes, null);
+                    const ReqCtor = w.Request || (typeof Request === 'function' ? Request : null);
+                    if (ReqCtor) {
+                      return prevFetch.call(this, new ReqCtor(input, { body: injectedBody }), nextInit);
+                    }
+                    return prevFetch.call(this, nextInput, { ...(nextInit || {}), body: injectedBody });
+                  }).catch(() => prevFetch.call(this, nextInput, nextInit));
                 }
               }
             } catch {}
@@ -2260,8 +2296,14 @@
         async function callRpc(methodName, rpcPath, reqObj) {
           if (svc && typeof svc[methodName] === 'function') {
             try {
-              const r = await svc[methodName](reqObj || {});
-              if (r) return r;
+              let arg = reqObj || {};
+              if (!svc.isRemoteControlHost) {
+                if (methodName === 'getCustomizationStates') arg = [];
+                else if (methodName === 'getAllSkills') arg = [];
+                else if (methodName === 'readFile' && arg && typeof arg === 'object' && typeof arg.uri === 'string') arg = arg.uri;
+              }
+              const r = await svc[methodName](arg);
+              if (r !== undefined && r !== null) return r;
             } catch {}
           }
           if (svc && typeof svc.callJson === 'function') {
@@ -2289,24 +2331,21 @@
         ]);
 
         const candidatePaths = [];
-        if (Array.isArray(statesRes?.states)) {
-          for (const s of statesRes.states) {
-            if (s?.path) candidatePaths.push(s.path);
-          }
+        const statesList = Array.isArray(statesRes) ? statesRes : (Array.isArray(statesRes?.states) ? statesRes.states : []);
+        for (const s of statesList) {
+          if (s?.path) candidatePaths.push(s.path);
         }
         const pluginNames = new Set();
-        if (Array.isArray(pluginsRes?.plugins)) {
-          for (const p of pluginsRes.plugins) {
-            if (p?.name) pluginNames.add(String(p.name));
-            if (p?.path) candidatePaths.push(p.path);
-          }
+        const pluginsList = Array.isArray(pluginsRes) ? pluginsRes : (Array.isArray(pluginsRes?.plugins) ? pluginsRes.plugins : []);
+        for (const p of pluginsList) {
+          if (p?.name) pluginNames.add(String(p.name));
+          if (p?.path) candidatePaths.push(p.path);
         }
         if (!candidatePaths.length) {
           const skillsRes = await callRpc('getAllSkills', '/exa.language_server_pb.LanguageServerService/GetAllSkills', {});
-          if (Array.isArray(skillsRes?.skills)) {
-            for (const sk of skillsRes.skills) {
-              if (sk?.path) candidatePaths.push(sk.path);
-            }
+          const skillsList = Array.isArray(skillsRes) ? skillsRes : (Array.isArray(skillsRes?.skills) ? skillsRes.skills : []);
+          for (const sk of skillsList) {
+            if (sk?.path) candidatePaths.push(sk.path);
           }
         }
 
@@ -2326,15 +2365,25 @@
           const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
           const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
           const rf = await callRpc('readFile', '/exa.language_server_pb.LanguageServerService/ReadFile', { uri });
-          if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
+          if (rf instanceof Uint8Array || ArrayBuffer.isView(rf) || rf instanceof ArrayBuffer) {
+            hostBundleText = decodeBytesToText(rf);
+          } else if (typeof rf === 'string' && rf.length > 0) {
+            hostBundleText = rf;
+          } else if (rf && (rf.content instanceof Uint8Array || ArrayBuffer.isView(rf.content) || rf.content instanceof ArrayBuffer)) {
+            hostBundleText = decodeBytesToText(rf.content);
+          } else if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
             hostBundleText = decodeBase64ToUtf8(rf.content);
           }
         }
 
-        const mcpBegin = ['/* === BEGIN_AGY_MCP', 'MANAGER_V1 === */'].join('_');
-        const mcpEnd = ['/* === END_AGY_MCP', 'MANAGER_V1 === */'].join('_');
-        const koBegin = ['/* === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
-        const koEnd = ['/* === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+        const mcpBeginBlock = ['/* === BEGIN_AGY_MCP', 'MANAGER_V1 === */'].join('_');
+        const mcpEndBlock = ['/* === END_AGY_MCP', 'MANAGER_V1 === */'].join('_');
+        const mcpBeginLine = ['// === BEGIN_AGY_MCP', 'MANAGER_V1 ==='].join('_');
+        const mcpEndLine = ['// === END_AGY_MCP', 'MANAGER_V1 ==='].join('_');
+        const koBeginBlock = ['/* === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+        const koEndBlock = ['/* === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+        const koBeginLine = ['// === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 ==='].join('_');
+        const koEndLine = ['// === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 ==='].join('_');
 
         const hasMcpMarker = hostBundleText.includes(['BEGIN_AGY_MCP', 'MANAGER_V1'].join('_'));
         const hasKoMarker = hostBundleText.includes(['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_'));
@@ -2345,10 +2394,10 @@
         const hasKoTranslator = hasKoMarker || pluginNames.has('ko-thought-translator');
 
         const mcpManagerCode = hasMcpMarker
-          ? extractMarkerBlock(hostBundleText, mcpBegin, mcpEnd)
+          ? (extractMarkerBlock(hostBundleText, mcpBeginBlock, mcpEndBlock) || extractMarkerBlock(hostBundleText, mcpBeginLine, mcpEndLine))
           : '';
         const koTranslatorCode = hasKoMarker
-          ? extractMarkerBlock(hostBundleText, koBegin, koEnd)
+          ? (extractMarkerBlock(hostBundleText, koBeginBlock, koEndBlock) || extractMarkerBlock(hostBundleText, koBeginLine, koEndLine))
           : '';
 
         return {
@@ -2611,11 +2660,11 @@
           while (curr) {
             const val = curr.memoizedProps?.value;
             if (val && typeof val === 'object') {
-              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function') {
+              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function' || typeof val.getCustomizationStates === 'function' || typeof val.readFile === 'function') {
                 return hookLsClient(val);
               }
               const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
-              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function')) {
+              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function' || typeof lsClient.getCustomizationStates === 'function' || typeof lsClient.readFile === 'function')) {
                 return hookLsClient(lsClient);
               }
             }
@@ -3008,6 +3057,7 @@
           }
         }
 
+        const orderedEls = [];
         for (const adapter of adapters) {
           let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
           if (typeof adapter.render === 'function') {
@@ -3049,6 +3099,35 @@
             if (resolvedTitle && itemEl.getAttribute('title') !== resolvedTitle) {
               itemEl.setAttribute('title', resolvedTitle);
               itemEl.title = resolvedTitle;
+            }
+          }
+          if (itemEl) orderedEls.push(itemEl);
+        }
+
+        if (orderedEls.length > 1 && Array.isArray(slotEl.children)) {
+          let outOfOrder = false;
+          for (let i = 0; i < orderedEls.length; i++) {
+            if (slotEl.children[i] !== orderedEls[i]) {
+              outOfOrder = true;
+              break;
+            }
+          }
+          if (outOfOrder) {
+            for (const el of orderedEls) {
+              slotEl.appendChild(el);
+            }
+          }
+        } else if (orderedEls.length > 1 && typeof slotEl.insertBefore === 'function' && slotEl.children) {
+          let outOfOrder = false;
+          for (let i = 0; i < orderedEls.length; i++) {
+            if (slotEl.children[i] !== orderedEls[i]) {
+              outOfOrder = true;
+              break;
+            }
+          }
+          if (outOfOrder) {
+            for (const el of orderedEls) {
+              slotEl.appendChild(el);
             }
           }
         }
@@ -3099,7 +3178,11 @@
       function showContextMenu(barEl, view, cascadeId, limitBtn) {
         const existing = barEl.querySelector('.agy-ctx-menu');
         if (existing) {
-          existing.remove();
+          if (typeof existing.__agyCleanup === 'function') {
+            existing.__agyCleanup();
+          } else {
+            existing.remove();
+          }
           return;
         }
 
@@ -3140,7 +3223,12 @@
         } catch {}
         const winObj = document?.defaultView || null;
 
+        let attachTimer = null;
         const closeMenu = () => {
+          if (attachTimer !== null) {
+            clearTimeout(attachTimer);
+            attachTimer = null;
+          }
           menu.remove();
           for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
             document?.removeEventListener?.(evt, outsideHandler, true);
@@ -3148,6 +3236,7 @@
           }
           try { winObj?.removeEventListener?.('blur', closeMenu); } catch {}
         };
+        menu.__agyCleanup = closeMenu;
 
         const inputEl = customRow.querySelector('.agy-ctx-custom-input');
         const applyBtn = customRow.querySelector('.agy-ctx-custom-apply');
@@ -3211,7 +3300,9 @@
             closeMenu();
           }
         };
-        setTimeout(() => {
+        attachTimer = setTimeout(() => {
+          attachTimer = null;
+          if (!menu.isConnected && menu.parentNode !== barEl) return;
           for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
             document?.addEventListener?.(evt, outsideHandler, true);
             try { iframeDoc?.addEventListener?.(evt, outsideHandler, true); } catch {}
@@ -3267,7 +3358,7 @@
           const html = `
             <span class="agy-ctx-group agy-ctx-group-ctx">
               <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-              <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${limitTitle}">[ ${currentCw.toLowerCase()} ▾ ]</button></span>
+              <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
               <span class="agy-ctx-sep">·</span>
               <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
             </span>
@@ -3350,7 +3441,11 @@
       async function openOrToggleDebugModal(view, inputBox) {
         const existingModal = document.getElementById('agy-ctx-debug-modal');
         if (existingModal) {
-          existingModal.remove();
+          if (typeof existingModal.__agyCleanup === 'function') {
+            existingModal.__agyCleanup();
+          } else {
+            existingModal.remove();
+          }
           return;
         }
 
@@ -3400,8 +3495,9 @@
 
         const closeModal = () => {
           backdrop.remove();
-          window.removeEventListener('keydown', onKeyDown);
+          window?.removeEventListener?.('keydown', onKeyDown);
         };
+        backdrop.__agyCleanup = closeModal;
         const onKeyDown = (e) => {
           if (e.key === 'Escape') closeModal();
         };
@@ -3475,7 +3571,27 @@
             const allMetas = t?.trajectory?.generatorMetadata || [];
             metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
           }
-          const parsed = extractStatsFromMetas(metas);
+          let parsed = extractStatsFromMetas(metas);
+          const fullState = asp?.getState?.();
+          if (fullState && typeof fullState === 'object') {
+            const cwUsage = fullState.contextWindowUsage;
+            const compactedSteps = fullState.compactionInfo?.compactedAtStepIndices;
+            const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
+              ? Number(compactedSteps[compactedSteps.length - 1])
+              : -1;
+            if (cwUsage && typeof cwUsage === 'object') {
+              const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
+              const uStep = Number(cwUsage.lastStepIndex ?? -1);
+              const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+              if (afterCompact > 0 && (latestCompactedStep >= parsed.lastMetaStepIndex || afterCompact < parsed.used)) {
+                parsed.used = afterCompact;
+                parsed.foundCtx = true;
+              } else if (uEst > 0 && (!parsed.foundCtx || (uStep >= 0 && parsed.lastMetaStepIndex >= 0 && uStep > parsed.lastMetaStepIndex))) {
+                parsed.used = uEst;
+                parsed.foundCtx = true;
+              }
+            }
+          }
 
           let latestCwm = null;
           let latestSections = [];
@@ -3486,7 +3602,7 @@
             if (!latestModel && (cm.modelDisplayName || cm.responseModel || cm.model)) {
               latestModel = cm.modelDisplayName || cm.responseModel || cm.model;
             }
-            if (!latestCwm && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed) {
+            if (!latestCwm && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed !== undefined && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed !== null) {
               latestCwm = cm.chatStartMetadata.contextWindowMetadata;
             }
             if (!latestSections.length && Array.isArray(cm.promptSections) && cm.promptSections.length > 0) {
@@ -3653,7 +3769,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v15';
+    const STATUSBAR_VERSION = 'v16';
 
     function injectScriptText(win, doc, code) {
       if (!code || !doc?.head) return false;
@@ -3751,16 +3867,16 @@
             tasks.push(
               loadScript(
                 '__agyLoadingMcpManagerCompanion',
-                'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+                'https://raw.githubusercontent.com/superselect321/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
                 info.mcpManagerCode
               )
             );
           }
-          if (info.hasKoTranslator && !win.__agyKoLocalizerActive) {
+          if (info.hasKoTranslator && !win.__agyKoLocalizerActive && !win.__agyKoThoughtCleanup) {
             tasks.push(
               loadScript(
                 '__agyLoadingKoTranslatorCompanion',
-                'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js',
+                'https://raw.githubusercontent.com/superselect321/ko-thought-translator/main/skills/ko-thought-translator/scripts/ko_thought_inject.js',
                 info.koTranslatorCode
               )
             );
@@ -4070,7 +4186,15 @@
         clearIntervalFn(timer);
         if (obs) obs.disconnect();
         const m = doc.getElementById('agy-ctx-debug-modal');
-        if (m) m.remove();
+        if (m) {
+          if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
+          else m.remove();
+        }
+        const menus = doc.querySelectorAll('.agy-ctx-menu');
+        for (const menu of menus) {
+          if (typeof menu.__agyCleanup === 'function') menu.__agyCleanup();
+          else menu.remove();
+        }
         const bars = doc.querySelectorAll('.agy-ctx-statusbar');
         for (const b of bars) b.remove();
         const hostViews = doc.querySelectorAll('.agy-rc-host-view');

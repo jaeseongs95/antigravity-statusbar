@@ -1013,7 +1013,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       const env2b = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
       await ensureRemoteCompanionScripts(env2b.fakeWin, env2b.fakeDoc, env2b.fakeFetch, env2b.fakeHostBridge);
       assert.equal(env2b.fetchedUrls.length, 1);
-      assert.ok(env2b.fetchedUrls[0].includes('ko_thought_autoinject.js'));
+      assert.ok(env2b.fetchedUrls[0].includes('ko_thought_inject.js'));
       assert.equal(env2b.appendedScripts.length, 1);
     }
 
@@ -1023,7 +1023,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       await ensureRemoteCompanionScripts(env3.fakeWin, env3.fakeDoc, env3.fakeFetch, env3.fakeHostBridge);
       assert.equal(env3.fetchedUrls.length, 2);
       assert.ok(env3.fetchedUrls.some((u) => u.includes('mcp_manager_autoinject.js')));
-      assert.ok(env3.fetchedUrls.some((u) => u.includes('ko_thought_autoinject.js')));
+      assert.ok(env3.fetchedUrls.some((u) => u.includes('ko_thought_inject.js')));
       assert.equal(env3.appendedScripts.length, 2);
       assert.equal(env3.appendedScripts[0].nonce, 'test-csp-nonce');
     }
@@ -1247,6 +1247,111 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.ok(coreNode.innerHTML.includes('9%'), `after compaction, percentage must update to 9% (33k/384k), got: ${coreNode.innerHTML}`);
 
     sandbox.window.__agyStatusBarCleanup();
+  });
+
+  it('covers D-0004~D-0010 regressions: lB() array/Uint8Array & line-marker extraction, seedSessionIfEmpty migration, incomplete Connect frame guard, Protobuf clone preservation, and listener cleanup', async () => {
+    const { sandbox } = createDomSandbox();
+    const { createHostBridge } = require('../src/host-bridge');
+    const { createContextWindowStore } = require('../src/context-window-policy');
+    const { escHtml } = require('../src/dom-styles');
+    const { extractStatsFromMetas } = require('../src/rpc-client');
+
+    // 1. D-0009: escHtml escapes single quotes, seedSessionIfEmpty sets ts so migrateSessionOverride works, and getDefaultCw is 512K
+    assert.equal(escHtml("a'b\"c"), 'a&#39;b&quot;c');
+    const store = createContextWindowStore({});
+    assert.equal(store.getDefaultCw(), '512K');
+    store.seedSessionIfEmpty('remote-session', '750K');
+    assert.equal(store.migrateSessionOverride('remote-session', 'real-uuid-1234'), '750K');
+    assert.equal(store.getSavedContextWindow('real-uuid-1234'), '750K');
+
+    // 2. D-0007: extractStatsFromMetas handles estimatedTokensUsed === 0
+    const zeroMeta = extractStatsFromMetas([
+      {
+        stepIndices: [1],
+        chatModel: {
+          chatStartMetadata: {
+            contextWindowMetadata: { estimatedTokensUsed: 0, maxContextTokens: 256000 },
+          },
+        },
+      },
+    ]);
+    assert.equal(zeroMeta.foundCtx, true);
+    assert.equal(zeroMeta.used, 0);
+
+    // 3. D-0004: fetchHostInstalledPluginInfo handles lB() array return, Uint8Array readFile, and // === BEGIN_... single-line markers
+    const lineMarkedBundle = [
+      'function mountStatusBar() {}',
+      '// === BEGIN_AGY_MCP_MANAGER_V1 ===',
+      'window.agyMcpManager = {};',
+      '// === END_AGY_MCP_MANAGER_V1 ===',
+      '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+      'window.__agyKoThoughtCleanup = () => {};',
+      '// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+    ].join('\n');
+
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    view.__reactFiber$test.memoizedProps.value.core = {
+      projectManagementService: {
+        lsClient: {
+          async getCustomizationStates(arg) {
+            assert.ok(Array.isArray(arg), 'lB().getCustomizationStates expects workspaceUris array');
+            return [{ path: 'C:/Users/Test/.gemini/antigravity/skills/test/SKILL.md' }];
+          },
+          async getAllPlugins() {
+            return { plugins: [] };
+          },
+          async readFile(arg) {
+            assert.equal(typeof arg, 'string', 'lB().readFile expects string URI');
+            return new TextEncoder().encode(lineMarkedBundle);
+          },
+        },
+      },
+    };
+
+    const hb = createHostBridge({
+      window: sandbox.window,
+      document: sandbox.document,
+      localStorage: sandbox.localStorage,
+      fetchFn: null,
+      cwStore: store,
+    });
+
+    const pluginInfo = await hb.fetchHostInstalledPluginInfo(null, view);
+    assert.equal(pluginInfo.resolved, true);
+    assert.equal(pluginInfo.hasMcpManager, true);
+    assert.equal(pluginInfo.hasKoTranslator, true);
+    assert.ok(pluginInfo.mcpManagerCode.includes('window.agyMcpManager = {};'));
+    assert.ok(pluginInfo.koTranslatorCode.includes('window.__agyKoThoughtCleanup'));
+
+    // 4. D-0008: Incomplete Connect frame (`u8[0] === 0` with mismatched length) must NOT have raw 0x2a appended
+    const incompleteFrame = new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x20, 0x0a, 0x04, 0x74, 0x65, 0x73, 0x74]);
+    const afterIncomplete = hb.injectCheckpointLimitIntoSendRequest(
+      '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
+      incompleteFrame,
+      null
+    );
+    assert.equal(afterIncomplete.length, incompleteFrame.length, 'incomplete Connect frame must be left untouched');
+
+    // 5. D-0008: Protobuf Message instance prototype methods preserved when injecting unary object
+    const validUuid = '12345678-1234-1234-1234-123456789abc';
+    store.seedSessionIfEmpty('remote-session-2', '750K');
+    assert.equal(store.migrateSessionOverride('remote-session-2', validUuid), '750K');
+    class FakeProtoReq {
+      constructor() {
+        this.cascadeId = validUuid;
+      }
+      toBinary() {
+        return new Uint8Array([1, 2, 3]);
+      }
+    }
+    const protoInst = new FakeProtoReq();
+    const injectedObj = hb.injectCheckpointLimitIntoSendRequest(
+      '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
+      protoInst,
+      null
+    );
+    assert.equal(typeof injectedObj.toBinary, 'function', 'prototype method toBinary must be preserved');
+    assert.equal(injectedObj.cascadeConfig.checkpointConfig.maxTokenLimit, 750000);
   });
 });
 

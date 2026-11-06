@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v15';
+const STATUSBAR_VERSION = 'v16';
 
 function injectScriptText(win, doc, code) {
   if (!code || !doc?.head) return false;
@@ -107,16 +107,16 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
         tasks.push(
           loadScript(
             '__agyLoadingMcpManagerCompanion',
-            'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+            'https://raw.githubusercontent.com/superselect321/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
             info.mcpManagerCode
           )
         );
       }
-      if (info.hasKoTranslator && !win.__agyKoLocalizerActive) {
+      if (info.hasKoTranslator && !win.__agyKoLocalizerActive && !win.__agyKoThoughtCleanup) {
         tasks.push(
           loadScript(
             '__agyLoadingKoTranslatorCompanion',
-            'https://raw.githubusercontent.com/jaeseongs95/ko-thought-translator/main/dist/ko_thought_autoinject.js',
+            'https://raw.githubusercontent.com/superselect321/ko-thought-translator/main/skills/ko-thought-translator/scripts/ko_thought_inject.js',
             info.koTranslatorCode
           )
         );
@@ -426,7 +426,15 @@ function mountStatusBar(env = {}) {
     clearIntervalFn(timer);
     if (obs) obs.disconnect();
     const m = doc.getElementById('agy-ctx-debug-modal');
-    if (m) m.remove();
+    if (m) {
+      if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
+      else m.remove();
+    }
+    const menus = doc.querySelectorAll('.agy-ctx-menu');
+    for (const menu of menus) {
+      if (typeof menu.__agyCleanup === 'function') menu.__agyCleanup();
+      else menu.remove();
+    }
     const bars = doc.querySelectorAll('.agy-ctx-statusbar');
     for (const b of bars) b.remove();
     const hostViews = doc.querySelectorAll('.agy-rc-host-view');

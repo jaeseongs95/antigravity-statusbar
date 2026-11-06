@@ -686,9 +686,12 @@ async function runWorkerMode() {
 }
 
 async function runHookFastPath() {
-  // Drain stdin silently so the host hook runner never gets EPIPE
+  // Drain stdin non-blockingly so the host hook runner never gets EPIPE, without hanging on TTY or open pipes
   try {
-    fs.readFileSync(0);
+    if (process.stdin && !process.stdin.isTTY) {
+      process.stdin.on('error', () => {});
+      process.stdin.resume();
+    }
   } catch {}
 
   try {

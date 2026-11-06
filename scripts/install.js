@@ -56,6 +56,13 @@ function install() {
     windowsHide: true,
   });
 
+  if (workerRes.stderr) {
+    process.stderr.write(workerRes.stderr);
+  }
+  if (workerRes.error) {
+    process.stderr.write(String(workerRes.error.message || workerRes.error) + '\n');
+  }
+
   const statusRes = spawnSync(process.execPath, [TARGET_PATCHER, '--status'], {
     encoding: 'utf8',
     windowsHide: true,
@@ -64,7 +71,11 @@ function install() {
   if (statusRes.stdout) {
     process.stdout.write(statusRes.stdout);
   }
-  process.exit(workerRes.status || 0);
+  if (statusRes.stderr) {
+    process.stderr.write(statusRes.stderr);
+  }
+  const exitCode = typeof workerRes.status === 'number' ? workerRes.status : 1;
+  process.exit(exitCode);
 }
 
 if (require.main === module) {

@@ -79,25 +79,36 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
                 [Symbol.asyncIterator]() {
                   const it = stream[Symbol.asyncIterator]();
                   let yieldedFirst = false;
+                  let pendingFirstNext = null;
                   return {
                     async next() {
                       if (!yieldedFirst) {
                         yieldedFirst = true;
                         let timer;
+                        const firstPromise = it.next();
+                        firstPromise.catch(() => {});
                         const raceRes = await Promise.race([
-                          it.next().then((r) => ({ from: 'stream', r })),
+                          firstPromise.then((r) => ({ from: 'stream', r })),
                           new Promise((resolve) => {
                             timer = setTimeout(() => resolve({ from: 'timeout' }), 600);
                           }),
                         ]);
                         clearTimeout(timer);
                         if (raceRes.from === 'stream') return raceRes.r;
+                        pendingFirstNext = firstPromise;
                         try {
                           const res = await decorated.getAllPlugins({ workspaceUris: [] });
                           return { done: false, value: { plugins: res?.plugins || [] } };
                         } catch {
-                          return it.next();
+                          const p = pendingFirstNext;
+                          pendingFirstNext = null;
+                          return p;
                         }
+                      }
+                      if (pendingFirstNext) {
+                        const p = pendingFirstNext;
+                        pendingFirstNext = null;
+                        return p;
                       }
                       return it.next();
                     },
@@ -572,17 +583,22 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       const u8 = toUint8Slice(body);
       if (!u8) {
         if (typeof body === 'object') {
-          return {
-            ...body,
-            cascadeConfig: {
-              ...(body.cascadeConfig || {}),
-              checkpointConfig: {
-                ...(body.cascadeConfig?.checkpointConfig || {}),
-                contextWindow: cw,
-                maxTokenLimit: limit,
-              },
-            },
-          };
+          const cloned = typeof body.clone === 'function'
+            ? body.clone()
+            : Object.assign(Object.create(Object.getPrototypeOf(body)), body);
+          const prevCc = body.cascadeConfig;
+          const nextCc = prevCc && typeof prevCc === 'object'
+            ? (typeof prevCc.clone === 'function' ? prevCc.clone() : Object.assign(Object.create(Object.getPrototypeOf(prevCc)), prevCc))
+            : {};
+          const prevCp = prevCc?.checkpointConfig;
+          const nextCp = prevCp && typeof prevCp === 'object'
+            ? (typeof prevCp.clone === 'function' ? prevCp.clone() : Object.assign(Object.create(Object.getPrototypeOf(prevCp)), prevCp))
+            : {};
+          nextCp.contextWindow = cw;
+          nextCp.maxTokenLimit = limit;
+          nextCc.checkpointConfig = nextCp;
+          cloned.cascadeConfig = nextCc;
+          return cloned;
         }
         return body;
       }
@@ -600,28 +616,30 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
       if (u8.length >= 5 && (u8[0] === 0 || u8[0] === 1)) {
         const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
-        if (frameLen === u8.length - 5) {
-          if (u8[0] !== 0) {
-            // Compressed frame: never append raw bytes
-            return body;
-          }
-          const payload = u8.subarray(5);
-          if (findFirstNonWsByte(payload) === 0x7b) {
-            // Connect-Framed JSON (`0x00` + 4B len + `{"cascadeId":...}`)!
-            // Parse JSON, inject checkpointConfig, re-encode JSON, and update 5-byte frame header length!
-            const text = decodeBytesToText(payload);
-            const j = applyCheckpointToJsonObj(JSON.parse(text));
-            const newPayload = encodeTextToBytes(JSON.stringify(j));
-            return buildConnectFramedBytes(0, newPayload);
-          }
-          if (endsWithByteSequence(payload, suffix)) {
-            return body;
-          }
-          const newPayload = new Uint8Array(payload.length + suffix.length);
-          newPayload.set(payload, 0);
-          newPayload.set(suffix, payload.length);
+        if (frameLen !== u8.length - 5) {
+          // Incomplete or multi-frame Connect envelope: never append unframed raw bytes
+          return body;
+        }
+        if (u8[0] !== 0) {
+          // Compressed frame: never append raw bytes
+          return body;
+        }
+        const payload = u8.subarray(5);
+        if (findFirstNonWsByte(payload) === 0x7b) {
+          // Connect-Framed JSON (`0x00` + 4B len + `{"cascadeId":...}`)!
+          // Parse JSON, inject checkpointConfig, re-encode JSON, and update 5-byte frame header length!
+          const text = decodeBytesToText(payload);
+          const j = applyCheckpointToJsonObj(JSON.parse(text));
+          const newPayload = encodeTextToBytes(JSON.stringify(j));
           return buildConnectFramedBytes(0, newPayload);
         }
+        if (endsWithByteSequence(payload, suffix)) {
+          return body;
+        }
+        const newPayload = new Uint8Array(payload.length + suffix.length);
+        newPayload.set(payload, 0);
+        newPayload.set(suffix, payload.length);
+        return buildConnectFramedBytes(0, newPayload);
       }
 
       // 3. Unframed Protobuf binary (idempotent guard against double injection)
@@ -663,17 +681,30 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
               : (input && typeof input.href === 'string' ? input.href : ''));
           const sniffFn = w.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
           const injectFn = w.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-          if (url && CONVO_RPC_RE.test(url) && nextInit && nextInit.body) {
-            sniffFn(url, nextInit.body, null);
-            if (/\/SendUserCascadeMessage$/i.test(url)) {
-              nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
-              // If wrapping over a legacy v1.3.8 hook in an un-reloaded window, pass a URL object
-              // so v1.3.8's `typeof input === 'string' || typeof input.url === 'string'` check is bypassed!
-              if (isLegacyV1Hook && typeof URL === 'function') {
-                try {
-                  nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
-                } catch {}
+          if (url && CONVO_RPC_RE.test(url)) {
+            if (nextInit && nextInit.body) {
+              sniffFn(url, nextInit.body, null);
+              if (/\/SendUserCascadeMessage$/i.test(url)) {
+                nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
+                // If wrapping over a legacy v1.3.8 hook in an un-reloaded window, pass a URL object
+                // so v1.3.8's `typeof input === 'string' || typeof input.url === 'string'` check is bypassed!
+                if (isLegacyV1Hook && typeof URL === 'function') {
+                  try {
+                    nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
+                  } catch {}
+                }
               }
+            } else if (input && typeof input === 'object' && typeof input.arrayBuffer === 'function' && typeof input.clone === 'function' && /\/SendUserCascadeMessage$/i.test(url)) {
+              return input.clone().arrayBuffer().then((ab) => {
+                const rawBytes = new Uint8Array(ab);
+                sniffFn(url, rawBytes, null);
+                const injectedBody = injectFn(url, rawBytes, null);
+                const ReqCtor = w.Request || (typeof Request === 'function' ? Request : null);
+                if (ReqCtor) {
+                  return prevFetch.call(this, new ReqCtor(input, { body: injectedBody }), nextInit);
+                }
+                return prevFetch.call(this, nextInput, { ...(nextInit || {}), body: injectedBody });
+              }).catch(() => prevFetch.call(this, nextInput, nextInit));
             }
           }
         } catch {}
@@ -945,8 +976,14 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     async function callRpc(methodName, rpcPath, reqObj) {
       if (svc && typeof svc[methodName] === 'function') {
         try {
-          const r = await svc[methodName](reqObj || {});
-          if (r) return r;
+          let arg = reqObj || {};
+          if (!svc.isRemoteControlHost) {
+            if (methodName === 'getCustomizationStates') arg = [];
+            else if (methodName === 'getAllSkills') arg = [];
+            else if (methodName === 'readFile' && arg && typeof arg === 'object' && typeof arg.uri === 'string') arg = arg.uri;
+          }
+          const r = await svc[methodName](arg);
+          if (r !== undefined && r !== null) return r;
         } catch {}
       }
       if (svc && typeof svc.callJson === 'function') {
@@ -974,24 +1011,21 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     ]);
 
     const candidatePaths = [];
-    if (Array.isArray(statesRes?.states)) {
-      for (const s of statesRes.states) {
-        if (s?.path) candidatePaths.push(s.path);
-      }
+    const statesList = Array.isArray(statesRes) ? statesRes : (Array.isArray(statesRes?.states) ? statesRes.states : []);
+    for (const s of statesList) {
+      if (s?.path) candidatePaths.push(s.path);
     }
     const pluginNames = new Set();
-    if (Array.isArray(pluginsRes?.plugins)) {
-      for (const p of pluginsRes.plugins) {
-        if (p?.name) pluginNames.add(String(p.name));
-        if (p?.path) candidatePaths.push(p.path);
-      }
+    const pluginsList = Array.isArray(pluginsRes) ? pluginsRes : (Array.isArray(pluginsRes?.plugins) ? pluginsRes.plugins : []);
+    for (const p of pluginsList) {
+      if (p?.name) pluginNames.add(String(p.name));
+      if (p?.path) candidatePaths.push(p.path);
     }
     if (!candidatePaths.length) {
       const skillsRes = await callRpc('getAllSkills', '/exa.language_server_pb.LanguageServerService/GetAllSkills', {});
-      if (Array.isArray(skillsRes?.skills)) {
-        for (const sk of skillsRes.skills) {
-          if (sk?.path) candidatePaths.push(sk.path);
-        }
+      const skillsList = Array.isArray(skillsRes) ? skillsRes : (Array.isArray(skillsRes?.skills) ? skillsRes.skills : []);
+      for (const sk of skillsList) {
+        if (sk?.path) candidatePaths.push(sk.path);
       }
     }
 
@@ -1011,15 +1045,25 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
       const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
       const rf = await callRpc('readFile', '/exa.language_server_pb.LanguageServerService/ReadFile', { uri });
-      if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
+      if (rf instanceof Uint8Array || ArrayBuffer.isView(rf) || rf instanceof ArrayBuffer) {
+        hostBundleText = decodeBytesToText(rf);
+      } else if (typeof rf === 'string' && rf.length > 0) {
+        hostBundleText = rf;
+      } else if (rf && (rf.content instanceof Uint8Array || ArrayBuffer.isView(rf.content) || rf.content instanceof ArrayBuffer)) {
+        hostBundleText = decodeBytesToText(rf.content);
+      } else if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
         hostBundleText = decodeBase64ToUtf8(rf.content);
       }
     }
 
-    const mcpBegin = ['/* === BEGIN_AGY_MCP', 'MANAGER_V1 === */'].join('_');
-    const mcpEnd = ['/* === END_AGY_MCP', 'MANAGER_V1 === */'].join('_');
-    const koBegin = ['/* === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
-    const koEnd = ['/* === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+    const mcpBeginBlock = ['/* === BEGIN_AGY_MCP', 'MANAGER_V1 === */'].join('_');
+    const mcpEndBlock = ['/* === END_AGY_MCP', 'MANAGER_V1 === */'].join('_');
+    const mcpBeginLine = ['// === BEGIN_AGY_MCP', 'MANAGER_V1 ==='].join('_');
+    const mcpEndLine = ['// === END_AGY_MCP', 'MANAGER_V1 ==='].join('_');
+    const koBeginBlock = ['/* === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+    const koEndBlock = ['/* === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
+    const koBeginLine = ['// === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 ==='].join('_');
+    const koEndLine = ['// === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 ==='].join('_');
 
     const hasMcpMarker = hostBundleText.includes(['BEGIN_AGY_MCP', 'MANAGER_V1'].join('_'));
     const hasKoMarker = hostBundleText.includes(['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_'));
@@ -1030,10 +1074,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     const hasKoTranslator = hasKoMarker || pluginNames.has('ko-thought-translator');
 
     const mcpManagerCode = hasMcpMarker
-      ? extractMarkerBlock(hostBundleText, mcpBegin, mcpEnd)
+      ? (extractMarkerBlock(hostBundleText, mcpBeginBlock, mcpEndBlock) || extractMarkerBlock(hostBundleText, mcpBeginLine, mcpEndLine))
       : '';
     const koTranslatorCode = hasKoMarker
-      ? extractMarkerBlock(hostBundleText, koBegin, koEnd)
+      ? (extractMarkerBlock(hostBundleText, koBeginBlock, koEndBlock) || extractMarkerBlock(hostBundleText, koBeginLine, koEndLine))
       : '';
 
     return {
@@ -1296,11 +1340,11 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       while (curr) {
         const val = curr.memoizedProps?.value;
         if (val && typeof val === 'object') {
-          if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function') {
+          if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function' || typeof val.getCustomizationStates === 'function' || typeof val.readFile === 'function') {
             return hookLsClient(val);
           }
           const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
-          if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function')) {
+          if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function' || typeof lsClient.getCustomizationStates === 'function' || typeof lsClient.readFile === 'function')) {
             return hookLsClient(lsClient);
           }
         }

@@ -344,12 +344,15 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     const norm = normalize(rawCw);
     if (norm) {
       sessionCwMap.set(cascadeId, norm);
+      if (!sessionCwTsMap.has(cascadeId)) {
+        sessionCwTsMap.set(cascadeId, Date.now());
+      }
     }
   }
 
   function migrateSessionOverride(fromCascadeId, toCascadeId) {
     if (!fromCascadeId || !toCascadeId || fromCascadeId === toCascadeId) return null;
-    const ts = sessionCwTsMap.get(fromCascadeId) || 0;
+    const ts = sessionCwTsMap.get(fromCascadeId) || 1;
     const cw = sessionCwMap.get(fromCascadeId);
     if (!cw || ts < 1) return null;
     sessionCwMap.delete(fromCascadeId);
@@ -362,7 +365,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
   }
 
   function getDefaultCw() {
-    return normalize(defaultCwCache) || '256K';
+    return normalize(defaultCwCache) || '512K';
   }
 
   return {

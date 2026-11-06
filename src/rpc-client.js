@@ -31,7 +31,7 @@ function extractStatsFromMetas(metas) {
     if (!cm) continue;
     if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
       const cwm = cm.chatStartMetadata.contextWindowMetadata;
-      if (cwm.estimatedTokensUsed) {
+      if (cwm.estimatedTokensUsed !== undefined && cwm.estimatedTokensUsed !== null) {
         used = Number(cwm.estimatedTokensUsed);
         max = Number(cwm.maxContextTokens || 256000);
         if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
@@ -358,6 +358,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     fetchQuota,
     fetchCascadeStats,
     fetchTailMetasBounded,
+    applyRealtimeCompactionAndUsage,
     getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
     getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
     getLatestQuota: () => quotaData,
