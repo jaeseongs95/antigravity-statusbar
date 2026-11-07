@@ -999,31 +999,33 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       assert.equal(env1.appendedScripts.length, 0, 'solo statusbar user must not inject un-installed companions');
     }
 
-    // Case 2A: User installed statusbar + MCP Manager (2 plugins) -> must load ONLY MCP Manager
+    // Case 2A: User installed statusbar + MCP Manager (2 plugins) -> must load ONLY MCP Manager from jaeseongs95
     {
       const env2a = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */');
       await ensureRemoteCompanionScripts(env2a.fakeWin, env2a.fakeDoc, env2a.fakeFetch, env2a.fakeHostBridge);
       assert.equal(env2a.fetchedUrls.length, 1);
-      assert.ok(env2a.fetchedUrls[0].includes('mcp_manager_autoinject.js'));
+      assert.ok(env2a.fetchedUrls[0].includes('jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'));
+      assert.ok(!env2a.fetchedUrls[0].includes('superselect321'));
       assert.equal(env2a.appendedScripts.length, 1);
     }
 
-    // Case 2B: User installed statusbar + KoTranslator (2 plugins) -> must load ONLY KoTranslator
+    // Case 2B: User installed statusbar + KoTranslator (2 plugins) -> must load ONLY KoTranslator from jaeseongs95/antigravity-ko-translator
     {
       const env2b = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
       await ensureRemoteCompanionScripts(env2b.fakeWin, env2b.fakeDoc, env2b.fakeFetch, env2b.fakeHostBridge);
       assert.equal(env2b.fetchedUrls.length, 1);
-      assert.ok(env2b.fetchedUrls[0].includes('ko_thought_inject.js'));
+      assert.ok(env2b.fetchedUrls[0].includes('jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js'));
+      assert.ok(!env2b.fetchedUrls[0].includes('superselect321'));
       assert.equal(env2b.appendedScripts.length, 1);
     }
 
-    // Case 3: User installed all 3 plugins -> loads both companions
+    // Case 3: User installed all 3 plugins -> loads both companions from jaeseongs95
     {
       const env3 = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
       await ensureRemoteCompanionScripts(env3.fakeWin, env3.fakeDoc, env3.fakeFetch, env3.fakeHostBridge);
       assert.equal(env3.fetchedUrls.length, 2);
-      assert.ok(env3.fetchedUrls.some((u) => u.includes('mcp_manager_autoinject.js')));
-      assert.ok(env3.fetchedUrls.some((u) => u.includes('ko_thought_inject.js')));
+      assert.ok(env3.fetchedUrls.some((u) => u.includes('jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js')));
+      assert.ok(env3.fetchedUrls.some((u) => u.includes('jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js')));
       assert.equal(env3.appendedScripts.length, 2);
       assert.equal(env3.appendedScripts[0].nonce, 'test-csp-nonce');
     }

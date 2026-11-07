@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
-// @namespace    https://github.com/superselect321/antigravity-statusbar
-// @version      1.3.10
+// @namespace    https://github.com/jaeseongs95/antigravity-statusbar
+// @version      1.3.11
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -3769,7 +3769,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v16';
+    const STATUSBAR_VERSION = 'v17';
 
     function injectScriptText(win, doc, code) {
       if (!code || !doc?.head) return false;
@@ -3867,7 +3867,7 @@
             tasks.push(
               loadScript(
                 '__agyLoadingMcpManagerCompanion',
-                'https://raw.githubusercontent.com/superselect321/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+                'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
                 info.mcpManagerCode
               )
             );
@@ -3876,7 +3876,7 @@
             tasks.push(
               loadScript(
                 '__agyLoadingKoTranslatorCompanion',
-                'https://raw.githubusercontent.com/superselect321/ko-thought-translator/main/skills/ko-thought-translator/scripts/ko_thought_inject.js',
+                'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
                 info.koTranslatorCode
               )
             );

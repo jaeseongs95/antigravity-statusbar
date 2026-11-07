@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v16';
+const STATUSBAR_VERSION = 'v17';
 
 function injectScriptText(win, doc, code) {
   if (!code || !doc?.head) return false;
@@ -107,7 +107,7 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
         tasks.push(
           loadScript(
             '__agyLoadingMcpManagerCompanion',
-            'https://raw.githubusercontent.com/superselect321/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+            'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
             info.mcpManagerCode
           )
         );
@@ -116,7 +116,7 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
         tasks.push(
           loadScript(
             '__agyLoadingKoTranslatorCompanion',
-            'https://raw.githubusercontent.com/superselect321/ko-thought-translator/main/skills/ko-thought-translator/scripts/ko_thought_inject.js',
+            'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
             info.koTranslatorCode
           )
         );
