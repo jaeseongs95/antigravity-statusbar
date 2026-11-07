@@ -975,15 +975,15 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       };
       const fakeHostBridge = {
         async fetchHostInstalledPluginInfo() {
-          const hasMcp = hostBundleContent.includes('BEGIN_AGY_MCP_MANAGER_V1');
-          const hasKo = hostBundleContent.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2');
+          const hasMcp = hostBundleContent.includes('BEGIN_AGY_MCP_MANAGER_V1') || hostBundleContent.includes('PLUGIN_ONLY_MCP');
+          const hasKo = hostBundleContent.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2') || hostBundleContent.includes('PLUGIN_ONLY_KO');
           return {
             resolved: true,
             hasStatusbar: hostBundleContent.includes('mountStatusBar'),
             hasMcpManager: hasMcp,
             hasKoTranslator: hasKo,
-            mcpManagerCode: hasMcp ? '/* === BEGIN_AGY_MCP_MANAGER_V1 === */\nwindow.agyMcpManager={};\n/* === END_AGY_MCP_MANAGER_V1 === */' : '',
-            koTranslatorCode: hasKo ? '/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */\nwindow.__agyKoLocalizerActive=true;\n/* === END_AGY_KO_THOUGHT_LOCALIZER_V2 === */' : '',
+            mcpManagerCode: hostBundleContent.includes('BEGIN_AGY_MCP_MANAGER_V1') ? '/* === BEGIN_AGY_MCP_MANAGER_V1 === */\nwindow.agyMcpManager={};\n/* === END_AGY_MCP_MANAGER_V1 === */' : '',
+            koTranslatorCode: hostBundleContent.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2') ? '/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */\nwindow.__agyKoLocalizerActive=true;\n/* === END_AGY_KO_THOUGHT_LOCALIZER_V2 === */' : '',
             hostBundleText: hostBundleContent,
           };
         },
@@ -999,33 +999,32 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       assert.equal(env1.appendedScripts.length, 0, 'solo statusbar user must not inject un-installed companions');
     }
 
-    // Case 2A: User installed statusbar + MCP Manager (2 plugins) -> must load ONLY MCP Manager from jaeseongs95
+    // Case 2A: Host bundle already contains MCP Manager block -> executes local host block FIRST without external fetch
     {
       const env2a = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */');
       await ensureRemoteCompanionScripts(env2a.fakeWin, env2a.fakeDoc, env2a.fakeFetch, env2a.fakeHostBridge);
-      assert.equal(env2a.fetchedUrls.length, 1);
-      assert.ok(env2a.fetchedUrls[0].includes('jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'));
-      assert.ok(!env2a.fetchedUrls[0].includes('superselect321'));
+      assert.equal(env2a.fetchedUrls.length, 0, 'must NOT call external fetch when host bundle code is already available');
       assert.equal(env2a.appendedScripts.length, 1);
+      assert.ok(env2a.appendedScripts[0].text.includes('BEGIN_AGY_MCP_MANAGER_V1'));
     }
 
-    // Case 2B: User installed statusbar + KoTranslator (2 plugins) -> must load ONLY KoTranslator from jaeseongs95/antigravity-ko-translator
+    // Case 2B: Host bundle already contains KoTranslator block -> executes local host block FIRST without external fetch
     {
       const env2b = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
       await ensureRemoteCompanionScripts(env2b.fakeWin, env2b.fakeDoc, env2b.fakeFetch, env2b.fakeHostBridge);
-      assert.equal(env2b.fetchedUrls.length, 1);
-      assert.ok(env2b.fetchedUrls[0].includes('jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js'));
-      assert.ok(!env2b.fetchedUrls[0].includes('superselect321'));
+      assert.equal(env2b.fetchedUrls.length, 0, 'must NOT call external fetch when host bundle code is already available');
       assert.equal(env2b.appendedScripts.length, 1);
+      assert.ok(env2b.appendedScripts[0].text.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2'));
     }
 
-    // Case 3: User installed all 3 plugins -> loads both companions from jaeseongs95
+    // Case 3: Host reports plugins installed via GetAllPlugins (no inline block) -> falls back to jaeseongs95 GitHub Raw URLs
     {
-      const env3 = makeEnv('function mountStatusBar() {}\n/* === BEGIN_AGY_MCP_MANAGER_V1 === */\n/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */');
+      const env3 = makeEnv('function mountStatusBar() {}\nPLUGIN_ONLY_MCP\nPLUGIN_ONLY_KO');
       await ensureRemoteCompanionScripts(env3.fakeWin, env3.fakeDoc, env3.fakeFetch, env3.fakeHostBridge);
       assert.equal(env3.fetchedUrls.length, 2);
       assert.ok(env3.fetchedUrls.some((u) => u.includes('jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js')));
       assert.ok(env3.fetchedUrls.some((u) => u.includes('jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js')));
+      assert.ok(!env3.fetchedUrls.some((u) => u.includes('superselect321')));
       assert.equal(env3.appendedScripts.length, 2);
       assert.equal(env3.appendedScripts[0].nonce, 'test-csp-nonce');
     }

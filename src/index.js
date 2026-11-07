@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v17';
+const STATUSBAR_VERSION = 'v18';
 
 function injectScriptText(win, doc, code) {
   if (!code || !doc?.head) return false;
@@ -42,10 +42,10 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
     const loadScript = (flagKey, url, fallbackCode) => {
       if (win[flagKey]) return Promise.resolve(false);
       win[flagKey] = true;
+      if (fallbackCode && injectScriptText(win, doc, fallbackCode)) {
+        return Promise.resolve(true);
+      }
       if (typeof effFetch !== 'function') {
-        if (fallbackCode) {
-          return Promise.resolve(injectScriptText(win, doc, fallbackCode));
-        }
         win[flagKey] = false;
         return Promise.resolve(false);
       }
@@ -54,17 +54,13 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
       )
         .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
         .then((code) => {
-          const finalCode = code || fallbackCode || '';
-          if (!finalCode) {
+          if (!code) {
             win[flagKey] = false;
             return false;
           }
-          return injectScriptText(win, doc, finalCode);
+          return injectScriptText(win, doc, code);
         })
         .catch(() => {
-          if (fallbackCode) {
-            return injectScriptText(win, doc, fallbackCode);
-          }
           win[flagKey] = false;
           return false;
         });
