@@ -32,7 +32,8 @@ function normalizeId(relPath) {
   return './' + relPath.replace(/\\/g, '/').replace(/\.js$/, '');
 }
 
-function buildBundle() {
+function buildBundle(options = {}) {
+  const write = options.write !== false;
   const modulesCode = [];
 
   for (const rel of MODULE_ORDER) {
@@ -99,9 +100,11 @@ function buildBundle() {
 
   new vm.Script(bundle, { filename: 'statusbar_autoinject.js' });
 
-  fs.mkdirSync(DIST_DIR, { recursive: true });
-  fs.writeFileSync(OUT_FILE, bundle, 'utf8');
-  return { outFile: OUT_FILE, size: Buffer.byteLength(bundle, 'utf8') };
+  if (write) {
+    fs.mkdirSync(DIST_DIR, { recursive: true });
+    fs.writeFileSync(OUT_FILE, bundle, 'utf8');
+  }
+  return { outFile: OUT_FILE, size: Buffer.byteLength(bundle, 'utf8'), bundle };
 }
 
 if (require.main === module) {

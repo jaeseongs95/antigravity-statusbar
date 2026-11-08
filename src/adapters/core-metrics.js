@@ -23,6 +23,18 @@ function createCoreMetricsAdapter({
       return;
     }
 
+    if (document && typeof document.querySelectorAll === 'function') {
+      const openMenus = document.querySelectorAll('.agy-ctx-menu');
+      for (const m of openMenus) {
+        if (m.parentNode === barEl) continue;
+        if (typeof m.__agyCleanup === 'function') {
+          try { m.__agyCleanup(); } catch {}
+        } else {
+          try { m.remove(); } catch {}
+        }
+      }
+    }
+
     const resolveCurrentCascadeId = () => view?.getAttribute?.('data-cascade-id') || cascadeId;
     const currentCw = getConversationContextWindow(view, resolveCurrentCascadeId());
     const currentKNum = parseInt(currentCw, 10) || 512;

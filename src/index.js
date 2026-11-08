@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v18';
+const STATUSBAR_VERSION = 'v19';
 
 function injectScriptText(win, doc, code) {
   if (!code || !doc?.head) return false;

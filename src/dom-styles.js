@@ -415,9 +415,17 @@ function ensureStyleElement(document, underDefaultCwSet) {
   const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
   const docs = [document];
   try {
-    const iframeDoc = document.querySelector?.('ga-remote-control iframe')?.contentDocument;
-    if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
-  } catch {}
+    const iframe = document.querySelector?.('ga-remote-control iframe');
+    if (iframe && !iframe.__agyCrossOriginInaccessible) {
+      const iframeDoc = iframe.contentDocument;
+      if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
+    }
+  } catch {
+    try {
+      const iframe = document.querySelector?.('ga-remote-control iframe');
+      if (iframe) iframe.__agyCrossOriginInaccessible = true;
+    } catch {}
+  }
   for (const d of docs) {
     const parent = d.head || d.documentElement;
     if (!parent) continue;

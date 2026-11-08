@@ -1,4 +1,4 @@
-# antigravity-statusbar (`v1.3.12` / `v18`)
+# antigravity-statusbar (`v1.3.13` / `v19`)
 
 **언어 (Languages):** **[English (README.md)](./README.md)** | **한국어 ([README.ko.md](./README.ko.md))**
 

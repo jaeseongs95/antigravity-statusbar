@@ -49,10 +49,9 @@ describe('modular architecture & bundle verification', () => {
       assert.doesNotThrow(() => new vm.Script(code, { filename: scriptPath }));
     }
 
-    const { outFile, size } = buildBundle();
+    const { outFile, size, bundle: bundleCode } = buildBundle({ write: false });
     assert.equal(outFile, OUT_FILE);
     assert.ok(size > 1000);
-    const bundleCode = fs.readFileSync(OUT_FILE, 'utf8');
     assert.ok(!bundleCode.includes('BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2'));
 
     const readmeEn = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
@@ -1353,6 +1352,259 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     );
     assert.equal(typeof injectedObj.toBinary, 'function', 'prototype method toBinary must be preserved');
     assert.equal(injectedObj.cascadeConfig.checkpointConfig.maxTokenLimit, 750000);
+  });
+
+  it('covers SB-BUG-01..06 regressions: post-compaction token growth, Angular 19 numeric __ngContext__ & bound listener, ReadFile retry & Linux/Windows URI decoding, remote context modal tail offset, Connect frame flags > 1 & limit change replacement, and cross-origin SecurityError caching', async () => {
+    const { sandbox } = createDomSandbox();
+    const { createHostBridge } = require('../src/host-bridge');
+    const { createContextWindowStore } = require('../src/context-window-policy');
+    const { createRpcClient } = require('../src/rpc-client');
+    const { createContextButtonAdapter } = require('../src/adapters/context-button');
+
+    // 1. SB-BUG-01: After compaction at step 100 (afterCompact = 33,388), subsequent turns at step 150 with actual estimatedTokensUsed = 120,000 must display 120,000, NOT be overwritten to 33,388!
+    let currentMetaStep = 100;
+    let currentMetaTokens = 245000;
+    const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    const inputBox = view.querySelector('[data-testid="agent-input-box"]');
+    const cid = view.getAttribute('data-cascade-id');
+
+    const fakeAsp = {
+      getState() {
+        return {
+          trajectorySlice: {
+            totalGeneratorMetadataLength: 5,
+            totalStepsLength: currentMetaStep + 1,
+          },
+          compactionInfo: {
+            compactedAtStepIndices: [100],
+          },
+          contextWindowUsage: {
+            estimatedTokensUsed: currentMetaTokens,
+            estimatedAfterCompaction: 33388,
+            maxContextTokens: 512000,
+            lastStepIndex: currentMetaStep,
+          },
+        };
+      },
+    };
+
+    const rpc = createRpcClient({
+      window: sandbox.window,
+      fetchFn: async () => ({
+        ok: true,
+        async json() {
+          return {
+            generatorMetadata: [
+              {
+                stepIndices: [currentMetaStep],
+                chatModel: {
+                  model: 'MODEL_PLACEHOLDER_M37',
+                  usage: { inputTokens: 2000, cacheReadTokens: 8000 },
+                  chatStartMetadata: {
+                    startStepIndex: currentMetaStep,
+                    contextWindowMetadata: {
+                      estimatedTokensUsed: currentMetaTokens,
+                      maxContextTokens: 512000,
+                    },
+                  },
+                },
+              },
+            ],
+          };
+        },
+      }),
+      localStorage: sandbox.localStorage,
+      getAgentStateProviderForInputBox: () => fakeAsp,
+      getRemoteRpcServiceForElement: () => null,
+    });
+
+    // At step 100 (just compacted, no new turn beyond step 100 yet): should show 33,388
+    const statsAtCompact = await rpc.fetchCascadeStats(cid, 'csrf-123', inputBox);
+    assert.equal(statsAtCompact.used, 33388, 'immediately after compaction at step 100, used must be 33388');
+
+    // Now conversation continues to step 150 and actual tokens grow to 120,000 (> 33,388)
+    currentMetaStep = 150;
+    currentMetaTokens = 120000;
+    const statsAfterGrowth = await rpc.fetchCascadeStats(cid, 'csrf-123', inputBox);
+    assert.equal(statsAfterGrowth.used, 120000, 'once subsequent turns advance past latestCompactedStep, actual 120000 tokens must NOT be overwritten by old 33388 afterCompact');
+
+    // 2. SB-BUG-02: Angular 19 numeric __ngContext__ + ɵgetLContext / visibilitychange when handleIframeMessage was bound BEFORE bookmarklet
+    class ProdRemoteControlComponent {
+      constructor(w, d) {
+        this._bound = this.handleIframeMessage.bind(this);
+        w.addEventListener('message', this._bound);
+        d.addEventListener('visibilitychange', () => this.isTabHidden());
+      }
+      handleIframeMessage(_ev) {}
+      isTabHidden() { return false; }
+      async proxyCommand(_path, _bytes) {
+        return { payload: new TextEncoder().encode(JSON.stringify({ ok: true })) };
+      }
+    }
+    const winMsgListeners = [];
+    const docVisListeners = [];
+    const rcElNum = { __ngContext__: 77 };
+    let prodRcInst = null;
+    const rcDoc = {
+      addEventListener(t, fn) { if (t === 'visibilitychange') docVisListeners.push(fn); },
+      dispatchEvent(ev) { if (ev?.type === 'visibilitychange') docVisListeners.forEach((f) => f(ev)); },
+      querySelector(sel) { return sel === 'ga-remote-control' ? rcElNum : null; },
+      querySelectorAll() { return []; },
+    };
+    const rcWin = {
+      document: rcDoc,
+      addEventListener(t, fn) { if (t === 'message') winMsgListeners.push(fn); },
+      dispatchEvent(ev) { if (ev?.type === 'message') winMsgListeners.forEach((f) => f(ev)); },
+      default_GoogleAntigravity: {
+        m1: {
+          RemoteControlComponent: ProdRemoteControlComponent,
+          '\u0275getLContext'(el) {
+            return el === rcElNum ? { lView: [null, null, [prodRcInst]] } : null;
+          },
+        },
+      },
+      Event: class { constructor(t) { this.type = t; } },
+      MessageEvent: class { constructor(t, i) { this.type = t; this.data = i?.data; } },
+    };
+    prodRcInst = new ProdRemoteControlComponent(rcWin, rcDoc);
+    const store = createContextWindowStore({});
+    const rcHb = createHostBridge({
+      window: rcWin,
+      document: rcDoc,
+      localStorage: sandbox.localStorage,
+      fetchFn: null,
+      cwStore: store,
+    });
+    const foundSvc = rcHb.getRemoteRpcServiceForElement(null);
+    assert.ok(foundSvc && foundSvc.isRemoteControlHost, 'must acquire RemoteControl instance on Angular 19 numeric __ngContext__');
+    assert.equal(rcWin.__agyRemoteControlInstance, prodRcInst);
+
+    // 3. SB-BUG-03: fetchHostInstalledPluginInfo returns resolved:false when ReadFile fails even if candidatePaths.length > 0, and preserves Linux leading '/' & decodes Windows '%3A'
+    let readAttempts = 0;
+    view.__reactFiber$test.memoizedProps.value.core = {
+      projectManagementService: {
+        lsClient: {
+          async getCustomizationStates() {
+            return [{ path: 'file:///home/devuser/.gemini/config/plugins/ags/SKILL.md' }];
+          },
+          async getAllPlugins() {
+            return { plugins: [] };
+          },
+          async readFile() {
+            readAttempts += 1;
+            if (readAttempts === 1) return null; // Transient failure on attempt 1
+            return new TextEncoder().encode([
+              'function mountStatusBar() {}',
+              '// === BEGIN_AGY_MCP_MANAGER_V1 ===',
+              'function mountMcpManager() {}',
+              '// === END_AGY_MCP_MANAGER_V1 ===',
+            ].join('\n'));
+          },
+        },
+      },
+    };
+    const hbLinux = createHostBridge({
+      window: sandbox.window,
+      document: sandbox.document,
+      localStorage: sandbox.localStorage,
+      fetchFn: null,
+      cwStore: store,
+    });
+    const attempt1 = await hbLinux.fetchHostInstalledPluginInfo(null, view);
+    assert.equal(attempt1.geminiDir, '/home/devuser/.gemini', 'Linux file:/// URI must preserve leading slash');
+    assert.equal(attempt1.resolved, false, 'when ReadFile fails on known geminiDir, resolved must be false so retry loop continues');
+
+    const attempt2 = await hbLinux.fetchHostInstalledPluginInfo(null, view);
+    assert.equal(attempt2.resolved, true);
+    assert.equal(attempt2.hasMcpManager, true);
+
+    // Percent-encoded Windows URI (`file:///c%3A/Users/...`)
+    view.__reactFiber$test.memoizedProps.value.core.projectManagementService.lsClient.getCustomizationStates = async () => [
+      { path: 'file:///c%3A/Users/Lenovo/.gemini/config/plugins/ags/SKILL.md' },
+    ];
+    const winEncodedInfo = await hbLinux.fetchHostInstalledPluginInfo(null, view);
+    assert.equal(winEncodedInfo.geminiDir, 'c:/Users/Lenovo/.gemini');
+
+    // 4. SB-BUG-04: context-button on Remote Control web uses __agyRcGenLenByCascade / __agyRcStepCountByCascade to avoid offset 0
+    sandbox.window.__agyRcGenLenByCascade = { [cid]: 1073 };
+    sandbox.window.__agyRcStepCountByCascade = { [cid]: 2612 };
+    const requestedModalOffsets = [];
+    let appendedBackdrop = null;
+    const modalBodyEl = { innerHTML: '' };
+    const origBodyAppend = sandbox.document.body.appendChild;
+    sandbox.document.body.appendChild = (el) => {
+      appendedBackdrop = el;
+      el.querySelector = (s) => (s === '#agy-ctx-modal-body' ? modalBodyEl : null);
+    };
+    const origGetById = sandbox.document.getElementById;
+    sandbox.document.getElementById = (id) => {
+      if (id === 'agy-ctx-debug-modal') return appendedBackdrop;
+      if (id === 'agy-ctx-modal-body') return modalBodyEl;
+      return origGetById(id);
+    };
+    const ctxBtn = createContextButtonAdapter({
+      window: sandbox.window,
+      document: sandbox.document,
+      fetchFn: null,
+      setHtml: (el, h) => { el.innerHTML = h; },
+      cwStore: store,
+      hostBridge: {
+        getCascadeContextForElement: () => null,
+        getAgentStateProviderForInputBox: () => null,
+        getModelSelectorContextForView: () => null,
+        getRemoteRpcServiceForElement: () => ({
+          isRemoteControlHost: true,
+          async getCascadeTrajectoryGeneratorMetadata(req) {
+            requestedModalOffsets.push(req.generatorMetadataOffset);
+            return {
+              generatorMetadata: [
+                {
+                  stepIndices: [2611],
+                  chatModel: {
+                    model: 'Gemini 4 Argon',
+                    usage: { inputTokens: 1000, cacheReadTokens: 9000 },
+                    chatStartMetadata: {
+                      startStepIndex: 2611,
+                      contextWindowMetadata: { estimatedTokensUsed: 85000, maxContextTokens: 512000 },
+                    },
+                  },
+                },
+              ],
+            };
+          },
+        }),
+      },
+    });
+    await ctxBtn.openOrToggleDebugModal(view, inputBox);
+    assert.equal(requestedModalOffsets[0], 1053, 'must request tail offset (1073 - 20 = 1053), never offset 0');
+    assert.ok(modalBodyEl.innerHTML.includes('2,612 steps'), 'modal must display cached remote step count (2,612 steps)');
+    await ctxBtn.openOrToggleDebugModal(view, inputBox); // close modal
+    sandbox.document.body.appendChild = origBodyAppend;
+    sandbox.document.getElementById = origGetById;
+
+    // 5. SB-BUG-05: Connect frame with flag > 1 (0x02 EndStream / 0x80 Trailer) must not be corrupted, and changing session limit replaces old 0x2a suffix instead of duplicating
+    const trailerFrame = new Uint8Array([0x02, 0x00, 0x00, 0x00, 0x04, 0x74, 0x65, 0x73, 0x74]);
+    const afterTrailer = hbLinux.injectCheckpointLimitIntoSendRequest(
+      '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
+      trailerFrame,
+      null
+    );
+    assert.equal(afterTrailer.length, trailerFrame.length, 'Connect frame with flag 0x02 must NEVER have raw 0x2a bytes appended');
+
+    store.saveContextWindowSetting(cid, '512K');
+    const rawMsg = new TextEncoder().encode(`\x0a\x24${cid}`);
+    const first512 = hbLinux.injectCheckpointLimitIntoSendRequest(
+      '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
+      rawMsg,
+      null
+    );
+    store.saveContextWindowSetting(cid, '384K');
+    const second384 = hbLinux.injectCheckpointLimitIntoSendRequest(
+      '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage',
+      first512,
+      null
+    );
+    assert.equal(second384.length, first512.length, 'changing session limit from 512K to 384K must replace trailing suffix without growing byte length');
   });
 });
 

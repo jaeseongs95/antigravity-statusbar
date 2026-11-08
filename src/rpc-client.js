@@ -214,7 +214,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
       const uStep = Number(cwUsage.lastStepIndex ?? -1);
       const uEst = Number(cwUsage.estimatedTokensUsed || 0);
 
-      if (afterCompact > 0 && (latestCompactedStep >= base.lastMetaStepIndex || afterCompact < base.used)) {
+      if (afterCompact > 0 && latestCompactedStep >= 0 && (base.lastMetaStepIndex < 0 || latestCompactedStep >= base.lastMetaStepIndex)) {
         base.used = afterCompact;
         base.foundCtx = true;
       } else if (uEst > 0 && (!base.foundCtx || (uStep >= 0 && base.lastMetaStepIndex >= 0 && uStep > base.lastMetaStepIndex))) {

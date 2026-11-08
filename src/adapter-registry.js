@@ -33,12 +33,25 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
   }
   const customStore = window?.__agyCustomStatusBarAdapters || new Map();
 
+  function cleanupChildMenus(container) {
+    if (!container || typeof container.querySelectorAll !== 'function') return;
+    const menus = container.querySelectorAll('.agy-ctx-menu');
+    for (const m of menus) {
+      if (typeof m.__agyCleanup === 'function') {
+        try { m.__agyCleanup(); } catch {}
+      } else {
+        try { m.remove(); } catch {}
+      }
+    }
+  }
+
   function removeAdapterDomElements(id) {
     if (!document || typeof document.querySelectorAll !== 'function') return;
     const bars = document.querySelectorAll('.agy-ctx-statusbar');
     for (const bar of bars) {
       const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
       for (const node of nodes) {
+        cleanupChildMenus(node);
         try { node.remove(); } catch {}
       }
     }
@@ -106,6 +119,7 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
     let leftEl = barEl.querySelector('.agy-ctx-left');
     let rightEl = barEl.querySelector('.agy-ctx-right');
     if (!leftEl || !rightEl) {
+      cleanupChildMenus(barEl);
       setHtml(barEl, `
         <div class="agy-ctx-left"></div>
         <div class="agy-ctx-right"></div>
@@ -126,6 +140,7 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       for (const node of existingNodes) {
         const nodeId = node.getAttribute('data-agy-adapter-id');
         if (nodeId && !activeIds.has(nodeId)) {
+          cleanupChildMenus(node);
           try { node.remove(); } catch {}
         }
       }

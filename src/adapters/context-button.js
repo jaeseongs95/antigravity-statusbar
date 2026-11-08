@@ -44,8 +44,14 @@ function createContextButtonAdapter({
     const cc = hostBridge.getCascadeContextForElement(inputBox || view);
     const asp = cc?.state?.agentStateProvider || (hostBridge.getAgentStateProviderForInputBox ? hostBridge.getAgentStateProviderForInputBox(inputBox || view) : null);
     const slice = asp?.getState?.()?.trajectorySlice;
-    let totalGenLen = slice?.totalGeneratorMetadataLength ?? 0;
-    const totalStepsLen = slice?.totalStepsLength ?? 0;
+    const rcGenLen = cascadeId && window?.__agyRcGenLenByCascade ? window.__agyRcGenLenByCascade[cascadeId] : undefined;
+    const rcStepLen = cascadeId && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cascadeId] : undefined;
+    let totalGenLen = (typeof slice?.totalGeneratorMetadataLength === 'number' && slice.totalGeneratorMetadataLength > 0)
+      ? slice.totalGeneratorMetadataLength
+      : (typeof rcGenLen === 'number' && rcGenLen > 0 ? rcGenLen : 0);
+    const totalStepsLen = (typeof slice?.totalStepsLength === 'number' && slice.totalStepsLength > 0)
+      ? slice.totalStepsLength
+      : (typeof rcStepLen === 'number' && rcStepLen > 0 ? rcStepLen : 0);
     const trajectoryId = slice?.trajectoryId || '';
 
     const backdrop = document.createElement('div');
@@ -134,8 +140,12 @@ function createContextButtonAdapter({
         fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
         const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
         const allMetas = j?.generatorMetadata || [];
-        if (allMetas.length > 0 && totalGenLen <= 0) {
+        if (allMetas.length > 0) {
           totalGenLen = fetchOffset + allMetas.length;
+          if (window && cascadeId) {
+            window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
+            window.__agyRcGenLenByCascade[cascadeId] = totalGenLen;
+          }
         }
         metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
       }
@@ -153,10 +163,14 @@ function createContextButtonAdapter({
           ? Number(compactedSteps[compactedSteps.length - 1])
           : -1;
         if (cwUsage && typeof cwUsage === 'object') {
+          const uMax = Number(cwUsage.maxContextTokens || 0);
+          if (uMax > 0) {
+            parsed.trajectoryMax = uMax;
+          }
           const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
           const uStep = Number(cwUsage.lastStepIndex ?? -1);
           const uEst = Number(cwUsage.estimatedTokensUsed || 0);
-          if (afterCompact > 0 && (latestCompactedStep >= parsed.lastMetaStepIndex || afterCompact < parsed.used)) {
+          if (afterCompact > 0 && latestCompactedStep >= 0 && (parsed.lastMetaStepIndex < 0 || latestCompactedStep >= parsed.lastMetaStepIndex)) {
             parsed.used = afterCompact;
             parsed.foundCtx = true;
           } else if (uEst > 0 && (!parsed.foundCtx || (uStep >= 0 && parsed.lastMetaStepIndex >= 0 && uStep > parsed.lastMetaStepIndex))) {

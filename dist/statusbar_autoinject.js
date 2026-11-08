@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.12
+// @version      1.3.13
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -832,9 +832,17 @@
       const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
       const docs = [document];
       try {
-        const iframeDoc = document.querySelector?.('ga-remote-control iframe')?.contentDocument;
-        if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
-      } catch {}
+        const iframe = document.querySelector?.('ga-remote-control iframe');
+        if (iframe && !iframe.__agyCrossOriginInaccessible) {
+          const iframeDoc = iframe.contentDocument;
+          if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
+        }
+      } catch {
+        try {
+          const iframe = document.querySelector?.('ga-remote-control iframe');
+          if (iframe) iframe.__agyCrossOriginInaccessible = true;
+        } catch {}
+      }
       for (const d of docs) {
         const parent = d.head || d.documentElement;
         if (!parent) continue;
@@ -1158,7 +1166,7 @@
           const uStep = Number(cwUsage.lastStepIndex ?? -1);
           const uEst = Number(cwUsage.estimatedTokensUsed || 0);
 
-          if (afterCompact > 0 && (latestCompactedStep >= base.lastMetaStepIndex || afterCompact < base.used)) {
+          if (afterCompact > 0 && latestCompactedStep >= 0 && (base.lastMetaStepIndex < 0 || latestCompactedStep >= base.lastMetaStepIndex)) {
             base.used = afterCompact;
             base.foundCtx = true;
           } else if (uEst > 0 && (!base.foundCtx || (uStep >= 0 && base.lastMetaStepIndex >= 0 && uStep > base.lastMetaStepIndex))) {
@@ -1449,12 +1457,35 @@
         }
       } catch {}
 
+      function getAccessibleRemoteIframeWin() {
+        try {
+          const iframe = document?.querySelector?.('ga-remote-control iframe');
+          if (!iframe || iframe.__agyCrossOriginInaccessible) return null;
+          const cwin = iframe.contentWindow;
+          if (!cwin) return null;
+          // Probe cross-origin restriction once; if accessible, clear any stale flag
+          void cwin.document;
+          return cwin;
+        } catch {
+          try {
+            const iframe = document?.querySelector?.('ga-remote-control iframe');
+            if (iframe) iframe.__agyCrossOriginInaccessible = true;
+          } catch {}
+          return null;
+        }
+      }
+
       function getAccessibleRemoteIframeDoc() {
         try {
           const iframe = document?.querySelector?.('ga-remote-control iframe');
-          const cdoc = iframe?.contentDocument || iframe?.contentWindow?.document;
+          if (!iframe || iframe.__agyCrossOriginInaccessible) return null;
+          const cdoc = iframe.contentDocument || iframe.contentWindow?.document;
           return cdoc || null;
         } catch {
+          try {
+            const iframe = document?.querySelector?.('ga-remote-control iframe');
+            if (iframe) iframe.__agyCrossOriginInaccessible = true;
+          } catch {}
           return null;
         }
       }
@@ -1534,10 +1565,8 @@
 
       function ensureContextWindowSelectorFlag(extraCw) {
         ensureFetchHook(window);
-        try {
-          const cwin = document?.querySelector?.('ga-remote-control iframe')?.contentWindow;
-          if (cwin) ensureFetchHook(cwin);
-        } catch {}
+        const cwin = getAccessibleRemoteIframeWin();
+        if (cwin) ensureFetchHook(cwin);
         if (!document) return;
         const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
         for (const d of docs) {
@@ -1933,15 +1962,31 @@
 
           const suffix = buildSendMessageCheckpointSuffix(limit, cw);
 
-          // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
-          if (u8.length >= 5 && (u8[0] === 0 || u8[0] === 1)) {
-            const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
-            if (frameLen !== u8.length - 5) {
-              // Incomplete or multi-frame Connect envelope: never append unframed raw bytes
-              return body;
+          // Strip any previously injected trailing 0x2a cascade_config suffix (`[0x2a, ccLen, 0x12, cpLen, 0x28, ...]`)
+          const stripTrailingCheckpointSuffix = (bytes) => {
+            if (!bytes || bytes.length < 7) return bytes;
+            for (let pos = Math.max(0, bytes.length - 32); pos <= bytes.length - 7; pos++) {
+              if (bytes[pos] === 0x2a && bytes[pos + 2] === 0x12 && bytes[pos + 4] === 0x28) {
+                const ccLen = bytes[pos + 1];
+                const cpLen = bytes[pos + 3];
+                if (pos + 2 + ccLen === bytes.length && ccLen === cpLen + 2) {
+                  return bytes.subarray(0, pos);
+                }
+              }
             }
-            if (u8[0] !== 0) {
-              // Compressed frame: never append raw bytes
+            return bytes;
+          };
+
+          // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
+          // In Protobuf wire format, field number 0 (`(u8[0] >>> 3) === 0`, i.e., `u8[0] < 8`) is never a valid unframed message start!
+          // Also flag bit 0x80 (e.g. `0x80` trailer frame) or any frame matching `frameLen === u8.length - 5` is a Connect/gRPC-Web frame.
+          const frameLen = u8.length >= 5
+            ? (((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4])
+            : -1;
+          const isConnectFrame = u8.length >= 5 && (u8[0] < 8 || (u8[0] & 0x80) !== 0 || frameLen === u8.length - 5);
+          if (isConnectFrame) {
+            if (frameLen !== u8.length - 5 || u8[0] !== 0) {
+              // Compressed, trailer, end-stream (`u8[0] > 0`), or incomplete/multi-frame Connect envelope: never append raw bytes
               return body;
             }
             const payload = u8.subarray(5);
@@ -1956,19 +2001,21 @@
             if (endsWithByteSequence(payload, suffix)) {
               return body;
             }
-            const newPayload = new Uint8Array(payload.length + suffix.length);
-            newPayload.set(payload, 0);
-            newPayload.set(suffix, payload.length);
+            const cleanPayload = stripTrailingCheckpointSuffix(payload);
+            const newPayload = new Uint8Array(cleanPayload.length + suffix.length);
+            newPayload.set(cleanPayload, 0);
+            newPayload.set(suffix, cleanPayload.length);
             return buildConnectFramedBytes(0, newPayload);
           }
 
-          // 3. Unframed Protobuf binary (idempotent guard against double injection)
+          // 3. Unframed Protobuf binary (idempotent guard against double injection or limit change)
           if (endsWithByteSequence(u8, suffix)) {
             return body;
           }
-          const merged = new Uint8Array(u8.length + suffix.length);
-          merged.set(u8, 0);
-          merged.set(suffix, u8.length);
+          const cleanU8 = stripTrailingCheckpointSuffix(u8);
+          const merged = new Uint8Array(cleanU8.length + suffix.length);
+          merged.set(cleanU8, 0);
+          merged.set(suffix, cleanU8.length);
           return merged;
         } catch {
           return body;
@@ -1979,12 +2026,12 @@
       window.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
 
       function ensureFetchHook(targetWin) {
-        const w = targetWin || window;
-        if (!w || typeof w.fetch !== 'function') return;
-        w.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
-        w.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
-        if (w.fetch.__agyCwHookV2) return;
         try {
+          const w = targetWin || window;
+          if (!w || typeof w.fetch !== 'function') return;
+          w.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
+          w.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
+          if (w.fetch.__agyCwHookV2) return;
           const prevFetch = w.__agyOrigFetch || w.fetch;
           const isLegacyV1Hook = Boolean(prevFetch.__agyCwHooked && !prevFetch.__agyCwHookV2);
           if (!isLegacyV1Hook && !w.__agyOrigFetch) {
@@ -2170,6 +2217,33 @@
             return origPort.call(this, msg);
           };
         }
+        for (const mName of [
+          'managePolling',
+          'shouldPoll',
+          'loadInstances',
+          'isDisconnected',
+          'onIframeLoad',
+          'onWindowOnline',
+          'onWindowOffline',
+          'isOffline',
+          'isDirectIngressMode',
+          'isTabHidden',
+          'getSelectedInstance',
+          'instanceInfos',
+          'remoteConversationsInfos',
+        ]) {
+          if (typeof proto[mName] === 'function') {
+            const origKey = `__agyOrig_${mName}`;
+            const origFn = proto[origKey] || proto[mName];
+            proto[origKey] = origFn;
+            proto[mName] = function () {
+              if (this && !this.destroyed) {
+                window.__agyRemoteControlInstance = this;
+              }
+              return origFn.apply(this, arguments);
+            };
+          }
+        }
       }
 
       function getRemoteControlInstance(onCascadeChange) {
@@ -2181,42 +2255,191 @@
           return window.__agyRemoteControlInstance;
         }
 
-        const nsRoot = window?.default_GoogleAntigravity;
-        if (nsRoot && typeof nsRoot === 'object') {
-          for (const k of Object.keys(nsRoot)) {
-            const mod = nsRoot[k];
-            if (!mod || (typeof mod !== 'object' && typeof mod !== 'function')) continue;
-            const RC = mod.RemoteControlComponent || (typeof mod.prototype?.proxyCommand === 'function' ? mod : null);
-            if (RC && RC.prototype && typeof RC.prototype.proxyCommand === 'function') {
-              hookRemoteControlPrototype(RC.prototype);
-              break;
+        const isRcInstance = (obj) =>
+          Boolean(
+            obj &&
+              typeof obj === 'object' &&
+              !obj.destroyed &&
+              (typeof obj.proxyCommand === 'function' ||
+                typeof obj.onIframeLoad === 'function' ||
+                typeof obj.handleIframeMessage === 'function')
+          );
+
+        const extractFromLContext = (lCtx) => {
+          if (!lCtx || typeof lCtx !== 'object') return null;
+          if (isRcInstance(lCtx)) return lCtx;
+          if (isRcInstance(lCtx.component)) return lCtx.component;
+          const lView = lCtx.lView;
+          if (Array.isArray(lView)) {
+            try {
+              const tView = lView[1];
+              const nodeIndex = typeof lCtx.nodeIndex === 'number' ? lCtx.nodeIndex : -1;
+              const tNode = nodeIndex >= 0 && Array.isArray(tView?.data) ? tView.data[nodeIndex] : null;
+              if (
+                tNode &&
+                typeof tNode.directiveStart === 'number' &&
+                typeof tNode.componentOffset === 'number' &&
+                tNode.componentOffset > -1
+              ) {
+                const comp = lView[tNode.directiveStart + tNode.componentOffset];
+                if (isRcInstance(comp)) return comp;
+              }
+            } catch {}
+            for (let i = 0; i < Math.min(lView.length, 300); i++) {
+              if (isRcInstance(lView[i])) return lView[i];
             }
           }
-        }
+          return null;
+        };
 
-        const rcEl = document?.querySelector?.('ga-remote-control');
-        if (rcEl) {
-          const ctx = rcEl.__ngContext__;
-          if (ctx && typeof ctx === 'object') {
-            const list = Array.isArray(ctx) ? ctx : (Array.isArray(ctx.lView) ? ctx.lView : [ctx.component, ctx]);
-            for (const item of list) {
-              if (item && typeof item === 'object' && typeof item.proxyCommand === 'function') {
-                window.__agyRemoteControlInstance = item;
-                hookRemoteControlPrototype(Object.getPrototypeOf(item));
-                break;
+        const searchNgContext = (ctx) => {
+          if (!ctx || typeof ctx !== 'object') return null;
+          const direct = extractFromLContext(ctx);
+          if (direct) return direct;
+          const visited = new Set();
+          const queue = [ctx];
+          let steps = 0;
+          while (queue.length > 0 && steps < 400) {
+            const cur = queue.shift();
+            if (!cur || typeof cur !== 'object' || visited.has(cur)) continue;
+            visited.add(cur);
+            steps++;
+            const extracted = extractFromLContext(cur);
+            if (extracted) return extracted;
+            if (Array.isArray(cur)) {
+              const scanLen = Math.min(cur.length, 300);
+              for (let i = 0; i < scanLen; i++) {
+                if (isRcInstance(cur[i])) return cur[i];
+              }
+              for (let i = 0; i < scanLen; i++) {
+                const item = cur[i];
+                if (item && typeof item === 'object' && (Array.isArray(item) || isRcInstance(item.component))) {
+                  queue.push(item);
+                }
+              }
+            } else {
+              for (const k of ['component', 'lView', 'data', 'context', '_lView']) {
+                if (cur[k] && typeof cur[k] === 'object') queue.push(cur[k]);
               }
             }
           }
+          return null;
+        };
+
+        const rcEl = document?.querySelector?.('ga-remote-control') || null;
+        const gaRootEl = document?.querySelector?.('ga-root') || null;
+
+        if (rcEl) {
+          const ngFn = window?.ng && typeof window.ng.getComponent === 'function' ? window.ng.getComponent : null;
+          if (ngFn) {
+            try {
+              const comp = ngFn(rcEl);
+              if (isRcInstance(comp)) {
+                window.__agyRemoteControlInstance = comp;
+                hookRemoteControlPrototype(Object.getPrototypeOf(comp));
+                return comp;
+              }
+            } catch {}
+          }
+          const ctxKey = Object.keys(rcEl).find((k) => k.startsWith('__ngContext'));
+          const found = searchNgContext(rcEl.__ngContext__ || (ctxKey ? rcEl[ctxKey] : null));
+          if (found) {
+            window.__agyRemoteControlInstance = found;
+            hookRemoteControlPrototype(Object.getPrototypeOf(found));
+            return found;
+          }
         }
 
-        if (!window?.__agyRemoteControlInstance && typeof window?.dispatchEvent === 'function') {
-          try {
+        if (gaRootEl) {
+          const rootCtxKey = Object.keys(gaRootEl).find((k) => k.startsWith('__ngContext'));
+          const foundFromRoot = searchNgContext(gaRootEl.__ngContext__ || (rootCtxKey ? gaRootEl[rootCtxKey] : null));
+          if (foundFromRoot) {
+            window.__agyRemoteControlInstance = foundFromRoot;
+            hookRemoteControlPrototype(Object.getPrototypeOf(foundFromRoot));
+            return foundFromRoot;
+          }
+        }
+
+        const nsRoot = window?.default_GoogleAntigravity;
+        if (nsRoot && typeof nsRoot === 'object') {
+          const targetCandidates = [];
+          if (rcEl) {
+            targetCandidates.push(rcEl);
+            if (rcEl.firstElementChild) targetCandidates.push(rcEl.firstElementChild);
+            if (typeof rcEl.querySelector === 'function') {
+              const innerContainer = rcEl.querySelector('.app-container, .iframe-panel, iframe');
+              if (innerContainer && !targetCandidates.includes(innerContainer)) {
+                targetCandidates.push(innerContainer);
+              }
+            }
+          }
+          if (gaRootEl) {
+            targetCandidates.push(gaRootEl);
+            if (gaRootEl.firstElementChild) targetCandidates.push(gaRootEl.firstElementChild);
+          }
+
+          for (const k of Object.keys(nsRoot)) {
+            const mod = nsRoot[k];
+            if (!mod || (typeof mod !== 'object' && typeof mod !== 'function')) continue;
+            for (const targetEl of targetCandidates) {
+              if (!targetEl) continue;
+              try {
+                if (typeof mod.getDebugNode === 'function') {
+                  const dbgNode = mod.getDebugNode(targetEl);
+                  const dbgComp = dbgNode?.componentInstance || dbgNode?.context;
+                  if (isRcInstance(dbgComp)) {
+                    window.__agyRemoteControlInstance = dbgComp;
+                    hookRemoteControlPrototype(Object.getPrototypeOf(dbgComp));
+                    return dbgComp;
+                  }
+                  const foundFromDbg = searchNgContext(dbgComp || dbgNode);
+                  if (foundFromDbg) {
+                    window.__agyRemoteControlInstance = foundFromDbg;
+                    hookRemoteControlPrototype(Object.getPrototypeOf(foundFromDbg));
+                    return foundFromDbg;
+                  }
+                }
+                if (typeof mod.getComponent === 'function') {
+                  const comp = mod.getComponent(targetEl);
+                  if (isRcInstance(comp)) {
+                    window.__agyRemoteControlInstance = comp;
+                    hookRemoteControlPrototype(Object.getPrototypeOf(comp));
+                    return comp;
+                  }
+                }
+                const getLCtx = mod['\u0275getLContext'] || mod.getLContext;
+                if (typeof getLCtx === 'function') {
+                  const lCtx = getLCtx(targetEl);
+                  const foundFromLCtx = extractFromLContext(lCtx) || searchNgContext(lCtx?.lView || lCtx);
+                  if (foundFromLCtx) {
+                    window.__agyRemoteControlInstance = foundFromLCtx;
+                    hookRemoteControlPrototype(Object.getPrototypeOf(foundFromLCtx));
+                    return foundFromLCtx;
+                  }
+                }
+              } catch {}
+            }
+            const RC = mod.RemoteControlComponent || (typeof mod.prototype?.proxyCommand === 'function' ? mod : null);
+            if (RC && RC.prototype && typeof RC.prototype.proxyCommand === 'function') {
+              hookRemoteControlPrototype(RC.prototype);
+            }
+          }
+        }
+
+        try {
+          if (!window?.__agyRemoteControlInstance && typeof document?.dispatchEvent === 'function') {
+            const BaseEvt = window?.Event || (typeof Event !== 'undefined' ? Event : null);
+            if (BaseEvt) {
+              document.dispatchEvent(new BaseEvt('visibilitychange'));
+            }
+          }
+          if (!window?.__agyRemoteControlInstance && typeof window?.dispatchEvent === 'function') {
             const Evt = window.MessageEvent || (typeof MessageEvent !== 'undefined' ? MessageEvent : null);
             if (Evt) {
               window.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
             }
-          } catch {}
-        }
+          }
+        } catch {}
 
         return (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed)
           ? window.__agyRemoteControlInstance
@@ -2279,13 +2502,15 @@
         };
       }
 
-      function extractMarkerBlock(bundleText, beginMarker, endMarker) {
+      function extractAnchoredMarkerBlock(bundleText, beginRe, endRe) {
         if (!bundleText || typeof bundleText !== 'string') return '';
-        const startIdx = bundleText.indexOf(beginMarker);
-        if (startIdx === -1) return '';
-        const endIdx = bundleText.indexOf(endMarker, startIdx);
-        if (endIdx === -1) return bundleText.slice(startIdx);
-        return bundleText.slice(startIdx, endIdx + endMarker.length);
+        const bMatch = beginRe.exec(bundleText);
+        if (!bMatch) return '';
+        const startIdx = bMatch.index;
+        const afterStart = bundleText.slice(startIdx);
+        const eMatch = endRe.exec(afterStart);
+        if (!eMatch) return afterStart;
+        return afterStart.slice(0, eMatch.index + eMatch[0].length);
       }
 
       async function fetchHostInstalledPluginInfo(csrf, viewOrEl) {
@@ -2331,11 +2556,17 @@
         ]);
 
         const candidatePaths = [];
+        const pluginNames = new Set();
         const statesList = Array.isArray(statesRes) ? statesRes : (Array.isArray(statesRes?.states) ? statesRes.states : []);
         for (const s of statesList) {
-          if (s?.path) candidatePaths.push(s.path);
+          const p = s?.path || s?.uri || '';
+          if (p) {
+            candidatePaths.push(p);
+            if (String(p).includes('ko-thought-translator')) pluginNames.add('ko-thought-translator');
+            if (String(p).includes('antigravity-mcp-manager')) pluginNames.add('antigravity-mcp-manager');
+            if (String(p).includes('antigravity-statusbar')) pluginNames.add('antigravity-statusbar');
+          }
         }
-        const pluginNames = new Set();
         const pluginsList = Array.isArray(pluginsRes) ? pluginsRes : (Array.isArray(pluginsRes?.plugins) ? pluginsRes.plugins : []);
         for (const p of pluginsList) {
           if (p?.name) pluginNames.add(String(p.name));
@@ -2345,22 +2576,36 @@
           const skillsRes = await callRpc('getAllSkills', '/exa.language_server_pb.LanguageServerService/GetAllSkills', {});
           const skillsList = Array.isArray(skillsRes) ? skillsRes : (Array.isArray(skillsRes?.skills) ? skillsRes.skills : []);
           for (const sk of skillsList) {
-            if (sk?.path) candidatePaths.push(sk.path);
+            const p = sk?.path || sk?.uri || '';
+            if (p) {
+              candidatePaths.push(p);
+              if (String(p).includes('ko-thought-translator')) pluginNames.add('ko-thought-translator');
+            }
           }
         }
 
         let geminiDir = null;
         for (const rawPath of candidatePaths) {
-          const norm = String(rawPath).replace(/^file:\/\/\/?/i, '').replace(/\\/g, '/');
+          let decoded = String(rawPath).trim();
+          try {
+            decoded = decodeURIComponent(decoded);
+          } catch {}
+          const isFileUri = /^file:\/\//i.test(decoded);
+          let norm = decoded.replace(/^file:\/\//i, '').replace(/\\/g, '/');
+          if (isFileUri && /^\/[A-Za-z]:\//.test(norm)) {
+            norm = norm.slice(1);
+          } else if (isFileUri && !norm.startsWith('/') && !/^[A-Za-z]:\//.test(norm)) {
+            norm = '/' + norm;
+          }
           const idx = norm.indexOf('/.gemini/');
           if (idx !== -1) {
-            const prefix = String(rawPath).startsWith('file:///') && norm.startsWith('Users/') ? '/' : (norm.startsWith('/') ? '' : '');
-            geminiDir = (prefix + norm.slice(0, idx + 8)).replace(/^\/+([A-Za-z]:\/)/, '$1');
+            geminiDir = norm.slice(0, idx + '/.gemini'.length);
             break;
           }
         }
 
         let hostBundleText = '';
+        let readAttemptedAndFailed = false;
         if (geminiDir) {
           const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
           const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
@@ -2374,34 +2619,36 @@
           } else if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
             hostBundleText = decodeBase64ToUtf8(rf.content);
           }
+          if (!hostBundleText) {
+            readAttemptedAndFailed = true;
+          }
         }
 
-        const mcpBeginBlock = ['/* === BEGIN_AGY_MCP', 'MANAGER_V1 === */'].join('_');
-        const mcpEndBlock = ['/* === END_AGY_MCP', 'MANAGER_V1 === */'].join('_');
-        const mcpBeginLine = ['// === BEGIN_AGY_MCP', 'MANAGER_V1 ==='].join('_');
-        const mcpEndLine = ['// === END_AGY_MCP', 'MANAGER_V1 ==='].join('_');
-        const koBeginBlock = ['/* === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
-        const koEndBlock = ['/* === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 === */'].join('_');
-        const koBeginLine = ['// === BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2 ==='].join('_');
-        const koEndLine = ['// === END_AGY_KO', 'THOUGHT_LOCALIZER_V2 ==='].join('_');
+        const mcpBeginStr = ['BEGIN_AGY_MCP', 'MANAGER'].join('_');
+        const mcpEndStr = ['END_AGY_MCP', 'MANAGER'].join('_');
+        const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
+        const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
 
-        const hasMcpMarker = hostBundleText.includes(['BEGIN_AGY_MCP', 'MANAGER_V1'].join('_'));
-        const hasKoMarker = hostBundleText.includes(['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_'));
-        const hasStatusbarMarker = hostBundleText.includes('mountStatusBar') || hostBundleText.includes('agy-ctx-statusbar');
+        const mcpBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpBeginStr}(?:_V1)? ===|\\/\\* === ${mcpBeginStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
+        const mcpEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpEndStr}(?:_V1)? ===|\\/\\* === ${mcpEndStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
+        const koBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*$`, 'm');
+        const koEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*$`, 'm');
+
+        const mcpManagerCode = extractAnchoredMarkerBlock(hostBundleText, mcpBeginRe, mcpEndRe);
+        const koTranslatorCode = extractAnchoredMarkerBlock(hostBundleText, koBeginRe, koEndRe);
+
+        const hasMcpMarker = Boolean(mcpManagerCode) || hostBundleText.includes('function mountMcpManager(');
+        const hasKoMarker = Boolean(koTranslatorCode) || hostBundleText.includes('__agyKoThoughtCleanup');
+        const hasStatusbarMarker = hostBundleText.includes('function mountStatusBar(') || hostBundleText.includes('agy-ctx-statusbar');
 
         const hasStatusbar = hasStatusbarMarker || pluginNames.has('antigravity-statusbar');
         const hasMcpManager = hasMcpMarker || pluginNames.has('antigravity-mcp-manager');
         const hasKoTranslator = hasKoMarker || pluginNames.has('ko-thought-translator');
 
-        const mcpManagerCode = hasMcpMarker
-          ? (extractMarkerBlock(hostBundleText, mcpBeginBlock, mcpEndBlock) || extractMarkerBlock(hostBundleText, mcpBeginLine, mcpEndLine))
-          : '';
-        const koTranslatorCode = hasKoMarker
-          ? (extractMarkerBlock(hostBundleText, koBeginBlock, koEndBlock) || extractMarkerBlock(hostBundleText, koBeginLine, koEndLine))
-          : '';
+        const resolved = Boolean(hostBundleText) || (!readAttemptedAndFailed && pluginNames.size > 0);
 
         return {
-          resolved: Boolean(hostBundleText || candidatePaths.length > 0 || pluginNames.size > 0),
+          resolved,
           geminiDir,
           hasStatusbar,
           hasMcpManager,
@@ -2641,12 +2888,10 @@
         if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
           return hookLsClient(window.__agyCapturedLsClient);
         }
-        try {
-          const cwin = document?.querySelector?.('ga-remote-control iframe')?.contentWindow;
-          if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-            return hookLsClient(cwin.__agyCapturedLsClient);
-          }
-        } catch {}
+        const cwin = getAccessibleRemoteIframeWin();
+        if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
+          return hookLsClient(cwin.__agyCapturedLsClient);
+        }
         const cdoc = getAccessibleRemoteIframeDoc();
         const candidates = [
           resolveEffectiveInputBox(resolveEffectiveView(el)),
@@ -2959,12 +3204,25 @@
       }
       const customStore = window?.__agyCustomStatusBarAdapters || new Map();
 
+      function cleanupChildMenus(container) {
+        if (!container || typeof container.querySelectorAll !== 'function') return;
+        const menus = container.querySelectorAll('.agy-ctx-menu');
+        for (const m of menus) {
+          if (typeof m.__agyCleanup === 'function') {
+            try { m.__agyCleanup(); } catch {}
+          } else {
+            try { m.remove(); } catch {}
+          }
+        }
+      }
+
       function removeAdapterDomElements(id) {
         if (!document || typeof document.querySelectorAll !== 'function') return;
         const bars = document.querySelectorAll('.agy-ctx-statusbar');
         for (const bar of bars) {
           const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
           for (const node of nodes) {
+            cleanupChildMenus(node);
             try { node.remove(); } catch {}
           }
         }
@@ -3032,6 +3290,7 @@
         let leftEl = barEl.querySelector('.agy-ctx-left');
         let rightEl = barEl.querySelector('.agy-ctx-right');
         if (!leftEl || !rightEl) {
+          cleanupChildMenus(barEl);
           setHtml(barEl, `
             <div class="agy-ctx-left"></div>
             <div class="agy-ctx-right"></div>
@@ -3052,6 +3311,7 @@
           for (const node of existingNodes) {
             const nodeId = node.getAttribute('data-agy-adapter-id');
             if (nodeId && !activeIds.has(nodeId)) {
+              cleanupChildMenus(node);
               try { node.remove(); } catch {}
             }
           }
@@ -3184,6 +3444,18 @@
             existing.remove();
           }
           return;
+        }
+
+        if (document && typeof document.querySelectorAll === 'function') {
+          const openMenus = document.querySelectorAll('.agy-ctx-menu');
+          for (const m of openMenus) {
+            if (m.parentNode === barEl) continue;
+            if (typeof m.__agyCleanup === 'function') {
+              try { m.__agyCleanup(); } catch {}
+            } else {
+              try { m.remove(); } catch {}
+            }
+          }
         }
 
         const resolveCurrentCascadeId = () => view?.getAttribute?.('data-cascade-id') || cascadeId;
@@ -3471,8 +3743,14 @@
         const cc = hostBridge.getCascadeContextForElement(inputBox || view);
         const asp = cc?.state?.agentStateProvider || (hostBridge.getAgentStateProviderForInputBox ? hostBridge.getAgentStateProviderForInputBox(inputBox || view) : null);
         const slice = asp?.getState?.()?.trajectorySlice;
-        let totalGenLen = slice?.totalGeneratorMetadataLength ?? 0;
-        const totalStepsLen = slice?.totalStepsLength ?? 0;
+        const rcGenLen = cascadeId && window?.__agyRcGenLenByCascade ? window.__agyRcGenLenByCascade[cascadeId] : undefined;
+        const rcStepLen = cascadeId && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cascadeId] : undefined;
+        let totalGenLen = (typeof slice?.totalGeneratorMetadataLength === 'number' && slice.totalGeneratorMetadataLength > 0)
+          ? slice.totalGeneratorMetadataLength
+          : (typeof rcGenLen === 'number' && rcGenLen > 0 ? rcGenLen : 0);
+        const totalStepsLen = (typeof slice?.totalStepsLength === 'number' && slice.totalStepsLength > 0)
+          ? slice.totalStepsLength
+          : (typeof rcStepLen === 'number' && rcStepLen > 0 ? rcStepLen : 0);
         const trajectoryId = slice?.trajectoryId || '';
 
         const backdrop = document.createElement('div');
@@ -3561,8 +3839,12 @@
             fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
             const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
             const allMetas = j?.generatorMetadata || [];
-            if (allMetas.length > 0 && totalGenLen <= 0) {
+            if (allMetas.length > 0) {
               totalGenLen = fetchOffset + allMetas.length;
+              if (window && cascadeId) {
+                window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
+                window.__agyRcGenLenByCascade[cascadeId] = totalGenLen;
+              }
             }
             metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
           }
@@ -3580,10 +3862,14 @@
               ? Number(compactedSteps[compactedSteps.length - 1])
               : -1;
             if (cwUsage && typeof cwUsage === 'object') {
+              const uMax = Number(cwUsage.maxContextTokens || 0);
+              if (uMax > 0) {
+                parsed.trajectoryMax = uMax;
+              }
               const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
               const uStep = Number(cwUsage.lastStepIndex ?? -1);
               const uEst = Number(cwUsage.estimatedTokensUsed || 0);
-              if (afterCompact > 0 && (latestCompactedStep >= parsed.lastMetaStepIndex || afterCompact < parsed.used)) {
+              if (afterCompact > 0 && latestCompactedStep >= 0 && (parsed.lastMetaStepIndex < 0 || latestCompactedStep >= parsed.lastMetaStepIndex)) {
                 parsed.used = afterCompact;
                 parsed.foundCtx = true;
               } else if (uEst > 0 && (!parsed.foundCtx || (uStep >= 0 && parsed.lastMetaStepIndex >= 0 && uStep > parsed.lastMetaStepIndex))) {
@@ -3769,7 +4055,7 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v18';
+    const STATUSBAR_VERSION = 'v19';
 
     function injectScriptText(win, doc, code) {
       if (!code || !doc?.head) return false;
