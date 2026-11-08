@@ -32,6 +32,19 @@ function normalizeId(relPath) {
   return './' + relPath.replace(/\\/g, '/').replace(/\.js$/, '');
 }
 
+function stripCommentsAndEmptyLines(source) {
+  return source
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      if (t.startsWith('//')) return false;
+      return true;
+    })
+    .map((line) => (line ? `    ${line}` : ''))
+    .join('\n');
+}
+
 function buildBundle(options = {}) {
   const write = options.write !== false;
   const modulesCode = [];
@@ -45,7 +58,7 @@ function buildBundle(options = {}) {
     modulesCode.push(
       `  ${JSON.stringify(id)}: function(module, exports, __require) {\n` +
       `    const require = (spec) => __require(${JSON.stringify(dir)}, spec);\n` +
-      source.split('\n').map((line) => (line ? `    ${line}` : '')).join('\n') +
+      stripCommentsAndEmptyLines(source) +
       `\n  }`
     );
   }

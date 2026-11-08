@@ -1759,6 +1759,43 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     assert.equal(subNodes['.agy-ctx-used-val'].textContent, '360k');
     assert.equal(subNodes['.agy-ctx-cache'].textContent, '92%');
     assert.equal(containerEl.attrs['data-agy-no-translate'], 'true');
+
+    // Verify getModelSelectorContextForView short-TTL cache avoids repeated Fiber walks
+    let triggerQueryCount = 0;
+    const fakeTrigger = {
+      isConnected: true,
+      __reactFiber$opt: {
+        memoizedProps: {
+          value: {
+            selectedModel: { value: 'gemini-pro', contextWindowOptions: [] },
+            setSelectedModel: () => {},
+          },
+        },
+        return: null,
+      },
+    };
+    const fakeView = {
+      querySelector(sel) {
+        if (sel === '[data-testid="model-selector-trigger"]') {
+          triggerQueryCount += 1;
+          return fakeTrigger;
+        }
+        return null;
+      },
+    };
+    const { createHostBridge } = require('../src/host-bridge');
+    const hb = createHostBridge({
+      window: {},
+      document: { querySelectorAll: () => [fakeView] },
+      localStorage: store,
+      fetchFn: async () => ({ ok: true }),
+      cwStore: store,
+    });
+    const ctx1 = hb.getModelSelectorContextForView(fakeView, '512K');
+    const qAfterFirst = triggerQueryCount;
+    const ctx2 = hb.getModelSelectorContextForView(fakeView, '512K');
+    assert.equal(ctx1, ctx2, 'getModelSelectorContextForView must reuse short-TTL cached context');
+    assert.equal(triggerQueryCount, qAfterFirst, 'cached getModelSelectorContextForView must skip redundant DOM/Fiber queries');
   });
 });
 

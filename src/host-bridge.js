@@ -240,40 +240,51 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     const cwin = getAccessibleRemoteIframeWin();
     if (cwin) ensureFetchHook(cwin);
     if (!document) return;
+    const now = Date.now();
     const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
     for (const d of docs) {
       const views = d.querySelectorAll('[data-testid="conversation-view"]');
       for (const view of views) {
+        const cacheKey = String(extraCw || '');
+        if (view.__agyCwsPatchTs && now - view.__agyCwsPatchTs < 3000 && view.__agyCwsPatchExtraCw === cacheKey) {
+          continue;
+        }
         const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
         const startNodes = [triggerEl, view].filter(Boolean);
+        let patchedAny = false;
         for (const node of startNodes) {
           const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
           let fiber = fk ? node[fk] : null;
           while (fiber) {
             const val = fiber.memoizedProps?.value;
             if (val && typeof val === 'object') {
-              if (typeof val.get === 'function' && !val.__cwsPatched) {
-                try {
-                  const origGet = val.get;
-                  val.get = function (name) {
-                    if (name === 'contextWindowSelector') {
-                      return { enabled: true, feature: { enabled: true } };
-                    }
-                    return origGet.apply(this, arguments);
-                  };
-                  val.__cwsPatched = true;
-                } catch {}
+              if (typeof val.get === 'function') {
+                patchedAny = true;
+                if (!val.__cwsPatched) {
+                  try {
+                    const origGet = val.get;
+                    val.get = function (name) {
+                      if (name === 'contextWindowSelector') {
+                        return { enabled: true, feature: { enabled: true } };
+                      }
+                      return origGet.apply(this, arguments);
+                    };
+                    val.__cwsPatched = true;
+                  } catch {}
+                }
               }
               if ('corpHost' in val && 'cider' in val && 'contextWindow' in val && val.contextWindow === undefined) {
                 try { val.contextWindow = {}; } catch {}
               }
               if (val.selectedModel && typeof val.selectedModel === 'object') {
+                patchedAny = true;
                 const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
                 if (nextSm !== val.selectedModel) {
                   try { val.selectedModel = nextSm; } catch {}
                 }
               }
               if (Array.isArray(val.modelOptions)) {
+                patchedAny = true;
                 if (Object.isExtensible(val.modelOptions)) {
                   for (let i = 0; i < val.modelOptions.length; i++) {
                     const nextOpt = ensureModelContextWindowOptions(val.modelOptions[i], extraCw);
@@ -288,6 +299,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
                 }
               }
               if (val.store && typeof val.store.getState === 'function') {
+                patchedAny = true;
                 const st = val.store.getState();
                 const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
                 if (Array.isArray(clientConfigs)) {
@@ -319,6 +331,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
             }
             fiber = fiber.return;
           }
+        }
+        if (patchedAny) {
+          view.__agyCwsPatchTs = now;
+          view.__agyCwsPatchExtraCw = cacheKey;
         }
       }
     }
@@ -394,6 +410,19 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     ensureContextWindowSelectorFlag(extraCw);
     const effView = resolveEffectiveView(view);
     if (!effView) return null;
+    const now = Date.now();
+    const cachedCtx = effView.__agyMsCtxCache;
+    if (
+      cachedCtx &&
+      now - (effView.__agyMsCtxCacheTs || 0) < 400 &&
+      (!cachedCtx.triggerEl || cachedCtx.triggerEl.isConnected !== false) &&
+      (cachedCtx.msCtx || cachedCtx.reduxStore || cachedCtx.legacyCtx)
+    ) {
+      if (cachedCtx.msCtx?.selectedModel) {
+        ensureModelContextWindowOptions(cachedCtx.msCtx.selectedModel, extraCw);
+      }
+      return cachedCtx;
+    }
     const triggerEl = effView.querySelector('[data-testid="model-selector-trigger"]');
     const startEl = triggerEl || effView;
     const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
@@ -427,7 +456,12 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     if (msCtx?.selectedModel) {
       ensureModelContextWindowOptions(msCtx.selectedModel, extraCw);
     }
-    return { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
+    const res = { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
+    if (msCtx || reduxStore || legacyCtx) {
+      effView.__agyMsCtxCache = res;
+      effView.__agyMsCtxCacheTs = now;
+    }
+    return res;
   }
 
   function getCascadeContextForElement(el) {
@@ -473,22 +507,31 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     return null;
   }
 
+  let sharedTextDecoder = null;
+  let sharedTextEncoder = null;
+
   function decodeBytesToText(body) {
     if (!body) return '';
     if (typeof body === 'string') return body;
     try {
-      const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
-      if (TD) {
+      if (!sharedTextDecoder) {
+        const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
+        if (TD) sharedTextDecoder = new TD('utf-8');
+      }
+      if (sharedTextDecoder) {
         const u8 = toUint8Slice(body) || new Uint8Array(body);
-        return new TD('utf-8').decode(u8);
+        return sharedTextDecoder.decode(u8);
       }
     } catch {}
     return '';
   }
 
   function encodeTextToBytes(str) {
-    const TE = window?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
-    if (TE) return new TE().encode(str);
+    if (!sharedTextEncoder) {
+      const TE = window?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
+      if (TE) sharedTextEncoder = new TE();
+    }
+    if (sharedTextEncoder) return sharedTextEncoder.encode(str);
     return Uint8Array.from(String(str).split('').map((c) => c.charCodeAt(0) & 0xff));
   }
 

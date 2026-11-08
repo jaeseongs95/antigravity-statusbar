@@ -83,6 +83,14 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     }
   } catch {}
 
+  let cacheFlushTimer = null;
+  function flushStatsCacheToStorage() {
+    cacheFlushTimer = null;
+    try {
+      localStorage?.setItem(STATS_CACHE_KEY, JSON.stringify(Array.from(stateCache.entries())));
+    } catch {}
+  }
+
   function setBoundedCache(cascadeId, data) {
     if (stateCache.has(cascadeId)) stateCache.delete(cascadeId);
     stateCache.set(cascadeId, data);
@@ -90,9 +98,15 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
       const oldestKey = stateCache.keys().next().value;
       if (oldestKey !== undefined) stateCache.delete(oldestKey);
     }
-    try {
-      localStorage?.setItem(STATS_CACHE_KEY, JSON.stringify(Array.from(stateCache.entries())));
-    } catch {}
+    const setTimer = window?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+    if (setTimer && stateCache.size > 1) {
+      if (!cacheFlushTimer) {
+        cacheFlushTimer = setTimer(flushStatsCacheToStorage, 250);
+        if (cacheFlushTimer && typeof cacheFlushTimer.unref === 'function') cacheFlushTimer.unref();
+      }
+    } else {
+      flushStatsCacheToStorage();
+    }
   }
 
   function parseQuotaResponse(j) {

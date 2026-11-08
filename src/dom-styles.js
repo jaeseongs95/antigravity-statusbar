@@ -402,7 +402,7 @@ const STYLE_CSS = `
         overflow-x: auto;
       }
     }
-`;
+`.replace(/\s+/g, ' ').trim();
 
 function buildDynamicCwWarnCss(underDefaultCwSet) {
   const selectors = ['[data-testid="model-selector-trigger"][data-agy-cw-warn="0"] div:has(> .text-warning)'];

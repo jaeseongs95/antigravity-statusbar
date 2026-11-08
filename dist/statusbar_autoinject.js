@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.14
+// @version      1.3.15
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -15,10 +15,8 @@
   "./context-window-policy": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-
     const CONTEXT_WINDOWS = ['256K', '512K', '900K'];
     const PRESET_CONTEXT_WINDOWS = ['128K', '256K', '384K', '512K', '750K', '900K'];
-
     const CW_LIMITS = {
       '128K': 128000,
       '256K': 256000,
@@ -27,7 +25,6 @@
       '750K': 750000,
       '900K': 900000,
     };
-
     const CW_QUOTA_HINTS = {
       '128K': '절약 모드 (~0.7x)',
       '256K': '기본 쿼터 (1.0x)',
@@ -36,11 +33,9 @@
       '750K': '대용량 (~1.6x)',
       '900K': '턴당 약 1.8배 쿼터 소비',
     };
-
     const STORAGE_MAP_KEY = 'agy-session-ctx-windows-v1';
     const STORAGE_TS_MAP_KEY = 'agy-session-ctx-ts-v1';
     const DEFAULT_CW_KEY = 'agy-default-ctx-window';
-
     function normalizeContextWindow(raw, onNormalized) {
       if (raw === null || raw === undefined) return null;
       const s = String(raw).trim().toUpperCase().replace(/,/g, '');
@@ -66,14 +61,12 @@
       }
       return cw;
     }
-
     function getCwLimit(cw, onNormalized) {
       if (CW_LIMITS[cw]) return CW_LIMITS[cw];
       const norm = normalizeContextWindow(cw, onNormalized);
       if (!norm) return 256000;
       return parseInt(norm, 10) * 1000;
     }
-
     function getCwQuotaHint(cw, onNormalized) {
       if (CW_QUOTA_HINTS[cw]) return CW_QUOTA_HINTS[cw];
       const tok = getCwLimit(cw, onNormalized);
@@ -82,14 +75,11 @@
       const mult = (1 + ((tok - 256000) / (900000 - 256000)) * 0.8).toFixed(1);
       return `직접 지정 (~${mult}x 추정)`;
     }
-
     function createContextWindowStore({ document, localStorage, nativeStorage, onCustomCw, onSaveCw }) {
       const sessionCwMap = new Map();
       const sessionCwTsMap = new Map();
       let defaultCwCache = '512K';
-
       const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
-
       function readCookie(name) {
         try {
           const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -99,7 +89,6 @@
           return null;
         }
       }
-
       function writeCookie(name, val) {
         try {
           if (document) {
@@ -107,7 +96,6 @@
           }
         } catch {}
       }
-
       function loadMapFromRaw(raw) {
         if (!raw) return;
         try {
@@ -125,7 +113,6 @@
           }
         } catch {}
       }
-
       function loadTsMapFromRaw(raw) {
         if (!raw) return;
         try {
@@ -141,7 +128,6 @@
           }
         } catch {}
       }
-
       function serializeSessionMap() {
         if (sessionCwMap.size > 200) {
           const firstKey = sessionCwMap.keys().next().value;
@@ -152,7 +138,6 @@
         }
         return JSON.stringify(Object.fromEntries(sessionCwMap.entries()));
       }
-
       function serializeSessionTsMap() {
         const out = {};
         for (const [k, ts] of sessionCwTsMap.entries()) {
@@ -162,8 +147,6 @@
         }
         return JSON.stringify(out);
       }
-
-      // Synchronous initial load from localStorage + cookie
       try {
         const lsDef = normalize(localStorage?.getItem(DEFAULT_CW_KEY));
         if (lsDef) defaultCwCache = lsDef;
@@ -172,7 +155,6 @@
         loadTsMapFromRaw(localStorage?.getItem(STORAGE_TS_MAP_KEY));
         loadMapFromRaw(localStorage?.getItem(STORAGE_MAP_KEY));
       } catch {}
-
       async function loadPersistentContextSettings() {
         if (nativeStorage && typeof nativeStorage.getItems === 'function') {
           try {
@@ -196,7 +178,6 @@
           } catch {}
         }
       }
-
       function getSavedContextWindow(cascadeId) {
         if (cascadeId && sessionCwMap.has(cascadeId)) {
           const v = normalize(sessionCwMap.get(cascadeId));
@@ -211,7 +192,6 @@
         }
         return normalize(defaultCwCache) || '512K';
       }
-
       function saveContextWindowSetting(cascadeId, targetCw, opts = {}) {
         const norm = normalize(targetCw);
         if (!norm) return null;
@@ -261,7 +241,6 @@
         }
         return norm;
       }
-
       function encodeRemoteAnnotationProfile(cascadeId) {
         if (!cascadeId) return null;
         const sessionCw = normalize(sessionCwMap.get(cascadeId));
@@ -270,7 +249,6 @@
         const ts = sessionCwTsMap.get(cascadeId) || 1;
         return `${sessionCw}|${defCw}|${ts}`;
       }
-
       function parseRemoteAnnotationProfile(rawProfile) {
         if (!rawProfile || typeof rawProfile !== 'string') return null;
         const trimmed = rawProfile.trim();
@@ -287,7 +265,6 @@
         if (!sessionCw && !defaultCw) return null;
         return { sessionCw, defaultCw, ts };
       }
-
       function syncFromRemoteAnnotations(summariesMap) {
         if (!summariesMap || typeof summariesMap !== 'object') {
           return { changed: false, unsyncedLocalIds: [] };
@@ -336,7 +313,6 @@
             nativeStorage.updateItems(payload);
           } catch {}
         }
-
         const unsyncedLocalIds = [];
         for (const [cid, localCw] of sessionCwMap.entries()) {
           if (!cid || cid === 'remote-session') continue;
@@ -350,11 +326,9 @@
         }
         return { changed, unsyncedLocalIds };
       }
-
       function hasSessionOverride(cascadeId) {
         return Boolean(cascadeId && sessionCwMap.has(cascadeId));
       }
-
       function seedSessionIfEmpty(cascadeId, rawCw) {
         if (!cascadeId || sessionCwMap.has(cascadeId)) return;
         const norm = normalize(rawCw);
@@ -365,7 +339,6 @@
           }
         }
       }
-
       function migrateSessionOverride(fromCascadeId, toCascadeId) {
         if (!fromCascadeId || !toCascadeId || fromCascadeId === toCascadeId) return null;
         const ts = sessionCwTsMap.get(fromCascadeId) || 1;
@@ -379,11 +352,9 @@
         }
         return sessionCwMap.get(toCascadeId) || null;
       }
-
       function getDefaultCw() {
         return normalize(defaultCwCache) || '512K';
       }
-
       return {
         normalize,
         getLimit: (cw) => getCwLimit(cw, onCustomCw),
@@ -400,7 +371,6 @@
         getDefaultCw,
       };
     }
-
     module.exports = {
       CONTEXT_WINDOWS,
       PRESET_CONTEXT_WINDOWS,
@@ -411,12 +381,10 @@
       getCwQuotaHint,
       createContextWindowStore,
     };
-
   },
   "./dom-styles": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-
     const STYLE_CSS = `
         .agy-ctx-statusbar {
           display: flex;
@@ -819,8 +787,7 @@
             overflow-x: auto;
           }
         }
-    `;
-
+    `.replace(/\s+/g, ' ').trim();
     function buildDynamicCwWarnCss(underDefaultCwSet) {
       const selectors = ['[data-testid="model-selector-trigger"][data-agy-cw-warn="0"] div:has(> .text-warning)'];
       for (const cw of underDefaultCwSet) {
@@ -828,7 +795,6 @@
       }
       return `\n    ${selectors.join(',\n    ')} {\n      display: none !important;\n    }\n`;
     }
-
     function ensureStyleElement(document, underDefaultCwSet) {
       if (!document) return;
       const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
@@ -859,7 +825,6 @@
         }
       }
     }
-
     function createTrustedHtmlSetter(window, document) {
       if (window?.__agyTrustedHtmlPolicy) {
         return (el, html) => { el.innerHTML = window.__agyTrustedHtmlPolicy.createHTML(html); };
@@ -895,7 +860,6 @@
         }
       };
     }
-
     function fmtK(n) {
       const num = Number(n);
       if (!num || isNaN(num)) return '0';
@@ -903,14 +867,12 @@
       if (num >= 1000) return Math.round(num / 1000) + 'k';
       return String(num);
     }
-
     function fmtNum(n) {
       if (n === null || n === undefined) return '0';
       const num = Number(n);
       if (isNaN(num)) return '0';
       return num.toLocaleString('en-US');
     }
-
     function escHtml(s) {
       return String(s ?? '')
         .replace(/&/g, '&amp;')
@@ -919,7 +881,6 @@
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
     }
-
     function fmtResetTime(iso) {
       if (!iso) return '';
       try {
@@ -937,7 +898,6 @@
         return '';
       }
     }
-
     module.exports = {
       STYLE_CSS,
       buildDynamicCwWarnCss,
@@ -948,17 +908,13 @@
       escHtml,
       fmtResetTime,
     };
-
   },
   "./rpc-client": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-
     const { fmtResetTime } = require('./dom-styles');
-
     const MAX_CACHE_ENTRIES = 60;
     const STATS_CACHE_KEY = 'agy-stats-cache-v1';
-
     function getChatModelFromMeta(m) {
       if (!m) return null;
       if (m.chatModel) return m.chatModel;
@@ -966,7 +922,6 @@
       if (m.metadata && m.metadata.value && (m.metadata.value.chatStartMetadata || m.metadata.value.usage)) return m.metadata.value;
       return null;
     }
-
     function getBucketRemainingFraction(b) {
       if (!b) return null;
       if (typeof b.remainingFraction === 'number') return b.remainingFraction;
@@ -975,7 +930,6 @@
       }
       return null;
     }
-
     function extractStatsFromMetas(metas) {
       let used = 0, max = 256000, cacheRead = 0, inputTok = 0, lastMetaStepIndex = -1;
       let foundCtx = false, foundUsage = false;
@@ -1007,7 +961,6 @@
       const cachePct = totalPrompt > 0 ? Math.round((cacheRead / totalPrompt) * 100) : 0;
       return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, lastMetaStepIndex, foundCtx, foundUsage };
     }
-
     function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
       const stateCache = new Map();
       const inFlightStats = new Map();
@@ -1015,13 +968,11 @@
       let inFlightQuota = null;
       let quotaData = null;
       let lastQuotaFetch = 0;
-
       function canUseLocalHttp(csrf) {
         const win = window || (typeof globalThis !== 'undefined' ? globalThis.window : null);
         if (win?.__APP_CONFIG__?.isRemoteControl) return false;
         return Boolean(csrf && typeof fetchFn === 'function');
       }
-
       try {
         const rawCache = localStorage?.getItem(STATS_CACHE_KEY);
         if (rawCache) {
@@ -1036,7 +987,13 @@
           }
         }
       } catch {}
-
+      let cacheFlushTimer = null;
+      function flushStatsCacheToStorage() {
+        cacheFlushTimer = null;
+        try {
+          localStorage?.setItem(STATS_CACHE_KEY, JSON.stringify(Array.from(stateCache.entries())));
+        } catch {}
+      }
       function setBoundedCache(cascadeId, data) {
         if (stateCache.has(cascadeId)) stateCache.delete(cascadeId);
         stateCache.set(cascadeId, data);
@@ -1044,11 +1001,16 @@
           const oldestKey = stateCache.keys().next().value;
           if (oldestKey !== undefined) stateCache.delete(oldestKey);
         }
-        try {
-          localStorage?.setItem(STATS_CACHE_KEY, JSON.stringify(Array.from(stateCache.entries())));
-        } catch {}
+        const setTimer = window?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+        if (setTimer && stateCache.size > 1) {
+          if (!cacheFlushTimer) {
+            cacheFlushTimer = setTimer(flushStatsCacheToStorage, 250);
+            if (cacheFlushTimer && typeof cacheFlushTimer.unref === 'function') cacheFlushTimer.unref();
+          }
+        } else {
+          flushStatsCacheToStorage();
+        }
       }
-
       function parseQuotaResponse(j) {
         if (!j) return null;
         const groups = (j.response && j.response.groups) || j.groups || [];
@@ -1066,7 +1028,6 @@
         }
         return null;
       }
-
       function fetchQuota(csrf, el) {
         const now = Date.now();
         if (now - lastQuotaFetch < 15000 && quotaData) return Promise.resolve(quotaData);
@@ -1101,7 +1062,6 @@
         })();
         return inFlightQuota;
       }
-
       async function fetchTailMetasBounded({ cascadeId, totalGenLen, totalStepsLen, cachedGenLen, tailSize = 3, callGenMeta }) {
         let knownLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cachedGenLen || -1);
         if (knownLen > 0) {
@@ -1113,7 +1073,6 @@
             return { metas, knownGenLen: nextLen };
           }
         }
-
         const sc = totalStepsLen > 0 ? totalStepsLen : 40;
         if (sc <= 60) {
           const metas = await callGenMeta(0);
@@ -1122,7 +1081,6 @@
           }
           return { metas, knownGenLen: metas.length };
         }
-
         let cur = Math.ceil(sc * 0.42);
         while (cur > 0) {
           const metas = await callGenMeta(cur);
@@ -1134,14 +1092,12 @@
           const stepDown = Math.max(35, Math.floor(cur * 0.22));
           cur = Math.max(0, cur - stepDown);
         }
-
         const metas0 = await callGenMeta(0);
         if (metas0.length > 0) {
           knownGenLenMap.set(cascadeId, metas0.length);
         }
         return { metas: metas0, knownGenLen: metas0.length };
       }
-
       function applyRealtimeCompactionAndUsage(parsed, fullState) {
         if (!fullState || typeof fullState !== 'object') return parsed;
         const cwUsage = fullState.contextWindowUsage;
@@ -1151,7 +1107,6 @@
         const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
           ? Number(compactedSteps[compactedSteps.length - 1])
           : -1;
-
         const base = parsed || {
           used: 0,
           trajectoryMax: 256000,
@@ -1162,7 +1117,6 @@
           foundCtx: false,
           foundUsage: false,
         };
-
         if (cwUsage && typeof cwUsage === 'object') {
           const uMax = Number(cwUsage.maxContextTokens || 0);
           if (uMax > 0) {
@@ -1174,7 +1128,6 @@
           const afterCompact = typeof rawAfterCompact === 'boolean'
             ? (rawAfterCompact ? uEst : 0)
             : Number(rawAfterCompact || 0);
-
           if (afterCompact > 0 && latestCompactedStep >= 0 && (base.lastMetaStepIndex < 0 || latestCompactedStep >= base.lastMetaStepIndex)) {
             base.used = afterCompact;
             base.foundCtx = true;
@@ -1185,7 +1138,6 @@
         }
         return base;
       }
-
       function fetchCascadeStats(cascadeId, csrf, inputBox) {
         if (!cascadeId || cascadeId === 'remote-session') {
           return Promise.resolve(null);
@@ -1209,20 +1161,16 @@
         const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
         const versionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
         const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
-
         if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
           return Promise.resolve(cached);
         }
-
         if (inFlightStats.has(cascadeId)) {
           return inFlightStats.get(cascadeId);
         }
-
         const promise = (async () => {
           try {
             let parsed = null;
             let discoveredGenLen = knownGenLen;
-
             if (canUseLocalHttp(csrf)) {
               try {
                 const callLocal = async (offset) => {
@@ -1247,14 +1195,12 @@
                 });
                 if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
                 parsed = extractStatsFromMetas(res.metas);
-
                 if (!parsed.foundCtx && discoveredGenLen > 2) {
                   const widerMetas = await callLocal(Math.max(0, discoveredGenLen - 15));
                   parsed = extractStatsFromMetas(widerMetas);
                 }
               } catch {}
             }
-
             if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && typeof getRemoteRpcServiceForElement === 'function') {
               const svc = getRemoteRpcServiceForElement(inputBox);
               if (svc && typeof svc.getCascadeTrajectoryGeneratorMetadata === 'function') {
@@ -1284,18 +1230,14 @@
                 parsed = extractStatsFromMetas(metas);
               }
             }
-
             parsed = applyRealtimeCompactionAndUsage(parsed, fullState);
-
             if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
               return cached || null;
             }
-
             if (discoveredGenLen > 0 && typeof window !== 'undefined') {
               window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
               window.__agyRcGenLenByCascade[cascadeId] = discoveredGenLen;
             }
-
             const finalVersionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
             const data = {
               used: parsed.used,
@@ -1315,11 +1257,9 @@
             inFlightStats.delete(cascadeId);
           }
         })();
-
         inFlightStats.set(cascadeId, promise);
         return promise;
       }
-
       return {
         fetchQuota,
         fetchCascadeStats,
@@ -1330,22 +1270,17 @@
         getLatestQuota: () => quotaData,
       };
     }
-
     module.exports = {
       getChatModelFromMeta,
       extractStatsFromMetas,
       createRpcClient,
     };
-
   },
   "./host-bridge": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-
     const { PRESET_CONTEXT_WINDOWS } = require('./context-window-policy');
-
     const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
-
     function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
       if (!cw) return;
       const kNum = parseInt(cw, 10);
@@ -1383,9 +1318,7 @@
         } catch {}
       }
     }
-
     function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) {
-      // Ensure context-window-selector flag is enabled in customFlagOverrides
       try {
         const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
         const flags = raw ? JSON.parse(raw) : {};
@@ -1402,7 +1335,6 @@
           localStorage?.setItem('jetski.developer.customFlagOverrides', JSON.stringify(flags));
         }
       } catch {}
-
       try {
         if (window && !window.__agyLsClientDecoratorHooked) {
           window.__agyLsClientDecoratorHooked = true;
@@ -1470,14 +1402,12 @@
           };
         }
       } catch {}
-
       function getAccessibleRemoteIframeWin() {
         try {
           const iframe = document?.querySelector?.('ga-remote-control iframe');
           if (!iframe || iframe.__agyCrossOriginInaccessible) return null;
           const cwin = iframe.contentWindow;
           if (!cwin) return null;
-          // Probe cross-origin restriction once; if accessible, clear any stale flag
           void cwin.document;
           return cwin;
         } catch {
@@ -1488,7 +1418,6 @@
           return null;
         }
       }
-
       function getAccessibleRemoteIframeDoc() {
         try {
           const iframe = document?.querySelector?.('ga-remote-control iframe');
@@ -1503,7 +1432,6 @@
           return null;
         }
       }
-
       function resolveEffectiveView(view) {
         if (view && view.classList?.contains?.('agy-rc-host-view')) {
           const cdoc = getAccessibleRemoteIframeDoc();
@@ -1519,7 +1447,6 @@
         }
         return view;
       }
-
       function resolveEffectiveInputBox(inputBox) {
         if (inputBox && inputBox.classList?.contains?.('agy-rc-host-box')) {
           const cdoc = getAccessibleRemoteIframeDoc();
@@ -1530,7 +1457,6 @@
         }
         return inputBox;
       }
-
       function ensureModelContextWindowOptions(modelObj, extraCw) {
         if (!modelObj || typeof modelObj !== 'object') return modelObj;
         const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
@@ -1576,46 +1502,56 @@
           return modelObj;
         }
       }
-
       function ensureContextWindowSelectorFlag(extraCw) {
         ensureFetchHook(window);
         const cwin = getAccessibleRemoteIframeWin();
         if (cwin) ensureFetchHook(cwin);
         if (!document) return;
+        const now = Date.now();
         const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
         for (const d of docs) {
           const views = d.querySelectorAll('[data-testid="conversation-view"]');
           for (const view of views) {
+            const cacheKey = String(extraCw || '');
+            if (view.__agyCwsPatchTs && now - view.__agyCwsPatchTs < 3000 && view.__agyCwsPatchExtraCw === cacheKey) {
+              continue;
+            }
             const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
             const startNodes = [triggerEl, view].filter(Boolean);
+            let patchedAny = false;
             for (const node of startNodes) {
               const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
               let fiber = fk ? node[fk] : null;
               while (fiber) {
                 const val = fiber.memoizedProps?.value;
                 if (val && typeof val === 'object') {
-                  if (typeof val.get === 'function' && !val.__cwsPatched) {
-                    try {
-                      const origGet = val.get;
-                      val.get = function (name) {
-                        if (name === 'contextWindowSelector') {
-                          return { enabled: true, feature: { enabled: true } };
-                        }
-                        return origGet.apply(this, arguments);
-                      };
-                      val.__cwsPatched = true;
-                    } catch {}
+                  if (typeof val.get === 'function') {
+                    patchedAny = true;
+                    if (!val.__cwsPatched) {
+                      try {
+                        const origGet = val.get;
+                        val.get = function (name) {
+                          if (name === 'contextWindowSelector') {
+                            return { enabled: true, feature: { enabled: true } };
+                          }
+                          return origGet.apply(this, arguments);
+                        };
+                        val.__cwsPatched = true;
+                      } catch {}
+                    }
                   }
                   if ('corpHost' in val && 'cider' in val && 'contextWindow' in val && val.contextWindow === undefined) {
                     try { val.contextWindow = {}; } catch {}
                   }
                   if (val.selectedModel && typeof val.selectedModel === 'object') {
+                    patchedAny = true;
                     const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
                     if (nextSm !== val.selectedModel) {
                       try { val.selectedModel = nextSm; } catch {}
                     }
                   }
                   if (Array.isArray(val.modelOptions)) {
+                    patchedAny = true;
                     if (Object.isExtensible(val.modelOptions)) {
                       for (let i = 0; i < val.modelOptions.length; i++) {
                         const nextOpt = ensureModelContextWindowOptions(val.modelOptions[i], extraCw);
@@ -1630,6 +1566,7 @@
                     }
                   }
                   if (val.store && typeof val.store.getState === 'function') {
+                    patchedAny = true;
                     const st = val.store.getState();
                     const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
                     if (Array.isArray(clientConfigs)) {
@@ -1662,10 +1599,13 @@
                 fiber = fiber.return;
               }
             }
+            if (patchedAny) {
+              view.__agyCwsPatchTs = now;
+              view.__agyCwsPatchExtraCw = cacheKey;
+            }
           }
         }
       }
-
       function ensureCustomizationsStoreLoaded() {
         if (!document) return;
         const now = Date.now();
@@ -1731,11 +1671,23 @@
           }
         }
       }
-
       function getModelSelectorContextForView(view, extraCw) {
         ensureContextWindowSelectorFlag(extraCw);
         const effView = resolveEffectiveView(view);
         if (!effView) return null;
+        const now = Date.now();
+        const cachedCtx = effView.__agyMsCtxCache;
+        if (
+          cachedCtx &&
+          now - (effView.__agyMsCtxCacheTs || 0) < 400 &&
+          (!cachedCtx.triggerEl || cachedCtx.triggerEl.isConnected !== false) &&
+          (cachedCtx.msCtx || cachedCtx.reduxStore || cachedCtx.legacyCtx)
+        ) {
+          if (cachedCtx.msCtx?.selectedModel) {
+            ensureModelContextWindowOptions(cachedCtx.msCtx.selectedModel, extraCw);
+          }
+          return cachedCtx;
+        }
         const triggerEl = effView.querySelector('[data-testid="model-selector-trigger"]');
         const startEl = triggerEl || effView;
         const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
@@ -1769,9 +1721,13 @@
         if (msCtx?.selectedModel) {
           ensureModelContextWindowOptions(msCtx.selectedModel, extraCw);
         }
-        return { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
+        const res = { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
+        if (msCtx || reduxStore || legacyCtx) {
+          effView.__agyMsCtxCache = res;
+          effView.__agyMsCtxCacheTs = now;
+        }
+        return res;
       }
-
       function getCascadeContextForElement(el) {
         const effEl = resolveEffectiveInputBox(resolveEffectiveView(el));
         const candidates = [
@@ -1795,13 +1751,11 @@
         }
         return null;
       }
-
       const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
       const PROTO_UUID_RE = /\x0a\x24([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
       const CONVO_RPC_RE = /\/(StreamAgentStateUpdates|RequestAgentStatePageUpdate|StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|GetCascadeModelConfigData|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
       let lastRcTrajectoryPollTs = 0;
       let rcTrajectoryPollInFlight = false;
-
       function toUint8Slice(body) {
         if (!body) return null;
         if (body instanceof Uint8Array) return body;
@@ -1814,26 +1768,31 @@
         }
         return null;
       }
-
+      let sharedTextDecoder = null;
+      let sharedTextEncoder = null;
       function decodeBytesToText(body) {
         if (!body) return '';
         if (typeof body === 'string') return body;
         try {
-          const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
-          if (TD) {
+          if (!sharedTextDecoder) {
+            const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
+            if (TD) sharedTextDecoder = new TD('utf-8');
+          }
+          if (sharedTextDecoder) {
             const u8 = toUint8Slice(body) || new Uint8Array(body);
-            return new TD('utf-8').decode(u8);
+            return sharedTextDecoder.decode(u8);
           }
         } catch {}
         return '';
       }
-
       function encodeTextToBytes(str) {
-        const TE = window?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
-        if (TE) return new TE().encode(str);
+        if (!sharedTextEncoder) {
+          const TE = window?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
+          if (TE) sharedTextEncoder = new TE();
+        }
+        if (sharedTextEncoder) return sharedTextEncoder.encode(str);
         return Uint8Array.from(String(str).split('').map((c) => c.charCodeAt(0) & 0xff));
       }
-
       function decodeBase64ToUtf8(b64) {
         if (!b64 || typeof b64 !== 'string') return '';
         try {
@@ -1850,7 +1809,6 @@
         } catch {}
         return '';
       }
-
       function encodeVarint(val) {
         const out = [];
         let v = Math.max(0, Math.floor(Number(val) || 0)) >>> 0;
@@ -1861,21 +1819,15 @@
         out.push(v & 0x7f);
         return out;
       }
-
       function buildSendMessageCheckpointSuffix(maxTokenLimit, contextWindow) {
-        // CheckpointConfig: field 5 (max_token_limit, uint32 varint) -> wire tag 0x28
         const cpBytes = [0x28, ...encodeVarint(maxTokenLimit)];
         if (contextWindow && typeof contextWindow === 'string') {
-          // CheckpointConfig: field 36 (context_window, string) -> wire tag (36 << 3) | 2 = 0x122 -> varint [0xa2, 0x02]
           const cwBytes = Array.from(encodeTextToBytes(contextWindow));
           cpBytes.push(0xa2, 0x02, ...encodeVarint(cwBytes.length), ...cwBytes);
         }
-        // CascadeConfig: field 2 (checkpoint_config, bytes) -> wire tag 0x12
         const ccBytes = [0x12, ...encodeVarint(cpBytes.length), ...cpBytes];
-        // SendUserCascadeMessageRequest: field 5 (cascade_config, bytes) -> wire tag 0x2a
         return new Uint8Array([0x2a, ...encodeVarint(ccBytes.length), ...ccBytes]);
       }
-
       function resolveEffectiveCascadeId(body, rcInst) {
         const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
         const fromBody = extractCascadeIdFromBody(body, ignoreUuid);
@@ -1888,11 +1840,9 @@
         if (domCid && domCid !== 'remote-session') return domCid;
         return null;
       }
-
       function findFirstNonWsByte(u8) {
         if (!u8 || u8.length === 0) return -1;
         let i = 0;
-        // Skip UTF-8 BOM (EF BB BF) if present
         if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
           i = 3;
         }
@@ -1901,7 +1851,6 @@
         }
         return i < u8.length ? u8[i] : -1;
       }
-
       function endsWithByteSequence(u8, seq) {
         if (!u8 || !seq || u8.length < seq.length) return false;
         const offset = u8.length - seq.length;
@@ -1910,7 +1859,6 @@
         }
         return true;
       }
-
       function buildConnectFramedBytes(flagByte, payloadBytes) {
         const len = payloadBytes.length;
         const framed = new Uint8Array(5 + len);
@@ -1922,7 +1870,6 @@
         framed.set(payloadBytes, 5);
         return framed;
       }
-
       function injectCheckpointLimitIntoSendRequest(path, body, rcInst) {
         if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body || !cwStore) {
           return body;
@@ -1932,7 +1879,6 @@
           const cw = cwStore.getSavedContextWindow(cid);
           const limit = cwStore.getLimit(cw);
           if (!cw || !limit || limit <= 0) return body;
-
           const applyCheckpointToJsonObj = (j) => {
             if (!j || typeof j !== 'object') return j;
             j.cascadeConfig = j.cascadeConfig || {};
@@ -1943,7 +1889,6 @@
             };
             return j;
           };
-
           if (typeof body === 'string') {
             const trimmed = body.trim();
             if (trimmed.startsWith('{')) {
@@ -1952,7 +1897,6 @@
             }
             return body;
           }
-
           const u8 = toUint8Slice(body);
           if (!u8) {
             if (typeof body === 'object') {
@@ -1976,17 +1920,12 @@
             return body;
           }
           if (u8.length === 0) return body;
-
-          // 1. Unframed UTF-8 JSON bytes (`{...}`)
           if (findFirstNonWsByte(u8) === 0x7b) {
             const text = decodeBytesToText(u8);
             const j = applyCheckpointToJsonObj(JSON.parse(text));
             return encodeTextToBytes(JSON.stringify(j));
           }
-
           const suffix = buildSendMessageCheckpointSuffix(limit, cw);
-
-          // Strip any previously injected trailing 0x2a cascade_config suffix (`[0x2a, ccLen, 0x12, cpLen, 0x28, ...]`)
           const stripTrailingCheckpointSuffix = (bytes) => {
             if (!bytes || bytes.length < 7) return bytes;
             for (let pos = Math.max(0, bytes.length - 32); pos <= bytes.length - 7; pos++) {
@@ -2000,23 +1939,16 @@
             }
             return bytes;
           };
-
-          // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
-          // In Protobuf wire format, field number 0 (`(u8[0] >>> 3) === 0`, i.e., `u8[0] < 8`) is never a valid unframed message start!
-          // Also flag bit 0x80 (e.g. `0x80` trailer frame) or any frame matching `frameLen === u8.length - 5` is a Connect/gRPC-Web frame.
           const frameLen = u8.length >= 5
             ? (((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4])
             : -1;
           const isConnectFrame = u8.length >= 5 && (u8[0] < 8 || (u8[0] & 0x80) !== 0 || frameLen === u8.length - 5);
           if (isConnectFrame) {
             if (frameLen !== u8.length - 5 || u8[0] !== 0) {
-              // Compressed, trailer, end-stream (`u8[0] > 0`), or incomplete/multi-frame Connect envelope: never append raw bytes
               return body;
             }
             const payload = u8.subarray(5);
             if (findFirstNonWsByte(payload) === 0x7b) {
-              // Connect-Framed JSON (`0x00` + 4B len + `{"cascadeId":...}`)!
-              // Parse JSON, inject checkpointConfig, re-encode JSON, and update 5-byte frame header length!
               const text = decodeBytesToText(payload);
               const j = applyCheckpointToJsonObj(JSON.parse(text));
               const newPayload = encodeTextToBytes(JSON.stringify(j));
@@ -2031,8 +1963,6 @@
             newPayload.set(suffix, cleanPayload.length);
             return buildConnectFramedBytes(0, newPayload);
           }
-
-          // 3. Unframed Protobuf binary (idempotent guard against double injection or limit change)
           if (endsWithByteSequence(u8, suffix)) {
             return body;
           }
@@ -2045,10 +1975,8 @@
           return body;
         }
       }
-
       window.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
       window.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
-
       function ensureFetchHook(targetWin) {
         try {
           const w = targetWin || window;
@@ -2077,8 +2005,6 @@
                   sniffFn(url, nextInit.body, null);
                   if (/\/SendUserCascadeMessage$/i.test(url)) {
                     nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
-                    // If wrapping over a legacy v1.3.8 hook in an un-reloaded window, pass a URL object
-                    // so v1.3.8's `typeof input === 'string' || typeof input.url === 'string'` check is bypassed!
                     if (isLegacyV1Hook && typeof URL === 'function') {
                       try {
                         nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
@@ -2106,7 +2032,6 @@
           w.fetch = wrappedFetch;
         } catch {}
       }
-
       function hookLsClient(lsClient) {
         if (!lsClient || typeof lsClient !== 'object') return lsClient;
         if (lsClient.__agyCwHookV2) return lsClient;
@@ -2129,7 +2054,6 @@
         } catch {}
         return lsClient;
       }
-
       function extractCascadeIdFromBody(body, ignoreUuid) {
         const u8 = toUint8Slice(body);
         if (!u8 && body && typeof body === 'object') {
@@ -2159,7 +2083,6 @@
         if (um && um[0] && um[0] !== ignoreUuid) return um[0];
         return null;
       }
-
       function sniffCascadeIdFromRpc(path, body, rcInst) {
         if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
         const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
@@ -2184,14 +2107,12 @@
           }
         }
       }
-
       function hookRemoteControlPrototype(proto) {
         if (!proto || proto === Object.prototype) return;
         proto.__agyTargetWin = window;
         if (Object.prototype.hasOwnProperty.call(proto, '__agyHookV2')) return;
         proto.__agyHooked = true;
         proto.__agyHookV2 = true;
-
         if (typeof proto.handleIframeMessage === 'function') {
           const origMsg = proto.__agyOrigHandleIframeMessage || proto.handleIframeMessage;
           proto.__agyOrigHandleIframeMessage = origMsg;
@@ -2210,7 +2131,6 @@
             return origMsg.apply(this, arguments);
           };
         }
-
         for (const mName of ['proxyCommand', 'streamProxyCommand']) {
           if (typeof proto[mName] === 'function') {
             const origKey = `__agyOrig_${mName}`;
@@ -2226,7 +2146,6 @@
             };
           }
         }
-
         if (typeof proto.handlePortRequest === 'function') {
           const origPort = proto.__agyOrigHandlePortRequest || proto.handlePortRequest;
           proto.__agyOrigHandlePortRequest = origPort;
@@ -2278,7 +2197,6 @@
           }
         }
       }
-
       function getRemoteControlInstance(onCascadeChange) {
         if (typeof onCascadeChange === 'function') {
           window.__agyOnCascadeSniffed = onCascadeChange;
@@ -2287,7 +2205,6 @@
           hookRemoteControlPrototype(Object.getPrototypeOf(window.__agyRemoteControlInstance));
           return window.__agyRemoteControlInstance;
         }
-
         const isRcInstance = (obj) =>
           Boolean(
             obj &&
@@ -2297,7 +2214,6 @@
                 typeof obj.onIframeLoad === 'function' ||
                 typeof obj.handleIframeMessage === 'function')
           );
-
         const extractFromLContext = (lCtx) => {
           if (!lCtx || typeof lCtx !== 'object') return null;
           if (isRcInstance(lCtx)) return lCtx;
@@ -2324,7 +2240,6 @@
           }
           return null;
         };
-
         const searchNgContext = (ctx) => {
           if (!ctx || typeof ctx !== 'object') return null;
           const direct = extractFromLContext(ctx);
@@ -2358,10 +2273,8 @@
           }
           return null;
         };
-
         const rcEl = document?.querySelector?.('ga-remote-control') || null;
         const gaRootEl = document?.querySelector?.('ga-root') || null;
-
         if (rcEl) {
           const ngFn = window?.ng && typeof window.ng.getComponent === 'function' ? window.ng.getComponent : null;
           if (ngFn) {
@@ -2382,7 +2295,6 @@
             return found;
           }
         }
-
         if (gaRootEl) {
           const rootCtxKey = Object.keys(gaRootEl).find((k) => k.startsWith('__ngContext'));
           const foundFromRoot = searchNgContext(gaRootEl.__ngContext__ || (rootCtxKey ? gaRootEl[rootCtxKey] : null));
@@ -2392,7 +2304,6 @@
             return foundFromRoot;
           }
         }
-
         const nsRoot = window?.default_GoogleAntigravity;
         if (nsRoot && typeof nsRoot === 'object') {
           const targetCandidates = [];
@@ -2410,7 +2321,6 @@
             targetCandidates.push(gaRootEl);
             if (gaRootEl.firstElementChild) targetCandidates.push(gaRootEl.firstElementChild);
           }
-
           for (const k of Object.keys(nsRoot)) {
             const mod = nsRoot[k];
             if (!mod || (typeof mod !== 'object' && typeof mod !== 'function')) continue;
@@ -2458,7 +2368,6 @@
             }
           }
         }
-
         if (window) window.__agyProbingRcInstance = true;
         try {
           const BaseEvt = window?.Event || (typeof Event !== 'undefined' ? Event : null);
@@ -2504,12 +2413,10 @@
         } catch {} finally {
           if (window) window.__agyProbingRcInstance = false;
         }
-
         return (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed)
           ? window.__agyRemoteControlInstance
           : null;
       }
-
       function createRcServiceAdapter(rcInst) {
         async function callJson(rpcPath, reqObj) {
           if (!rcInst || typeof rcInst.proxyCommand !== 'function') return null;
@@ -2565,7 +2472,6 @@
           },
         };
       }
-
       function extractAnchoredMarkerBlock(bundleText, beginRe, endRe) {
         if (!bundleText || typeof bundleText !== 'string') return '';
         const bMatch = beginRe.exec(bundleText);
@@ -2576,12 +2482,10 @@
         if (!eMatch) return afterStart;
         return afterStart.slice(0, eMatch.index + eMatch[0].length);
       }
-
       async function fetchHostInstalledPluginInfo(csrf, viewOrEl) {
         const svc = getRemoteRpcServiceForElement(viewOrEl);
         const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
         const canCallHttp = Boolean(effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function');
-
         async function callRpc(methodName, rpcPath, reqObj) {
           if (svc && typeof svc[methodName] === 'function') {
             try {
@@ -2613,12 +2517,10 @@
           }
           return null;
         }
-
         const [statesRes, pluginsRes] = await Promise.all([
           callRpc('getCustomizationStates', '/exa.language_server_pb.LanguageServerService/GetCustomizationStates', {}),
           callRpc('getAllPlugins', '/exa.language_server_pb.LanguageServerService/GetAllPlugins', {}),
         ]);
-
         const candidatePaths = [];
         const pluginNames = new Set();
         const statesList = Array.isArray(statesRes) ? statesRes : (Array.isArray(statesRes?.states) ? statesRes.states : []);
@@ -2647,7 +2549,6 @@
             }
           }
         }
-
         let geminiDir = null;
         for (const rawPath of candidatePaths) {
           let decoded = String(rawPath).trim();
@@ -2667,7 +2568,6 @@
             break;
           }
         }
-
         let hostBundleText = '';
         let readAttemptedAndFailed = false;
         if (geminiDir) {
@@ -2687,48 +2587,37 @@
             readAttemptedAndFailed = true;
           }
         }
-
         const mcpBeginStr = ['BEGIN_AGY_MCP', 'MANAGER'].join('_');
         const mcpEndStr = ['END_AGY_MCP', 'MANAGER'].join('_');
         const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
         const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
-
         const mcpBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpBeginStr}(?:_V1)? ===|\\/\\* === ${mcpBeginStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
         const mcpEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpEndStr}(?:_V1)? ===|\\/\\* === ${mcpEndStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
         const koBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*$`, 'm');
         const koEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*$`, 'm');
-
         const mcpBeginMatch = mcpBeginRe.exec(hostBundleText);
         const mcpEndMatch = mcpBeginMatch ? mcpEndRe.exec(hostBundleText.slice(mcpBeginMatch.index)) : null;
         const mcpB = mcpBeginMatch ? mcpBeginMatch.index : -1;
         const mcpE = mcpEndMatch ? mcpBeginMatch.index + mcpEndMatch.index : -1;
         const mcpEndLen = mcpEndMatch ? mcpEndMatch[0].length : 0;
-
         const koBeginMatch = koBeginRe.exec(hostBundleText);
         const koEndMatch = koBeginMatch ? koEndRe.exec(hostBundleText.slice(koBeginMatch.index)) : null;
         const koB = koBeginMatch ? koBeginMatch.index : -1;
         const koE = koEndMatch ? koBeginMatch.index + koEndMatch.index : -1;
         const koEndLen = koEndMatch ? koEndMatch[0].length : 0;
-
         const mcpManagerCode = mcpB !== -1 && mcpE > mcpB ? hostBundleText.slice(mcpB, mcpE + mcpEndLen) : '';
         const koTranslatorCode = koB !== -1 && koE > koB ? hostBundleText.slice(koB, koE + koEndLen) : '';
-
         const firstMarkerIdx = [mcpB, koB].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? hostBundleText.length;
         const baseSegment = hostBundleText.slice(0, firstMarkerIdx).trim();
-
         const sbFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'StatusBar'].join('')}\\s*\\(`, 'm');
         const mcpFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'McpManager'].join('')}\\s*\\(`, 'm');
-
         const hasStatusbarMarker = sbFuncRe.test(baseSegment);
         const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
         const hasKoMarker = Boolean(koTranslatorCode);
-
         const hasStatusbar = hasStatusbarMarker || pluginNames.has('antigravity-statusbar');
         const hasMcpManager = hasMcpMarker || pluginNames.has('antigravity-mcp-manager');
         const hasKoTranslator = hasKoMarker || pluginNames.has('ko-thought-translator');
-
         const resolved = Boolean(hostBundleText) || (!readAttemptedAndFailed && pluginNames.size > 0);
-
         return {
           resolved,
           geminiDir,
@@ -2740,10 +2629,8 @@
           hostBundleText,
         };
       }
-
       let lastDesktopTrajectorySyncTs = 0;
       let desktopTrajectorySyncInFlight = false;
-
       async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {
         if (!cwStore || typeof cwStore.encodeRemoteAnnotationProfile !== 'function') return false;
         let targetIds = [];
@@ -2757,7 +2644,6 @@
           }
         }
         if (!targetIds.length) return false;
-
         for (const cid of targetIds) {
           const profileStr = cwStore.encodeRemoteAnnotationProfile(cid);
           if (!profileStr) continue;
@@ -2786,7 +2672,6 @@
         }
         return true;
       }
-
       function pullAndBackfillTrajectorySummaries(summaries, csrf, viewOrEl, onRemoteUpdated) {
         if (!summaries || typeof summaries !== 'object' || typeof cwStore?.syncFromRemoteAnnotations !== 'function') {
           return false;
@@ -2802,7 +2687,6 @@
         }
         return changed;
       }
-
       function syncDesktopAnnotations(csrf, viewOrEl, onRemoteUpdated, force = false) {
         const nativeView = document?.querySelector?.('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
         if (!nativeView && document?.querySelector?.('ga-remote-control')) return;
@@ -2813,7 +2697,6 @@
         const canCallSvc = svc && typeof svc.getAllCascadeTrajectories === 'function';
         const canCallHttp = effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function';
         if (!canCallSvc && !canCallHttp) return;
-
         lastDesktopTrajectorySyncTs = now;
         desktopTrajectorySyncInFlight = true;
         const p = canCallSvc
@@ -2823,7 +2706,6 @@
               headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': effCsrf },
               body: '{}',
             }).then((r) => (r && r.ok !== false ? r.json() : null));
-
         Promise.resolve(p)
           .then((all) => {
             const summaries = all?.trajectorySummaries;
@@ -2836,14 +2718,12 @@
             desktopTrajectorySyncInFlight = false;
           });
       }
-
       function ensureRemoteHostView(onCascadeChange) {
         if (!document) return null;
         const nativeView = document.querySelector('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
         if (nativeView) return null;
         const rcEl = document.querySelector('ga-remote-control');
         if (!rcEl) return null;
-
         const rcInst = getRemoteControlInstance(onCascadeChange);
         const appContainer = rcEl.querySelector('.app-container') || rcEl;
         let hostView = appContainer.querySelector('.agy-rc-host-view');
@@ -2857,17 +2737,14 @@
           hostView.appendChild(hostBox);
           appContainer.appendChild(hostView);
         }
-
         const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
         const cdoc = getAccessibleRemoteIframeDoc();
         const innerView = cdoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
         const rawInnerCid = innerView?.getAttribute?.('data-cascade-id');
         const innerCid = (rawInnerCid && UUID_RE.test(rawInnerCid) && rawInnerCid !== ignoreUuid) ? rawInnerCid : '';
-
         const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
         const pathMatch = String(childPath).match(UUID_RE);
         const pathCid = (pathMatch && pathMatch[0] && pathMatch[0] !== ignoreUuid) ? pathMatch[0] : '';
-
         let activeCid = '';
         if (innerCid) {
           activeCid = innerCid;
@@ -2883,7 +2760,6 @@
         } else {
           activeCid = window.__agySniffedCascadeId || pathCid || '';
         }
-
         const currentAttr = hostView.getAttribute('data-cascade-id');
         const nextAttr = activeCid || currentAttr || 'remote-session';
         if (currentAttr !== nextAttr) {
@@ -2892,7 +2768,6 @@
           }
           hostView.setAttribute('data-cascade-id', nextAttr);
         }
-
         const now = Date.now();
         if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 2500 || nextAttr === 'remote-session')) {
           lastRcTrajectoryPollTs = now;
@@ -2943,10 +2818,8 @@
             rcTrajectoryPollInFlight = false;
           });
         }
-
         return hostView;
       }
-
       function getAgentStateProviderForInputBox(inputBox) {
         const cc = getCascadeContextForElement(inputBox);
         if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
@@ -2965,7 +2838,6 @@
         }
         return null;
       }
-
       function getRemoteRpcServiceForElement(el) {
         if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
           return hookLsClient(window.__agyCapturedLsClient);
@@ -3011,7 +2883,6 @@
         } catch {}
         return null;
       }
-
       function getSelectedModelKey(view, cascadeId, infoOpt) {
         const info = infoOpt || getModelSelectorContextForView(view);
         const state = info?.reduxStore ? info.reduxStore.getState() : null;
@@ -3025,13 +2896,11 @@
           '';
         return `${cascadeId || ''}:${String(raw ?? '')}`;
       }
-
       function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
         const targetCw = cwStore.normalize(rawTargetCw);
         if (!view || !cascadeId || !targetCw) return false;
         const info = getModelSelectorContextForView(view, targetCw);
         if (!info) return false;
-
         const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
         if (triggerEl) {
           const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
@@ -3047,14 +2916,12 @@
         const initialState = reduxStore ? reduxStore.getState() : null;
         const initialReduxCw = initialState?.modelSelection?.byConversation?.[cascadeId]?.contextWindow;
         const reduxAlreadyMatches = !reduxStore || initialReduxCw === targetCw;
-
         if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
           if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
             triggerEl.setAttribute('data-context-window', String(targetCw));
           }
           return true;
         }
-
         if (msCtx || reduxStore) {
           const state = initialState;
           const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
@@ -3064,7 +2931,6 @@
             ensureModelContextWindowOptions(selectedModelObj, targetCw);
           }
           let dispatched = false;
-
           if (currentInRedux !== targetCw || (reduxStore && byConvo?.contextWindow !== targetCw) || force) {
             const prevDefaultCw = state?.modelSelection?.default?.contextWindow;
             if (reduxStore) {
@@ -3093,7 +2959,6 @@
               msCtx.setSelectedModel(selectedModelObj, targetCw);
               dispatched = true;
             }
-
             if (dispatched && reduxStore) {
               const nextState = reduxStore.getState();
               const defObj = nextState?.modelSelection?.default;
@@ -3111,7 +2976,6 @@
               }
             }
           }
-
           if (dispatched || currentInRedux === targetCw) {
             window.__agyLastAppliedContextWindow = applyKey;
             window.__agyLastAppliedContextWindowByCascade[cascadeId] = applyKey;
@@ -3122,7 +2986,6 @@
           }
           return false;
         }
-
         if (legacyCtx) {
           const modelCfg = legacyCtx.getModelConfigForConversation(cascadeId);
           if (!modelCfg || modelCfg.value === undefined) return false;
@@ -3143,7 +3006,6 @@
         }
         return false;
       }
-
       async function runCompactForInputBox(inputBox) {
         const effBox = resolveEffectiveInputBox(inputBox);
         if (!effBox) return;
@@ -3177,7 +3039,6 @@
         const MClass = ed._nodes.get('contextScopeItemMention')?.klass;
         const TClass = ed._nodes.get('text')?.klass;
         if (!PClass || !MClass || !TClass) return;
-
         ed.update(() => {
           const root = ed.getEditorState()._nodeMap.get('root').getWritable();
           root.clear();
@@ -3204,9 +3065,7 @@
           p.append(mention, text);
           root.append(p);
         });
-
         await new Promise((r) => setTimeout(r, 60));
-
         const fiberKey = Object.keys(editable).find((k) => k.startsWith('__reactFiber$'));
         let curr = fiberKey ? editable[fiberKey] : null;
         while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter !== 'function')) {
@@ -3220,7 +3079,6 @@
           if (sendBtn && !sendBtn.disabled) sendBtn.click();
         }
       }
-
       return {
         ensureContextWindowSelectorFlag,
         ensureCustomizationsStoreLoaded,
@@ -3241,18 +3099,15 @@
         buildSendMessageCheckpointSuffix,
       };
     }
-
     module.exports = {
       COMPACT_ARGS,
       registerCustomCwInPrototype,
       createHostBridge,
     };
-
   },
   "./adapter-registry": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-
     function normalizeAdapter(adapter) {
       if (!adapter || typeof adapter !== 'object') {
         throw new TypeError('StatusBarAdapter must be an object');
@@ -3276,7 +3131,6 @@
         builtin: Boolean(adapter.builtin),
       };
     }
-
     function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       const adapterRegistry = new Map();
       if (window) {
@@ -3285,7 +3139,6 @@
         }
       }
       const customStore = window?.__agyCustomStatusBarAdapters || new Map();
-
       function cleanupChildMenus(container) {
         if (!container || typeof container.querySelectorAll !== 'function') return;
         const menus = container.querySelectorAll('.agy-ctx-menu');
@@ -3297,7 +3150,6 @@
           }
         }
       }
-
       function removeAdapterDomElements(id) {
         if (!document || typeof document.querySelectorAll !== 'function') return;
         const bars = document.querySelectorAll('.agy-ctx-statusbar');
@@ -3309,7 +3161,6 @@
           }
         }
       }
-
       function getSortedAdapters(slotName) {
         const list = [];
         for (const adapter of adapterRegistry.values()) {
@@ -3323,7 +3174,6 @@
         });
         return list;
       }
-
       function registerStatusBarAdapter(rawAdapter) {
         const adapter = normalizeAdapter(rawAdapter);
         if (adapterRegistry.has(adapter.id)) {
@@ -3340,7 +3190,6 @@
         if (typeof onUpdate === 'function') onUpdate();
         return () => unregisterStatusBarAdapter(adapter.id);
       }
-
       function unregisterStatusBarAdapter(id) {
         const key = typeof id === 'string' ? id.trim() : '';
         if (!key || !adapterRegistry.has(key)) return false;
@@ -3354,7 +3203,6 @@
         if (typeof onUpdate === 'function') onUpdate();
         return true;
       }
-
       function registerBuiltinAdapters(builtins) {
         for (const b of builtins) {
           const normalized = normalizeAdapter({ ...b, builtin: true });
@@ -3367,7 +3215,6 @@
           } catch {}
         }
       }
-
       function ensureBarStructure(barEl) {
         let leftEl = barEl.querySelector('.agy-ctx-left');
         let rightEl = barEl.querySelector('.agy-ctx-right');
@@ -3382,12 +3229,10 @@
         }
         return { leftEl, rightEl };
       }
-
       function renderSlotAdapters(slotEl, slotName, ctx) {
         if (!slotEl) return;
         const adapters = getSortedAdapters(slotName);
         const activeIds = new Set(adapters.map((a) => a.id));
-
         if (slotEl.querySelectorAll) {
           const existingNodes = slotEl.querySelectorAll('[data-agy-adapter-id]');
           for (const node of existingNodes) {
@@ -3398,7 +3243,6 @@
             }
           }
         }
-
         const orderedEls = [];
         for (const adapter of adapters) {
           let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
@@ -3445,7 +3289,6 @@
           }
           if (itemEl) orderedEls.push(itemEl);
         }
-
         if (orderedEls.length > 1 && Array.isArray(slotEl.children)) {
           let outOfOrder = false;
           for (let i = 0; i < orderedEls.length; i++) {
@@ -3474,7 +3317,6 @@
           }
         }
       }
-
       function getAdapters() {
         return getSortedAdapters().map((a) => ({
           id: a.id,
@@ -3483,7 +3325,6 @@
           builtin: Boolean(a.builtin),
         }));
       }
-
       return {
         registerAdapter: registerStatusBarAdapter,
         unregisterAdapter: unregisterStatusBarAdapter,
@@ -3494,20 +3335,16 @@
         renderSlotAdapters,
       };
     }
-
     module.exports = {
       normalizeAdapter,
       createAdapterRegistry,
     };
-
   },
   "./adapters/core-metrics": function(module, exports, __require) {
     const require = (spec) => __require("./adapters", spec);
     'use strict';
-
     const { PRESET_CONTEXT_WINDOWS } = require('../context-window-policy');
     const { fmtK, escHtml } = require('../dom-styles');
-
     function createCoreMetricsAdapter({
       document,
       setHtml,
@@ -3527,7 +3364,6 @@
           }
           return;
         }
-
         if (document && typeof document.querySelectorAll === 'function') {
           const openMenus = document.querySelectorAll('.agy-ctx-menu');
           for (const m of openMenus) {
@@ -3539,7 +3375,6 @@
             }
           }
         }
-
         const resolveCurrentCascadeId = () => view?.getAttribute?.('data-cascade-id') || cascadeId;
         const currentCw = getConversationContextWindow(view, resolveCurrentCascadeId());
         const currentKNum = parseInt(currentCw, 10) || 512;
@@ -3547,13 +3382,11 @@
         menu.className = 'agy-ctx-menu';
         menu.setAttribute?.('data-agy-no-translate', 'true');
         menu.setAttribute?.('translate', 'no');
-
         if (typeof menu.addEventListener === 'function') {
           for (const evtName of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
             menu.addEventListener(evtName, (ev) => ev.stopPropagation());
           }
         }
-
         const activeHdrCid = resolveCurrentCascadeId();
         const sessionLabel = activeHdrCid && activeHdrCid !== 'remote-session' ? activeHdrCid.slice(0, 8) : '현재 세션';
         const hdr = document.createElement('div');
@@ -3563,7 +3396,6 @@
           <span style="opacity:0.75">${escHtml(sessionLabel)}</span>
         `);
         menu.appendChild(hdr);
-
         const customRow = document.createElement('div');
         customRow.className = 'agy-ctx-custom-row';
         setHtml(customRow, `
@@ -3572,13 +3404,11 @@
           <button type="button" class="agy-ctx-custom-apply">적용</button>
         `);
         menu.appendChild(customRow);
-
         let iframeDoc = null;
         try {
           iframeDoc = document?.querySelector?.('ga-remote-control iframe')?.contentDocument || null;
         } catch {}
         const winObj = document?.defaultView || null;
-
         let attachTimer = null;
         const closeMenu = () => {
           if (attachTimer !== null) {
@@ -3593,7 +3423,6 @@
           try { winObj?.removeEventListener?.('blur', closeMenu); } catch {}
         };
         menu.__agyCleanup = closeMenu;
-
         const inputEl = customRow.querySelector('.agy-ctx-custom-input');
         const applyBtn = customRow.querySelector('.agy-ctx-custom-apply');
         const applyCustomInput = () => {
@@ -3607,7 +3436,6 @@
           closeMenu();
           updateAll();
         };
-
         if (applyBtn) {
           applyBtn.onclick = (e) => {
             e.preventDefault();
@@ -3627,12 +3455,10 @@
             }
           };
         }
-
         const optionsList = [...PRESET_CONTEXT_WINDOWS];
         if (currentCw && !optionsList.includes(currentCw)) {
           optionsList.unshift(currentCw);
         }
-
         for (const cw of optionsList) {
           const item = document.createElement('div');
           item.className = 'agy-ctx-menu-item' + (cw === currentCw ? ' active' : '');
@@ -3650,7 +3476,6 @@
           };
           menu.appendChild(item);
         }
-
         const outsideHandler = (e) => {
           if (!menu.contains || (!menu.contains(e.target) && e.target !== limitBtn)) {
             closeMenu();
@@ -3673,7 +3498,6 @@
         }, 10);
         barEl.appendChild(menu);
       }
-
       return {
         id: 'core-metrics',
         slot: 'left',
@@ -3691,14 +3515,11 @@
           const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
           const usedStr = stats ? fmtK(used) : '…';
           const cachePct = stats ? stats.cachePct : 0;
-
           const colorClass = pct >= 85 ? 'agy-ctx-crit' : pct >= 65 ? 'agy-ctx-warn' : 'agy-ctx-ok';
           const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
-
           const limitModClass = maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : (maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '');
           const titleSessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재';
           const limitTitle = `이 세션(${titleSessionLabel})의 컨텍스트 한도: ${currentCw} (${cwStore.getQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
-
           let quotaHtml = '';
           if (quota) {
             const qParts = [];
@@ -3712,7 +3533,6 @@
               quotaHtml = `<span class="agy-ctx-sep agy-ctx-sep-pipe">|</span><span class="agy-ctx-group agy-ctx-group-quota">${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
             }
           }
-
           const html = `
             <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
               <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
@@ -3722,7 +3542,6 @@
             </span>
             <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
           `;
-
           if (containerEl.__lastHtml !== html) {
             containerEl.__lastHtml = html;
             const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
@@ -3731,7 +3550,6 @@
             const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
             const cacheEl = containerEl.querySelector?.('.agy-ctx-cache');
             const quotaSlotEl = containerEl.querySelector?.('.agy-ctx-quota-slot');
-
             if (barFill && pctValEl && usedValEl && existingLimitBtn && cacheEl && quotaSlotEl) {
               if (barFill.style) {
                 barFill.style.width = `${pct}%`;
@@ -3758,10 +3576,8 @@
               }
               return;
             }
-
             containerEl.__lastQuotaHtml = quotaHtml;
             setHtml(containerEl, html);
-
             const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
             if (limitBtn) {
               limitBtn.onclick = (e) => {
@@ -3786,16 +3602,13 @@
         },
       };
     }
-
     module.exports = {
       createCoreMetricsAdapter,
     };
-
   },
   "./adapters/compact-button": function(module, exports, __require) {
     const require = (spec) => __require("./adapters", spec);
     'use strict';
-
     function createCompactButtonAdapter({ runCompactForInputBox }) {
       return {
         id: 'compact',
@@ -3810,19 +3623,15 @@
         },
       };
     }
-
     module.exports = {
       createCompactButtonAdapter,
     };
-
   },
   "./adapters/context-button": function(module, exports, __require) {
     const require = (spec) => __require("./adapters", spec);
     'use strict';
-
     const { fmtNum, escHtml } = require('../dom-styles');
     const { getChatModelFromMeta, extractStatsFromMetas } = require('../rpc-client');
-
     function createContextButtonAdapter({
       window,
       document,
@@ -3841,7 +3650,6 @@
           }
           return;
         }
-
         if (!view) {
           view = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
         }
@@ -3873,7 +3681,6 @@
           ? slice.totalStepsLength
           : (typeof rcStepLen === 'number' && rcStepLen > 0 ? rcStepLen : 0);
         const trajectoryId = slice?.trajectoryId || '';
-
         const backdrop = document.createElement('div');
         backdrop.id = 'agy-ctx-debug-modal';
         backdrop.className = 'agy-ctx-modal-backdrop';
@@ -3893,7 +3700,6 @@
             </div>
           </div>
         `);
-
         const closeModal = () => {
           backdrop.remove();
           window?.removeEventListener?.('keydown', onKeyDown);
@@ -3907,10 +3713,8 @@
           if (e.target === backdrop) closeModal();
         };
         document.body.appendChild(backdrop);
-
         const closeBtn = backdrop.querySelector('#agy-ctx-modal-close');
         if (closeBtn) closeBtn.onclick = closeModal;
-
         const inlineBtn = backdrop.querySelector('#agy-ctx-toggle-inline-debug');
         if (inlineBtn) {
           inlineBtn.onclick = () => {
@@ -3920,7 +3724,6 @@
             }
           };
         }
-
         const bodyEl = backdrop.querySelector('#agy-ctx-modal-body');
         const remoteSvc = hostBridge.getRemoteRpcServiceForElement ? hostBridge.getRemoteRpcServiceForElement(inputBox || view) : null;
         if (!cascadeId || (!csrf && !remoteSvc)) {
@@ -3929,7 +3732,6 @@
           }
           return;
         }
-
         try {
           let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
           let metas = [];
@@ -4006,7 +3808,6 @@
               }
             }
           }
-
           let latestCwm = null;
           let latestSections = [];
           let latestModel = '';
@@ -4023,11 +3824,9 @@
               latestSections = cm.promptSections;
             }
           }
-
           const used = parsed.used || 0;
           const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
           const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
-
           const groups = latestCwm?.tokenBreakdown?.groups || [];
           let breakdownHtml = '';
           if (groups.length > 0) {
@@ -4068,7 +3867,6 @@
               </div>
             `;
           }
-
           const recentTurns = [];
           for (let i = metas.length - 1; i >= 0 && recentTurns.length < 12; i--) {
             const m = metas[i];
@@ -4094,10 +3892,8 @@
               </tr>
             `);
           }
-
           const info = hostBridge.getModelSelectorContextForView(view);
           const reduxSessionCw = info?.reduxStore?.getState?.()?.modelSelection?.byConversation?.[cascadeId]?.contextWindow || currentCw;
-
           if (bodyEl) {
             setHtml(bodyEl, `
               <div class="agy-ctx-card-grid">
@@ -4149,7 +3945,6 @@
           }
         }
       }
-
       return {
         id: 'context',
         slot: 'right',
@@ -4164,16 +3959,13 @@
         openOrToggleDebugModal,
       };
     }
-
     module.exports = {
       createContextButtonAdapter,
     };
-
   },
   "./index": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-
     const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
     const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
     const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
@@ -4182,9 +3974,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-
-    const STATUSBAR_VERSION = 'v20';
-
+    const STATUSBAR_VERSION = 'v21';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
@@ -4223,7 +4013,6 @@
       }
       return false;
     }
-
     function nodeTouchesStatusBarAnchors(node) {
       if (!node || node.nodeType !== 1) return false;
       const tag = String(node.tagName || '').toUpperCase();
@@ -4245,7 +4034,6 @@
       }
       return false;
     }
-
     function isRelevantStatusBarMutation(mutations) {
       if (!Array.isArray(mutations) || mutations.length === 0) return true;
       for (let i = 0; i < mutations.length; i++) {
@@ -4287,7 +4075,6 @@
       }
       return false;
     }
-
     function injectScriptText(win, doc, code) {
       if (!code || !doc?.head) return false;
       const s = doc.createElement('script');
@@ -4307,7 +4094,6 @@
       doc.head.appendChild(s);
       return true;
     }
-
     function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
       try {
         const isRemoteWeb = Boolean(
@@ -4315,7 +4101,6 @@
         );
         if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
         const effFetch = fetchFn || win?.fetch;
-
         const loadScript = (flagKey, url, fallbackCode) => {
           if (win[flagKey]) return Promise.resolve(false);
           win[flagKey] = true;
@@ -4342,7 +4127,6 @@
               return false;
             });
         };
-
         const resolveHostInfo = async () => {
           if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
             return { resolved: true, ...win.__agyHostInstalledPlugins };
@@ -4359,7 +4143,6 @@
           }
           return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
         };
-
         let attempts = 0;
         const tryLoadInstalledCompanions = async () => {
           attempts += 1;
@@ -4374,7 +4157,6 @@
             }
             return info;
           }
-
           const tasks = [];
           if (info.hasMcpManager && !win.agyMcpManager) {
             tasks.push(
@@ -4397,32 +4179,26 @@
           await Promise.all(tasks);
           return info;
         };
-
         return tryLoadInstalledCompanions();
       } catch {
         return Promise.resolve(null);
       }
     }
-
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
       const doc = env.document || win?.document || (typeof document !== 'undefined' ? document : null);
       const ls = env.localStorage || win?.localStorage || (typeof localStorage !== 'undefined' ? localStorage : null);
       const fetchFn = env.fetch || win?.fetch || (typeof fetch !== 'undefined' ? fetch : null);
-
       if (!win || !doc) return null;
-
       if (win.__agyStatusBarActiveVersion === STATUSBAR_VERSION && win.__agyStatusBarCleanup) {
         return win.agyStatusBar;
       }
       if (win.__agyStatusBarCleanup) {
         try { win.__agyStatusBarCleanup(); } catch {}
       }
-
       const underDefaultCwSet = new Set(['128K', '256K']);
       const refreshStyles = () => ensureStyleElement(doc, underDefaultCwSet);
       let hostBridge = null;
-
       const cwStore = createContextWindowStore({
         document: doc,
         localStorage: ls,
@@ -4446,9 +4222,7 @@
           }
         },
       });
-
       refreshStyles();
-
       const setHtml = createTrustedHtmlSetter(win, doc);
       hostBridge = createHostBridge({
         window: win,
@@ -4458,7 +4232,6 @@
         cwStore,
       });
       ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge);
-
       const rpcClient = createRpcClient({
         window: win,
         fetchFn,
@@ -4466,7 +4239,6 @@
         getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,
         getRemoteRpcServiceForElement: hostBridge.getRemoteRpcServiceForElement,
       });
-
       function getConversationContextWindow(view, cascadeId) {
         if (cascadeId && !cwStore.hasSessionOverride(cascadeId)) {
           const info = hostBridge.getModelSelectorContextForView(view);
@@ -4477,7 +4249,6 @@
         hostBridge.applyContextWindowToEngine(view, cascadeId, saved);
         return saved;
       }
-
       function setConversationContextWindow(view, cascadeId, rawTargetCw) {
         const norm = cwStore.saveContextWindowSetting(cascadeId, rawTargetCw);
         if (!norm) return null;
@@ -4489,7 +4260,6 @@
         hostBridge.applyContextWindowToEngine(view, cascadeId, norm, true);
         return norm;
       }
-
       function cycleConversationContextWindow(view, cascadeId) {
         const current = cwStore.getSavedContextWindow(cascadeId);
         const idx = CONTEXT_WINDOWS.indexOf(current);
@@ -4497,14 +4267,12 @@
         setConversationContextWindow(view, cascadeId, next);
         return next;
       }
-
       const registry = createAdapterRegistry({
         window: win,
         document: doc,
         setHtml,
         onUpdate: () => updateAll(),
       });
-
       const coreMetricsAdapter = createCoreMetricsAdapter({
         document: doc,
         setHtml,
@@ -4514,11 +4282,9 @@
         cycleConversationContextWindow,
         updateAll: () => updateAll(),
       });
-
       const compactButtonAdapter = createCompactButtonAdapter({
         runCompactForInputBox: hostBridge.runCompactForInputBox,
       });
-
       const contextButtonAdapter = createContextButtonAdapter({
         window: win,
         document: doc,
@@ -4527,13 +4293,11 @@
         cwStore,
         hostBridge,
       });
-
       registry.registerBuiltinAdapters([
         coreMetricsAdapter,
         compactButtonAdapter,
         contextButtonAdapter,
       ]);
-
       function renderBar(barEl, view, inputBox, stats, quota, precomputedCw) {
         const cascadeId = view.getAttribute('data-cascade-id');
         const { leftEl, rightEl } = registry.ensureBarStructure(barEl);
@@ -4553,7 +4317,6 @@
         registry.renderSlotAdapters(leftEl, 'left', ctx);
         registry.renderSlotAdapters(rightEl, 'right', ctx);
       }
-
       function updateAll() {
         refreshStyles();
         hostBridge.ensureContextWindowSelectorFlag();
@@ -4563,22 +4326,18 @@
         const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
         if (!views.length) return;
         if (!csrf && !hostBridge.getRemoteRpcServiceForElement(views[0])) return;
-
         const quotaPromise = rpcClient.fetchQuota(csrf, views[0]);
         hostBridge.syncDesktopAnnotations(csrf, views[0], () => updateAll());
-
         for (const view of views) {
           const cascadeId = view.getAttribute('data-cascade-id');
           const inputBox = view.querySelector('[data-testid="agent-input-box"]');
           if (!cascadeId || !inputBox) continue;
-
           if (view.__lastTrackedCascadeId !== cascadeId) {
             view.__lastTrackedCascadeId = cascadeId;
             view.__lastObservedDomCw = null;
             view.__lastAppliedTargetCw = null;
             view.__ignoreDomCwUntil = Date.now() + 500;
           }
-
           const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
           const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
           const canAdoptFromDom = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
@@ -4588,13 +4347,11 @@
               cwStore.saveContextWindowSetting(cascadeId, domCw);
             }
           }
-
           const targetCw = getConversationContextWindow(view, cascadeId);
           view.__lastAppliedTargetCw = targetCw;
           if (triggerEl && canAdoptFromDom) {
             view.__lastObservedDomCw = triggerEl.getAttribute('data-context-window') || targetCw;
           }
-
           let barEl = inputBox.querySelector('.agy-ctx-statusbar');
           if (!barEl) {
             barEl = doc.createElement('div');
@@ -4603,9 +4360,7 @@
             barEl.setAttribute?.('translate', 'no');
             inputBox.appendChild(barEl);
           }
-
           const cachedData = rpcClient.getCachedStats(cascadeId);
-
           Promise.all([
             rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
             quotaPromise,
@@ -4616,7 +4371,6 @@
           });
         }
       }
-
       win.agyStatusBar = {
         version: STATUSBAR_VERSION,
         registerAdapter: registry.registerAdapter,
@@ -4626,7 +4380,6 @@
         getConversationContextWindow,
         setConversationContextWindow,
       };
-
       cwStore.loadPersistentContextSettings().then(() => {
         hostBridge.syncDesktopAnnotations(
           win.__APP_CONFIG__?.csrfToken,
@@ -4637,7 +4390,6 @@
         updateAll();
       });
       updateAll();
-
       const setIntervalFn = env.setInterval || win.setInterval || setInterval;
       const clearIntervalFn = env.clearInterval || win.clearInterval || clearInterval;
       const timer = setIntervalFn(updateAll, 3000);
@@ -4682,7 +4434,6 @@
           }
         }
       }) : null;
-
       function attachBodyObserver() {
         if (!obs) return;
         const rootTarget = doc.body || doc.documentElement;
@@ -4698,7 +4449,6 @@
         });
       }
       attachBodyObserver();
-
       win.__agyStatusBarCleanup = () => {
         delete win.__agyStatusBarActiveVersion;
         clearIntervalFn(timer);
@@ -4719,14 +4469,11 @@
         for (const hv of hostViews) hv.remove();
       };
       win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
-
       return win.agyStatusBar;
     }
-
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       mountStatusBar();
     }
-
     module.exports = {
       STATUSBAR_VERSION,
       isIgnoredCustomOrTranslatedNode,
@@ -4734,7 +4481,6 @@
       ensureRemoteCompanionScripts,
       mountStatusBar,
     };
-
   }
   };
   const __cache = {};
