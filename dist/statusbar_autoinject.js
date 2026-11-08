@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.16
+// @version      1.3.17
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -717,6 +717,7 @@
         }
         .agy-rc-host-box .agy-ctx-statusbar {
           margin-top: 0;
+          min-height: 24px;
           padding: 5px 10px;
           justify-content: center;
           row-gap: 4px;
@@ -730,6 +731,7 @@
         @media (max-width: 640px) {
           .agy-ctx-statusbar,
           .agy-rc-host-box .agy-ctx-statusbar {
+            min-height: 40px;
             padding: 4px 8px;
             row-gap: 3px;
             column-gap: 8px;
@@ -2206,6 +2208,15 @@
                 (mName === 'handleUrlChanged' || mName === 'onIframeLoad' || mName === 'onWindowOnline' || mName === 'loadInstances')
               ) {
                 return;
+              }
+              if (mName === 'handleUrlChanged' && typeof arguments[0] === 'string' && arguments[0]) {
+                const ignoreUuid = typeof this?.selectedInstanceUuid === 'function' ? this.selectedInstanceUuid() : '';
+                const m = arguments[0].match(UUID_RE);
+                if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
+                  window.__agySniffedCascadeId = m[0];
+                  window.__agySniffedCascadeTs = Date.now();
+                  if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
+                }
               }
               return origFn.apply(this, arguments);
             };
@@ -3989,7 +4000,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v22';
+    const STATUSBAR_VERSION = 'v23';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {

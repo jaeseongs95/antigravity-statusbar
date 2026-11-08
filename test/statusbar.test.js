@@ -1829,6 +1829,44 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     api.updateAll();
     assert.ok(coreNode.innerHTML.includes('192k'), 'session switch must synchronously update to session-2 cached 192k without waiting for async RPC');
     assert.ok(coreNode.innerHTML.includes('[ 256k ▾ ]'), 'session switch must synchronously update to session-2 limit [ 256k ▾ ] without waiting for async RPC');
+
+    // Verify mobile RemoteControlComponent.prototype.handleUrlChanged sniffs session UUID even when handleIframeMessage was bound at construction time
+    let sniffedViaUrlChanged = null;
+    const rcWin = {
+      __agyOnCascadeSniffed(cid) {
+        sniffedViaUrlChanged = cid;
+      },
+    };
+    class BoundMobileRc {
+      selectedInstanceUuid() {
+        return '547d3ff8-7d19-415f-a68a-9bbf28c06f6f-v2';
+      }
+      proxyCommand() {}
+      handleUrlChanged(p) {
+        this.lastSyncedChildPath = p;
+      }
+    }
+    const mobileRcInst = new BoundMobileRc();
+    const hbMobile = createHostBridge({
+      window: {
+        ...rcWin,
+        default_GoogleAntigravity: { m: { RemoteControlComponent: BoundMobileRc } },
+      },
+      document: { querySelector: () => null },
+      localStorage: store,
+      fetchFn: async () => ({ ok: true }),
+      cwStore: store,
+    });
+    hbMobile.getRemoteControlInstance((cid) => {
+      sniffedViaUrlChanged = cid;
+    });
+    mobileRcInst.handleUrlChanged('/c/1f3f7633-f0b7-4fc7-a958-9fb667c85623');
+    assert.equal(
+      sniffedViaUrlChanged,
+      '1f3f7633-f0b7-4fc7-a958-9fb667c85623',
+      'mobile handleUrlChanged must immediately notify onCascadeChange with the new session UUID'
+    );
+
     sandbox.window.__agyStatusBarCleanup();
   });
 });

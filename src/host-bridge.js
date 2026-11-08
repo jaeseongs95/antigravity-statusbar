@@ -974,6 +974,15 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
           ) {
             return;
           }
+          if (mName === 'handleUrlChanged' && typeof arguments[0] === 'string' && arguments[0]) {
+            const ignoreUuid = typeof this?.selectedInstanceUuid === 'function' ? this.selectedInstanceUuid() : '';
+            const m = arguments[0].match(UUID_RE);
+            if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
+              window.__agySniffedCascadeId = m[0];
+              window.__agySniffedCascadeTs = Date.now();
+              if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
+            }
+          }
           return origFn.apply(this, arguments);
         };
       }

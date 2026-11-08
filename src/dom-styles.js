@@ -332,6 +332,7 @@ const STYLE_CSS = `
     }
     .agy-rc-host-box .agy-ctx-statusbar {
       margin-top: 0;
+      min-height: 24px;
       padding: 5px 10px;
       justify-content: center;
       row-gap: 4px;
@@ -345,6 +346,7 @@ const STYLE_CSS = `
     @media (max-width: 640px) {
       .agy-ctx-statusbar,
       .agy-rc-host-box .agy-ctx-statusbar {
+        min-height: 40px;
         padding: 4px 8px;
         row-gap: 3px;
         column-gap: 8px;
