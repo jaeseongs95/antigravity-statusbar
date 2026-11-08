@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v23';
+const STATUSBAR_VERSION = 'v24';
 
 function isIgnoredCustomOrTranslatedNode(node) {
   let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
@@ -233,7 +233,14 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
 function mountStatusBar(env = {}) {
   const win = env.window || (typeof window !== 'undefined' ? window : null);
   const doc = env.document || win?.document || (typeof document !== 'undefined' ? document : null);
-  const ls = env.localStorage || win?.localStorage || (typeof localStorage !== 'undefined' ? localStorage : null);
+  let ls = env.localStorage || null;
+  if (!ls) {
+    try {
+      ls = win?.localStorage || (typeof localStorage !== 'undefined' ? localStorage : null);
+    } catch {
+      ls = null;
+    }
+  }
   const fetchFn = env.fetch || win?.fetch || (typeof fetch !== 'undefined' ? fetch : null);
 
   if (!win || !doc) return null;
@@ -493,14 +500,16 @@ function mountStatusBar(env = {}) {
       }
       const trigger = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
       if (cid && trigger) {
-        const actual = cwStore.normalize(trigger.getAttribute('data-context-window')) || '256K';
+        const rawDomCw = trigger.getAttribute('data-context-window');
+        const actual = cwStore.normalize(rawDomCw) || '256K';
         const expected = cwStore.getSavedContextWindow(cid);
         const model = hostBridge.getSelectedModelKey(view, cid);
         const expectedKey = (model || '') + ':' + String(expected);
         const lastByCid = win.__agyLastAppliedContextWindowByCascade?.[cid];
-        if (actual !== expected && lastByCid !== expectedKey && win.__agyLastAppliedContextWindow !== expectedKey) {
+        const domMissingOrDrifted = !rawDomCw || actual !== expected;
+        if (domMissingOrDrifted && (lastByCid !== expectedKey || win.__agyLastAppliedContextWindow !== expectedKey || !rawDomCw || actual !== expected)) {
           const canAdopt = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
-          if (canAdopt && PRESET_CONTEXT_WINDOWS.includes(actual) && view.__lastObservedDomCw && view.__lastObservedDomCw !== actual && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
+          if (canAdopt && rawDomCw && PRESET_CONTEXT_WINDOWS.includes(actual) && view.__lastObservedDomCw && view.__lastObservedDomCw !== actual && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
             cwStore.saveContextWindowSetting(cid, actual);
             view.__lastAppliedTargetCw = actual;
             view.__lastObservedDomCw = actual;

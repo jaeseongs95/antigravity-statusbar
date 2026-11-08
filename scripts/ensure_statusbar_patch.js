@@ -432,7 +432,13 @@ async function injectViaCdpLive() {
   const scriptHash = sha256Hex(scriptCode).slice(0, 16);
   const targets = await httpGetJson(port, '/json/list', 1500);
   const pageTargets = (Array.isArray(targets) ? targets : []).filter(
-    (t) => t && t.type === 'page' && t.webSocketDebuggerUrl && !String(t.url || '').startsWith('devtools://')
+    (t) =>
+      t &&
+      t.type === 'page' &&
+      t.webSocketDebuggerUrl &&
+      !String(t.url || '').startsWith('devtools://') &&
+      !String(t.url || '').startsWith('data:') &&
+      !String(t.url || '').startsWith('about:')
   );
 
   let injectedCount = 0;

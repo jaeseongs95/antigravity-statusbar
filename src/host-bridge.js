@@ -1736,6 +1736,152 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     return `${cascadeId || ''}:${String(raw ?? '')}`;
   }
 
+  function extractModelValFromModelOrAlias(moa) {
+    if (!moa || typeof moa !== 'object') return undefined;
+    if (moa.model !== undefined) return moa.model;
+    if (moa.choice && (moa.choice.case === 'model' || moa.choice.case === 'alias') && moa.choice.value !== undefined) {
+      return moa.choice.value;
+    }
+    return undefined;
+  }
+
+  function resolveModelValueFromLabel(state, label) {
+    if (!label || typeof label !== 'string') return undefined;
+    const trimmed = label.trim();
+    if (!trimmed) return undefined;
+    const configs = state?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+    if (!Array.isArray(configs)) return undefined;
+    for (const cfg of configs) {
+      if (cfg && cfg.label === trimmed) {
+        const v = extractModelValFromModelOrAlias(cfg.modelOrAlias);
+        if (v !== undefined) return v;
+      }
+    }
+    return undefined;
+  }
+
+  function extractLabelFromSyncedKey(syncedKey) {
+    if (typeof syncedKey !== 'string' || !syncedKey) return undefined;
+    // syncedKey format: `${executionId}:${modelLabel}:${contextWindow}` (3 parts)
+    // or `${executionId}:${stepIndex}:${modelLabel}:${contextWindow}` (4 parts)
+    const parts = syncedKey.split(':');
+    if (parts.length >= 4) {
+      const label = parts.slice(2, parts.length - 1).join(':').trim();
+      if (label) return label;
+    }
+    if (parts.length === 3) {
+      const label = parts[1].trim();
+      if (label) return label;
+    }
+    return undefined;
+  }
+
+  function sanitizePoisonedModelSelection(reduxStore) {
+    if (!reduxStore || typeof reduxStore.getState !== 'function' || typeof reduxStore.dispatch !== 'function') {
+      return;
+    }
+    try {
+      if (reduxStore.__agyPoisonSanitizedV24d) return;
+      const st = reduxStore.getState();
+      const ms = st?.modelSelection;
+      if (!ms || typeof ms !== 'object') return;
+      const syncMap = ms.trajectorySync;
+      const byConvoMap = ms.byConversation;
+      if (!syncMap || typeof syncMap !== 'object') return;
+
+      const overrideDefaultModel = extractModelValFromModelOrAlias(
+        st?.userStatus?.cascadeModelConfigData?.defaultOverrideModelConfig?.modelOrAlias
+      );
+      let cleanConvoModel = undefined;
+      for (const cid of Object.keys(syncMap)) {
+        const entry = syncMap[cid];
+        const step = entry?.pick?.atStep;
+        if (step !== 999999 && step !== -1 && step !== 0) {
+          const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+          const mVal = resolveModelValueFromLabel(st, syncedLabel);
+          if (mVal !== undefined) {
+            cleanConvoModel = mVal;
+            if (syncedLabel && /\(medium\)/i.test(syncedLabel)) break;
+          }
+        }
+      }
+
+      const preferredModel = overrideDefaultModel ?? cleanConvoModel;
+      const poisonedCids = [];
+      let recoveredTargetModel = undefined;
+
+      for (const cid of Object.keys(syncMap)) {
+        const entry = syncMap[cid];
+        const step = entry?.pick?.atStep;
+        const convoModel = byConvoMap?.[cid]?.model;
+        const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+        const isPoisonedLow =
+          step === 999999 ||
+          step === -1 ||
+          step === 0 ||
+          (preferredModel !== undefined &&
+            convoModel !== undefined &&
+            convoModel !== preferredModel &&
+            syncedLabel &&
+            /\(low\)/i.test(syncedLabel));
+        if (isPoisonedLow) {
+          poisonedCids.push(cid);
+          const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
+          if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
+            recoveredTargetModel = syncedModelVal;
+          }
+        }
+      }
+
+      if (poisonedCids.length === 0 && (preferredModel === undefined || ms.default?.model === preferredModel)) {
+        reduxStore.__agyPoisonSanitizedV24d = true;
+        return;
+      }
+      reduxStore.__agyPoisonSanitizedV24d = true;
+
+      const currentDefaultModel = ms.default?.model;
+      const currentDefaultCustomLabel = ms.default?.customLabel;
+      const desiredDefaultCw = cwStore?.getDefaultCw?.() || ms.default?.contextWindow || '256K';
+      const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
+
+      for (const cid of poisonedCids) {
+        const entry = syncMap[cid];
+        const convo = byConvoMap?.[cid];
+        const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+        const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
+        const targetModel =
+          syncedLabel && !/\(low\)/i.test(syncedLabel) && syncedModelVal !== undefined
+            ? syncedModelVal
+            : (preferredModel ?? syncedModelVal ?? safeDefaultModel ?? convo?.model);
+        const targetCw = cwStore?.getSavedContextWindow?.(cid) || convo?.contextWindow || desiredDefaultCw;
+        if (targetModel !== undefined) {
+          reduxStore.dispatch({
+            type: 'modelSelection/modelPicked',
+            payload: {
+              conversationId: cid,
+              model: targetModel,
+              customLabel: undefined,
+              contextWindow: targetCw,
+              pick: { atStep: 0, queuedMessageIds: [] },
+            },
+          });
+        }
+      }
+
+      if (safeDefaultModel !== undefined) {
+        reduxStore.dispatch({
+          type: 'modelSelection/modelPicked',
+          payload: {
+            conversationId: undefined,
+            model: safeDefaultModel,
+            customLabel: safeDefaultModel === currentDefaultModel ? currentDefaultCustomLabel : undefined,
+            contextWindow: desiredDefaultCw,
+          },
+        });
+      }
+    } catch {}
+  }
+
   function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
     const targetCw = cwStore.normalize(rawTargetCw);
     if (!view || !cascadeId || !targetCw) return false;
@@ -1743,6 +1889,9 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     if (!info) return false;
 
     const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
+    if (reduxStore) {
+      sanitizePoisonedModelSelection(reduxStore);
+    }
     if (triggerEl) {
       const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
       if (triggerEl.getAttribute('data-agy-cw-warn') !== warnAttr) {
@@ -1776,10 +1925,19 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       let dispatched = false;
 
       if (currentInRedux !== targetCw || (reduxStore && byConvo?.contextWindow !== targetCw) || force) {
-        const prevDefaultCw = state?.modelSelection?.default?.contextWindow;
+        const prevDefault = state?.modelSelection?.default;
+        const prevDefaultModel = prevDefault?.model;
+        const prevDefaultCustomLabel = prevDefault?.customLabel;
+        const prevDefaultCw = prevDefault?.contextWindow;
         if (reduxStore) {
-          const modelVal = byConvo?.model ?? selectedModelObj?.value ?? state?.modelSelection?.default?.model;
-          const customLabel = byConvo?.customLabel ?? (selectedModelObj?.isCustom ? selectedModelObj?.label : undefined);
+          const syncEntry = state?.modelSelection?.trajectorySync?.[cascadeId];
+          const syncedModelVal =
+            syncEntry?.pick?.atStep === 999999
+              ? resolveModelValueFromLabel(state, extractLabelFromSyncedKey(syncEntry?.syncedKey))
+              : undefined;
+          const modelVal = syncedModelVal ?? byConvo?.model ?? selectedModelObj?.value ?? prevDefaultModel;
+          const isCustomModel = Boolean(selectedModelObj?.isCustom && selectedModelObj?.value === modelVal);
+          const customLabel = isCustomModel ? selectedModelObj?.label : undefined;
           if (modelVal !== undefined) {
             reduxStore.dispatch({
               type: 'modelSelection/modelPicked',
@@ -1788,7 +1946,6 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
                 model: modelVal,
                 customLabel,
                 contextWindow: targetCw,
-                pick: { atStep: 999999, queuedMessageIds: [] },
               },
             });
             dispatched = true;
@@ -1808,13 +1965,21 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
           const nextState = reduxStore.getState();
           const defObj = nextState?.modelSelection?.default;
           const desiredDefaultCw = cwStore.getDefaultCw() || prevDefaultCw || '256K';
-          if (defObj && defObj.contextWindow !== desiredDefaultCw) {
+          const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
+          const desiredDefaultCustomLabel =
+            prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
+          if (
+            defObj &&
+            (defObj.model !== desiredDefaultModel ||
+              defObj.customLabel !== desiredDefaultCustomLabel ||
+              defObj.contextWindow !== desiredDefaultCw)
+          ) {
             reduxStore.dispatch({
               type: 'modelSelection/modelPicked',
               payload: {
                 conversationId: undefined,
-                model: defObj.model,
-                customLabel: defObj.customLabel,
+                model: desiredDefaultModel,
+                customLabel: desiredDefaultCustomLabel,
                 contextWindow: desiredDefaultCw,
               },
             });

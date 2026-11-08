@@ -1867,6 +1867,125 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       'mobile handleUrlChanged must immediately notify onCascadeChange with the new session UUID'
     );
 
+    // 4. ANTIGRAVITY_STATUSBAR-D-0013 regression:
+    //    - applyContextWindowToEngine must NOT dispatch pick: { atStep: 999999 }
+    //    - applying a context window to a Low (1419) session must preserve global default.model as Medium (1418)
+    //    - sessions previously poisoned with pick: { atStep: 999999 } and model: 1419 (Low) while syncedKey says Medium (1418) must be recovered to 1418
+    const dispatchedActions = [];
+    const fakeReduxState = {
+      userStatus: {
+        cascadeModelConfigData: {
+          clientModelConfigs: [
+            { label: 'Gemini 4 Argon (High)', modelOrAlias: { model: 1417 } },
+            { label: 'Gemini 4 Argon (Medium)', modelOrAlias: { model: 1418 } },
+            { label: 'Gemini 4 Argon (Low)', modelOrAlias: { model: 1419 } },
+          ],
+          defaultOverrideModelConfig: { modelOrAlias: { model: 1418 } },
+        },
+      },
+      modelSelection: {
+        byConversation: {
+          'poisoned-convo': { model: 1419, customLabel: 'Gemini 4 Argon (Low)', contextWindow: '384K' },
+          'low-convo': { model: 1419, customLabel: 'Gemini 4 Argon (Low)', contextWindow: '256K' },
+        },
+        default: { model: 1418, customLabel: undefined, contextWindow: '512K' },
+        trajectorySync: {
+          'poisoned-convo': {
+            syncedKey: 'exec-1:10:Gemini 4 Argon (Medium):384K',
+            pick: { atStep: 999999, queuedMessageIds: [] },
+          },
+          'low-convo': {
+            syncedKey: 'exec-2:5:Gemini 4 Argon (Low):256K',
+          },
+        },
+      },
+    };
+
+    const fakeReduxStore = {
+      getState() {
+        return fakeReduxState;
+      },
+      dispatch(action) {
+        dispatchedActions.push(action);
+        if (action.type === 'modelSelection/modelPicked') {
+          const { pick, ...rest } = action.payload;
+          const cid = rest.conversationId;
+          if (cid) {
+            fakeReduxState.modelSelection.byConversation[cid] = {
+              model: rest.model,
+              customLabel: rest.customLabel,
+              contextWindow: rest.contextWindow,
+            };
+          }
+          // Host YBa reducer unconditionally overwrites default on modelPicked!
+          fakeReduxState.modelSelection.default = {
+            model: rest.model,
+            customLabel: rest.customLabel,
+            contextWindow: rest.contextWindow,
+          };
+          if (pick) {
+            const key = cid ?? '';
+            fakeReduxState.modelSelection.trajectorySync[key] = {
+              ...fakeReduxState.modelSelection.trajectorySync[key],
+              pick: { atStep: pick.atStep, queuedMessageIds: [...(pick.queuedMessageIds || [])] },
+            };
+          }
+        }
+      },
+    };
+
+    const reduxTriggerEl = {
+      isConnected: true,
+      attrs: { 'data-context-window': '256K' },
+      getAttribute(k) { return this.attrs[k] ?? null; },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      __reactFiber$redux: {
+        memoizedProps: {
+          value: {
+            store: fakeReduxStore,
+            selectedModel: { value: 1419, label: 'Gemini 4 Argon (Low)', isCustom: false, contextWindowOptions: [] },
+            setSelectedModel() {},
+          },
+        },
+        return: null,
+      },
+    };
+    const reduxView = {
+      querySelector(sel) {
+        return sel === '[data-testid="model-selector-trigger"]' ? reduxTriggerEl : null;
+      },
+    };
+    const hbRedux = createHostBridge({
+      window: {},
+      document: { querySelectorAll: () => [reduxView] },
+      localStorage: store,
+      fetchFn: async () => ({ ok: true }),
+      cwStore: store,
+    });
+
+    const appliedOk = hbRedux.applyContextWindowToEngine(reduxView, 'low-convo', '384K');
+    assert.equal(appliedOk, true);
+    assert.equal(
+      fakeReduxState.modelSelection.default.model,
+      1418,
+      'global default.model must remain Medium (1418) even after applying context window to a Low (1419) conversation'
+    );
+    assert.equal(
+      fakeReduxState.modelSelection.byConversation['poisoned-convo'].model,
+      1418,
+      'poisoned conversation with atStep=999999 and syncedKey Medium must be recovered from Low (1419) to Medium (1418)'
+    );
+    assert.notEqual(
+      fakeReduxState.modelSelection.trajectorySync['poisoned-convo']?.pick?.atStep,
+      999999,
+      'poisoned pick.atStep=999999 must be cleared so trajectoryModelObserved sync works'
+    );
+    assert.equal(
+      dispatchedActions.some((a) => a.payload?.pick?.atStep === 999999),
+      false,
+      'applyContextWindowToEngine must never dispatch pick.atStep === 999999'
+    );
+
     sandbox.window.__agyStatusBarCleanup();
   });
 });
