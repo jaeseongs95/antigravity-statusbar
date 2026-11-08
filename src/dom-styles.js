@@ -7,6 +7,7 @@ const STYLE_CSS = `
       justify-content: center;
       row-gap: 4px;
       column-gap: 10px;
+      min-height: 22px;
       padding: 4px 10px 2px 10px;
       margin-top: 2px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

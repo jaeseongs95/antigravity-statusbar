@@ -380,11 +380,26 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     return promise;
   }
 
+  function getImmediateStats(cascadeId, inputBox) {
+    const cached = cascadeId ? (stateCache.get(cascadeId) || null) : null;
+    const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
+    const fullState = asp?.getState?.();
+    if (!fullState || typeof fullState !== 'object') {
+      return cached;
+    }
+    const merged = applyRealtimeCompactionAndUsage(cached ? { ...cached, foundCtx: true } : null, fullState);
+    if (!merged || (!cached && !merged.foundCtx && !merged.foundUsage)) {
+      return cached;
+    }
+    return cached ? { ...cached, used: merged.used, trajectoryMax: merged.trajectoryMax } : merged;
+  }
+
   return {
     fetchQuota,
     fetchCascadeStats,
     fetchTailMetasBounded,
     applyRealtimeCompactionAndUsage,
+    getImmediateStats,
     getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
     getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
     getLatestQuota: () => quotaData,

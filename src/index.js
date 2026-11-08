@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v21';
+const STATUSBAR_VERSION = 'v22';
 
 function isIgnoredCustomOrTranslatedNode(node) {
   let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
@@ -431,13 +431,18 @@ function mountStatusBar(env = {}) {
       }
 
       const cachedData = rpcClient.getCachedStats(cascadeId);
+      const immediateData = rpcClient.getImmediateStats
+        ? rpcClient.getImmediateStats(cascadeId, inputBox)
+        : cachedData;
+
+      renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw);
 
       Promise.all([
         rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
         quotaPromise,
       ]).then(([data, freshQuota]) => {
         if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
-        const finalData = data || cachedData;
+        const finalData = data || cachedData || immediateData;
         renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw);
       });
     }

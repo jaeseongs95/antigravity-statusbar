@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.15
+// @version      1.3.16
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -392,6 +392,7 @@
           justify-content: center;
           row-gap: 4px;
           column-gap: 10px;
+          min-height: 22px;
           padding: 4px 10px 2px 10px;
           margin-top: 2px;
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1260,11 +1261,25 @@
         inFlightStats.set(cascadeId, promise);
         return promise;
       }
+      function getImmediateStats(cascadeId, inputBox) {
+        const cached = cascadeId ? (stateCache.get(cascadeId) || null) : null;
+        const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
+        const fullState = asp?.getState?.();
+        if (!fullState || typeof fullState !== 'object') {
+          return cached;
+        }
+        const merged = applyRealtimeCompactionAndUsage(cached ? { ...cached, foundCtx: true } : null, fullState);
+        if (!merged || (!cached && !merged.foundCtx && !merged.foundUsage)) {
+          return cached;
+        }
+        return cached ? { ...cached, used: merged.used, trajectoryMax: merged.trajectoryMax } : merged;
+      }
       return {
         fetchQuota,
         fetchCascadeStats,
         fetchTailMetasBounded,
         applyRealtimeCompactionAndUsage,
+        getImmediateStats,
         getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
         getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
         getLatestQuota: () => quotaData,
@@ -3974,7 +3989,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v21';
+    const STATUSBAR_VERSION = 'v22';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
@@ -4361,12 +4376,16 @@
             inputBox.appendChild(barEl);
           }
           const cachedData = rpcClient.getCachedStats(cascadeId);
+          const immediateData = rpcClient.getImmediateStats
+            ? rpcClient.getImmediateStats(cascadeId, inputBox)
+            : cachedData;
+          renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw);
           Promise.all([
             rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
             quotaPromise,
           ]).then(([data, freshQuota]) => {
             if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
-            const finalData = data || cachedData;
+            const finalData = data || cachedData || immediateData;
             renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw);
           });
         }

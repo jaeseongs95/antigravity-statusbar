@@ -1796,6 +1796,40 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     const ctx2 = hb.getModelSelectorContextForView(fakeView, '512K');
     assert.equal(ctx1, ctx2, 'getModelSelectorContextForView must reuse short-TTL cached context');
     assert.equal(triggerQueryCount, qAfterFirst, 'cached getModelSelectorContextForView must skip redundant DOM/Fiber queries');
+
+    // 3. Session switch synchronous immediate render prevents 2-frame flicker while RPC is still in-flight
+    const { sandbox, getMountedBar } = createDomSandbox();
+    sandbox.localStorage.setItem(
+      'agy-stats-cache-v1',
+      JSON.stringify([
+        ['test-session-1', { used: 64000, trajectoryMax: 512000, cacheRead: 60000, inputTok: 4000, cachePct: 94, ts: Date.now() }],
+        ['test-session-2', { used: 192000, trajectoryMax: 512000, cacheRead: 180000, inputTok: 12000, cachePct: 94, ts: Date.now() }],
+      ])
+    );
+    sandbox.localStorage.setItem(
+      'agy-session-ctx-windows-v1',
+      JSON.stringify({ 'test-session-1': '512K', 'test-session-2': '256K' })
+    );
+    // Make fetch hang indefinitely during synchronous check
+    sandbox.fetch = () => new Promise(() => {});
+    sandbox.window.fetch = sandbox.fetch;
+
+    const api = mountStatusBar(sandbox);
+    assert.ok(api);
+    const barEl = getMountedBar();
+    assert.ok(barEl, 'barEl must be mounted synchronously on initial mountStatusBar()');
+    const coreNode = barEl.querySelector('.agy-ctx-left').querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreNode, 'core-metrics node must be rendered synchronously before any async RPC resolves');
+    assert.ok(coreNode.innerHTML.includes('64k'), 'initial synchronous render must show cached 64k immediately');
+    assert.ok(coreNode.innerHTML.includes('[ 512k ▾ ]'), 'initial synchronous render must show session-1 limit [ 512k ▾ ] immediately');
+
+    // Switch session to test-session-2 and call updateAll() synchronously (RPC still pending)
+    const activeView = sandbox.document.querySelector('[data-testid="conversation-view"]');
+    activeView.getAttribute = (k) => (k === 'data-cascade-id' ? 'test-session-2' : null);
+    api.updateAll();
+    assert.ok(coreNode.innerHTML.includes('192k'), 'session switch must synchronously update to session-2 cached 192k without waiting for async RPC');
+    assert.ok(coreNode.innerHTML.includes('[ 256k ▾ ]'), 'session switch must synchronously update to session-2 limit [ 256k ▾ ] without waiting for async RPC');
+    sandbox.window.__agyStatusBarCleanup();
   });
 });
 
