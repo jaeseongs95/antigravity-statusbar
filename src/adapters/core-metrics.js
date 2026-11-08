@@ -40,6 +40,8 @@ function createCoreMetricsAdapter({
     const currentKNum = parseInt(currentCw, 10) || 512;
     const menu = document.createElement('div');
     menu.className = 'agy-ctx-menu';
+    menu.setAttribute?.('data-agy-no-translate', 'true');
+    menu.setAttribute?.('translate', 'no');
 
     if (typeof menu.addEventListener === 'function') {
       for (const evtName of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
@@ -176,7 +178,9 @@ function createCoreMetricsAdapter({
     className: 'agy-ctx-core',
     render(containerEl, ctx) {
       const { barEl, view, cascadeId, stats, quota } = ctx;
-      const currentCw = getConversationContextWindow(view, cascadeId);
+      containerEl.setAttribute?.('data-agy-no-translate', 'true');
+      containerEl.setAttribute?.('translate', 'no');
+      const currentCw = ctx.currentCw || getConversationContextWindow(view, cascadeId);
       const maxLimit = cwStore.getLimit(currentCw);
       const used = stats ? stats.used : 0;
       const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
@@ -205,17 +209,52 @@ function createCoreMetricsAdapter({
       }
 
       const html = `
-        <span class="agy-ctx-group agy-ctx-group-ctx">
+        <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
           <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-          <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
+          <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
           <span class="agy-ctx-sep">·</span>
           <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
         </span>
-        ${quotaHtml}
+        <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
       `;
 
       if (containerEl.__lastHtml !== html) {
         containerEl.__lastHtml = html;
+        const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
+        const pctValEl = containerEl.querySelector?.('.agy-ctx-pct-val');
+        const usedValEl = containerEl.querySelector?.('.agy-ctx-used-val');
+        const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
+        const cacheEl = containerEl.querySelector?.('.agy-ctx-cache');
+        const quotaSlotEl = containerEl.querySelector?.('.agy-ctx-quota-slot');
+
+        if (barFill && pctValEl && usedValEl && existingLimitBtn && cacheEl && quotaSlotEl) {
+          if (barFill.style) {
+            barFill.style.width = `${pct}%`;
+            barFill.style.background = barColor;
+          }
+          const nextPctClass = `agy-ctx-pct-val ${colorClass}`;
+          if (pctValEl.className !== nextPctClass) pctValEl.className = nextPctClass;
+          const nextPctText = `${pct}%`;
+          if (pctValEl.textContent !== nextPctText) pctValEl.textContent = nextPctText;
+          if (usedValEl.textContent !== usedStr) usedValEl.textContent = usedStr;
+          const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
+          if (existingLimitBtn.className !== nextLimitClass) existingLimitBtn.className = nextLimitClass;
+          if (existingLimitBtn.getAttribute?.('title') !== limitTitle) {
+            existingLimitBtn.setAttribute?.('title', limitTitle);
+            existingLimitBtn.title = limitTitle;
+          }
+          const nextLimitText = `[ ${currentCw.toLowerCase()} ▾ ]`;
+          if (existingLimitBtn.textContent !== nextLimitText) existingLimitBtn.textContent = nextLimitText;
+          const nextCacheText = `${cachePct}%`;
+          if (cacheEl.textContent !== nextCacheText) cacheEl.textContent = nextCacheText;
+          if (containerEl.__lastQuotaHtml !== quotaHtml) {
+            containerEl.__lastQuotaHtml = quotaHtml;
+            setHtml(quotaSlotEl, quotaHtml);
+          }
+          return;
+        }
+
+        containerEl.__lastQuotaHtml = quotaHtml;
         setHtml(containerEl, html);
 
         const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;

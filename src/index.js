@@ -9,7 +9,110 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v19';
+const STATUSBAR_VERSION = 'v20';
+
+function isIgnoredCustomOrTranslatedNode(node) {
+  let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
+  while (cur && cur.nodeType === 1) {
+    const id = cur.id || '';
+    if (
+      id === 'agy-ctx-debug-modal' ||
+      id === 'agy-ctx-statusbar-style' ||
+      id === 'agy-mcp-manager-modal-backdrop' ||
+      id === 'agy-mcp-edit-popup-backdrop' ||
+      id === 'agy-mcp-oauth-connect-backdrop' ||
+      id === 'agy-mcp-settings-pane' ||
+      id === 'agy-ko-settings-pane' ||
+      id === 'agy-mcp-manager-styles'
+    ) {
+      return true;
+    }
+    const cls = typeof cur.className === 'string' ? cur.className : '';
+    if (
+      cls.includes('agy-ctx-statusbar') ||
+      cls.includes('agy-ctx-menu') ||
+      cur.classList?.contains?.('agy-ctx-statusbar') ||
+      cur.classList?.contains?.('agy-ctx-menu')
+    ) {
+      return true;
+    }
+    if (
+      typeof cur.hasAttribute === 'function' &&
+      (cur.hasAttribute('data-agy-no-translate') ||
+        cur.hasAttribute('data-agy-custom-mcp-btn') ||
+        cur.hasAttribute('data-ko-translated') ||
+        cur.hasAttribute('data-agy-ko-translated'))
+    ) {
+      return true;
+    }
+    cur = cur.parentElement || cur.parentNode;
+  }
+  return false;
+}
+
+function nodeTouchesStatusBarAnchors(node) {
+  if (!node || node.nodeType !== 1) return false;
+  const tag = String(node.tagName || '').toUpperCase();
+  if (tag === 'GA-REMOTE-CONTROL' || tag === 'IFRAME') return true;
+  const tid = typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') : '';
+  if (tid === 'conversation-view' || tid === 'agent-input-box' || tid === 'model-selector-trigger') {
+    return true;
+  }
+  if (typeof node.querySelector === 'function') {
+    try {
+      if (
+        node.querySelector(
+          '[data-testid="conversation-view"], [data-testid="agent-input-box"], [data-testid="model-selector-trigger"], ga-remote-control'
+        )
+      ) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+function isRelevantStatusBarMutation(mutations) {
+  if (!Array.isArray(mutations) || mutations.length === 0) return true;
+  for (let i = 0; i < mutations.length; i++) {
+    const m = mutations[i];
+    if (!m) continue;
+    if (isIgnoredCustomOrTranslatedNode(m.target)) continue;
+    if (m.type === 'attributes') {
+      if (!m.attributeName || m.attributeName === 'data-cascade-id' || m.attributeName === 'data-context-window') {
+        return true;
+      }
+      continue;
+    }
+    if (!m.addedNodes && !m.removedNodes) return true;
+    const targetTid = m.target && typeof m.target.getAttribute === 'function' ? m.target.getAttribute('data-testid') : '';
+    if (targetTid === 'agent-input-box' || targetTid === 'conversation-view' || targetTid === 'model-selector-trigger') {
+      return true;
+    }
+    const added = m.addedNodes;
+    if (added && added.length > 0) {
+      for (let j = 0; j < added.length; j++) {
+        const n = added[j];
+        if (!n || isIgnoredCustomOrTranslatedNode(n)) continue;
+        if (!n.nodeType || nodeTouchesStatusBarAnchors(n)) return true;
+      }
+    }
+    const removed = m.removedNodes;
+    if (removed && removed.length > 0) {
+      for (let j = 0; j < removed.length; j++) {
+        const n = removed[j];
+        if (!n) continue;
+        if (
+          (typeof n.className === 'string' && n.className.includes('agy-ctx-statusbar')) ||
+          nodeTouchesStatusBarAnchors(n)
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
 function injectScriptText(win, doc, code) {
   if (!code || !doc?.head) return false;
@@ -257,14 +360,16 @@ function mountStatusBar(env = {}) {
     contextButtonAdapter,
   ]);
 
-  function renderBar(barEl, view, inputBox, stats, quota) {
+  function renderBar(barEl, view, inputBox, stats, quota, precomputedCw) {
     const cascadeId = view.getAttribute('data-cascade-id');
     const { leftEl, rightEl } = registry.ensureBarStructure(barEl);
+    const currentCw = precomputedCw || getConversationContextWindow(view, cascadeId);
     const ctx = {
       barEl,
       view,
       inputBox,
       cascadeId,
+      currentCw,
       stats,
       quota,
       updateAll,
@@ -320,6 +425,8 @@ function mountStatusBar(env = {}) {
       if (!barEl) {
         barEl = doc.createElement('div');
         barEl.className = 'agy-ctx-statusbar';
+        barEl.setAttribute?.('data-agy-no-translate', 'true');
+        barEl.setAttribute?.('translate', 'no');
         inputBox.appendChild(barEl);
       }
 
@@ -331,7 +438,7 @@ function mountStatusBar(env = {}) {
       ]).then(([data, freshQuota]) => {
         if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
         const finalData = data || cachedData;
-        renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota());
+        renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw);
       });
     }
   }
@@ -364,7 +471,8 @@ function mountStatusBar(env = {}) {
     timer.unref();
   }
   const ObsClass = env.MutationObserver || win.MutationObserver || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
-  const obs = ObsClass ? new ObsClass(() => {
+  const obs = ObsClass ? new ObsClass((mutations) => {
+    if (!isRelevantStatusBarMutation(mutations)) return;
     const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
     for (const view of views) {
       const cid = view.getAttribute('data-cascade-id');
@@ -447,6 +555,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
 module.exports = {
   STATUSBAR_VERSION,
+  isIgnoredCustomOrTranslatedNode,
+  isRelevantStatusBarMutation,
   ensureRemoteCompanionScripts,
   mountStatusBar,
 };

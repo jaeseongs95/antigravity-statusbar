@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.13
+// @version      1.3.14
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -428,12 +428,14 @@
           margin-top: 2px;
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
           font-size: 11px;
+          font-variant-numeric: tabular-nums;
           line-height: 1.4;
           color: rgba(160, 165, 175, 0.88);
           user-select: none;
           flex-wrap: wrap;
           position: relative;
           text-align: center;
+          contain: layout style;
         }
         .agy-ctx-left, .agy-ctx-core {
           display: contents;
@@ -1654,8 +1656,13 @@
 
       function ensureCustomizationsStoreLoaded() {
         if (!document) return;
+        const now = Date.now();
         const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
         for (const d of docs) {
+          const cachedStore = d.__agyCachedCustomizationsStore;
+          if (cachedStore && cachedStore.hasReceivedStreamSnapshot && cachedStore.streamingDisabled) {
+            continue;
+          }
           const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
           const rootEl = d.querySelector?.('#root, #app') || d.body?.firstElementChild;
           const startNodes = [...views, rootEl].filter(Boolean);
@@ -1674,6 +1681,10 @@
               up = up.return;
             }
             if (!foundStore && node === rootEl) {
+              if (d.__agyLastCustomizationsDfsTs && now - d.__agyLastCustomizationsDfsTs < 10000) {
+                continue;
+              }
+              d.__agyLastCustomizationsDfsTs = now;
               const stack = [startFiber];
               const visited = new Set();
               while (stack.length > 0 && visited.size < 2500) {
@@ -1690,6 +1701,7 @@
               }
             }
             if (foundStore) {
+              d.__agyCachedCustomizationsStore = foundStore;
               try {
                 if (typeof foundStore.disableStreaming === 'function' && !foundStore.streamingDisabled) {
                   foundStore.disableStreaming();
@@ -3463,6 +3475,8 @@
         const currentKNum = parseInt(currentCw, 10) || 512;
         const menu = document.createElement('div');
         menu.className = 'agy-ctx-menu';
+        menu.setAttribute?.('data-agy-no-translate', 'true');
+        menu.setAttribute?.('translate', 'no');
 
         if (typeof menu.addEventListener === 'function') {
           for (const evtName of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
@@ -3599,7 +3613,9 @@
         className: 'agy-ctx-core',
         render(containerEl, ctx) {
           const { barEl, view, cascadeId, stats, quota } = ctx;
-          const currentCw = getConversationContextWindow(view, cascadeId);
+          containerEl.setAttribute?.('data-agy-no-translate', 'true');
+          containerEl.setAttribute?.('translate', 'no');
+          const currentCw = ctx.currentCw || getConversationContextWindow(view, cascadeId);
           const maxLimit = cwStore.getLimit(currentCw);
           const used = stats ? stats.used : 0;
           const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
@@ -3628,17 +3644,52 @@
           }
 
           const html = `
-            <span class="agy-ctx-group agy-ctx-group-ctx">
+            <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
               <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-              <span>ctx <strong class="${colorClass}">${pct}%</strong> ${usedStr}/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
+              <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
               <span class="agy-ctx-sep">·</span>
               <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
             </span>
-            ${quotaHtml}
+            <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
           `;
 
           if (containerEl.__lastHtml !== html) {
             containerEl.__lastHtml = html;
+            const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
+            const pctValEl = containerEl.querySelector?.('.agy-ctx-pct-val');
+            const usedValEl = containerEl.querySelector?.('.agy-ctx-used-val');
+            const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
+            const cacheEl = containerEl.querySelector?.('.agy-ctx-cache');
+            const quotaSlotEl = containerEl.querySelector?.('.agy-ctx-quota-slot');
+
+            if (barFill && pctValEl && usedValEl && existingLimitBtn && cacheEl && quotaSlotEl) {
+              if (barFill.style) {
+                barFill.style.width = `${pct}%`;
+                barFill.style.background = barColor;
+              }
+              const nextPctClass = `agy-ctx-pct-val ${colorClass}`;
+              if (pctValEl.className !== nextPctClass) pctValEl.className = nextPctClass;
+              const nextPctText = `${pct}%`;
+              if (pctValEl.textContent !== nextPctText) pctValEl.textContent = nextPctText;
+              if (usedValEl.textContent !== usedStr) usedValEl.textContent = usedStr;
+              const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
+              if (existingLimitBtn.className !== nextLimitClass) existingLimitBtn.className = nextLimitClass;
+              if (existingLimitBtn.getAttribute?.('title') !== limitTitle) {
+                existingLimitBtn.setAttribute?.('title', limitTitle);
+                existingLimitBtn.title = limitTitle;
+              }
+              const nextLimitText = `[ ${currentCw.toLowerCase()} ▾ ]`;
+              if (existingLimitBtn.textContent !== nextLimitText) existingLimitBtn.textContent = nextLimitText;
+              const nextCacheText = `${cachePct}%`;
+              if (cacheEl.textContent !== nextCacheText) cacheEl.textContent = nextCacheText;
+              if (containerEl.__lastQuotaHtml !== quotaHtml) {
+                containerEl.__lastQuotaHtml = quotaHtml;
+                setHtml(quotaSlotEl, quotaHtml);
+              }
+              return;
+            }
+
+            containerEl.__lastQuotaHtml = quotaHtml;
             setHtml(containerEl, html);
 
             const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
@@ -3756,6 +3807,8 @@
         const backdrop = document.createElement('div');
         backdrop.id = 'agy-ctx-debug-modal';
         backdrop.className = 'agy-ctx-modal-backdrop';
+        backdrop.setAttribute?.('data-agy-no-translate', 'true');
+        backdrop.setAttribute?.('translate', 'no');
         setHtml(backdrop, `
           <div class="agy-ctx-modal" role="dialog" aria-label="Trajectory & Context Debug View">
             <div class="agy-ctx-modal-hdr">
@@ -4055,7 +4108,110 @@
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
 
-    const STATUSBAR_VERSION = 'v19';
+    const STATUSBAR_VERSION = 'v20';
+
+    function isIgnoredCustomOrTranslatedNode(node) {
+      let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
+      while (cur && cur.nodeType === 1) {
+        const id = cur.id || '';
+        if (
+          id === 'agy-ctx-debug-modal' ||
+          id === 'agy-ctx-statusbar-style' ||
+          id === 'agy-mcp-manager-modal-backdrop' ||
+          id === 'agy-mcp-edit-popup-backdrop' ||
+          id === 'agy-mcp-oauth-connect-backdrop' ||
+          id === 'agy-mcp-settings-pane' ||
+          id === 'agy-ko-settings-pane' ||
+          id === 'agy-mcp-manager-styles'
+        ) {
+          return true;
+        }
+        const cls = typeof cur.className === 'string' ? cur.className : '';
+        if (
+          cls.includes('agy-ctx-statusbar') ||
+          cls.includes('agy-ctx-menu') ||
+          cur.classList?.contains?.('agy-ctx-statusbar') ||
+          cur.classList?.contains?.('agy-ctx-menu')
+        ) {
+          return true;
+        }
+        if (
+          typeof cur.hasAttribute === 'function' &&
+          (cur.hasAttribute('data-agy-no-translate') ||
+            cur.hasAttribute('data-agy-custom-mcp-btn') ||
+            cur.hasAttribute('data-ko-translated') ||
+            cur.hasAttribute('data-agy-ko-translated'))
+        ) {
+          return true;
+        }
+        cur = cur.parentElement || cur.parentNode;
+      }
+      return false;
+    }
+
+    function nodeTouchesStatusBarAnchors(node) {
+      if (!node || node.nodeType !== 1) return false;
+      const tag = String(node.tagName || '').toUpperCase();
+      if (tag === 'GA-REMOTE-CONTROL' || tag === 'IFRAME') return true;
+      const tid = typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') : '';
+      if (tid === 'conversation-view' || tid === 'agent-input-box' || tid === 'model-selector-trigger') {
+        return true;
+      }
+      if (typeof node.querySelector === 'function') {
+        try {
+          if (
+            node.querySelector(
+              '[data-testid="conversation-view"], [data-testid="agent-input-box"], [data-testid="model-selector-trigger"], ga-remote-control'
+            )
+          ) {
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    }
+
+    function isRelevantStatusBarMutation(mutations) {
+      if (!Array.isArray(mutations) || mutations.length === 0) return true;
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        if (!m) continue;
+        if (isIgnoredCustomOrTranslatedNode(m.target)) continue;
+        if (m.type === 'attributes') {
+          if (!m.attributeName || m.attributeName === 'data-cascade-id' || m.attributeName === 'data-context-window') {
+            return true;
+          }
+          continue;
+        }
+        if (!m.addedNodes && !m.removedNodes) return true;
+        const targetTid = m.target && typeof m.target.getAttribute === 'function' ? m.target.getAttribute('data-testid') : '';
+        if (targetTid === 'agent-input-box' || targetTid === 'conversation-view' || targetTid === 'model-selector-trigger') {
+          return true;
+        }
+        const added = m.addedNodes;
+        if (added && added.length > 0) {
+          for (let j = 0; j < added.length; j++) {
+            const n = added[j];
+            if (!n || isIgnoredCustomOrTranslatedNode(n)) continue;
+            if (!n.nodeType || nodeTouchesStatusBarAnchors(n)) return true;
+          }
+        }
+        const removed = m.removedNodes;
+        if (removed && removed.length > 0) {
+          for (let j = 0; j < removed.length; j++) {
+            const n = removed[j];
+            if (!n) continue;
+            if (
+              (typeof n.className === 'string' && n.className.includes('agy-ctx-statusbar')) ||
+              nodeTouchesStatusBarAnchors(n)
+            ) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    }
 
     function injectScriptText(win, doc, code) {
       if (!code || !doc?.head) return false;
@@ -4303,14 +4459,16 @@
         contextButtonAdapter,
       ]);
 
-      function renderBar(barEl, view, inputBox, stats, quota) {
+      function renderBar(barEl, view, inputBox, stats, quota, precomputedCw) {
         const cascadeId = view.getAttribute('data-cascade-id');
         const { leftEl, rightEl } = registry.ensureBarStructure(barEl);
+        const currentCw = precomputedCw || getConversationContextWindow(view, cascadeId);
         const ctx = {
           barEl,
           view,
           inputBox,
           cascadeId,
+          currentCw,
           stats,
           quota,
           updateAll,
@@ -4366,6 +4524,8 @@
           if (!barEl) {
             barEl = doc.createElement('div');
             barEl.className = 'agy-ctx-statusbar';
+            barEl.setAttribute?.('data-agy-no-translate', 'true');
+            barEl.setAttribute?.('translate', 'no');
             inputBox.appendChild(barEl);
           }
 
@@ -4377,7 +4537,7 @@
           ]).then(([data, freshQuota]) => {
             if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
             const finalData = data || cachedData;
-            renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota());
+            renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw);
           });
         }
       }
@@ -4410,7 +4570,8 @@
         timer.unref();
       }
       const ObsClass = env.MutationObserver || win.MutationObserver || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
-      const obs = ObsClass ? new ObsClass(() => {
+      const obs = ObsClass ? new ObsClass((mutations) => {
+        if (!isRelevantStatusBarMutation(mutations)) return;
         const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
         for (const view of views) {
           const cid = view.getAttribute('data-cascade-id');
@@ -4493,6 +4654,8 @@
 
     module.exports = {
       STATUSBAR_VERSION,
+      isIgnoredCustomOrTranslatedNode,
+      isRelevantStatusBarMutation,
       ensureRemoteCompanionScripts,
       mountStatusBar,
     };

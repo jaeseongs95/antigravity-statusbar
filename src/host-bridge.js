@@ -326,8 +326,13 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
 
   function ensureCustomizationsStoreLoaded() {
     if (!document) return;
+    const now = Date.now();
     const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
     for (const d of docs) {
+      const cachedStore = d.__agyCachedCustomizationsStore;
+      if (cachedStore && cachedStore.hasReceivedStreamSnapshot && cachedStore.streamingDisabled) {
+        continue;
+      }
       const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
       const rootEl = d.querySelector?.('#root, #app') || d.body?.firstElementChild;
       const startNodes = [...views, rootEl].filter(Boolean);
@@ -346,6 +351,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
           up = up.return;
         }
         if (!foundStore && node === rootEl) {
+          if (d.__agyLastCustomizationsDfsTs && now - d.__agyLastCustomizationsDfsTs < 10000) {
+            continue;
+          }
+          d.__agyLastCustomizationsDfsTs = now;
           const stack = [startFiber];
           const visited = new Set();
           while (stack.length > 0 && visited.size < 2500) {
@@ -362,6 +371,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
           }
         }
         if (foundStore) {
+          d.__agyCachedCustomizationsStore = foundStore;
           try {
             if (typeof foundStore.disableStreaming === 'function' && !foundStore.streamingDisabled) {
               foundStore.disableStreaming();

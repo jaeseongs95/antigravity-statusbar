@@ -11,12 +11,14 @@ const STYLE_CSS = `
       margin-top: 2px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 11px;
+      font-variant-numeric: tabular-nums;
       line-height: 1.4;
       color: rgba(160, 165, 175, 0.88);
       user-select: none;
       flex-wrap: wrap;
       position: relative;
       text-align: center;
+      contain: layout style;
     }
     .agy-ctx-left, .agy-ctx-core {
       display: contents;

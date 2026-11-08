@@ -57,6 +57,8 @@ function createContextButtonAdapter({
     const backdrop = document.createElement('div');
     backdrop.id = 'agy-ctx-debug-modal';
     backdrop.className = 'agy-ctx-modal-backdrop';
+    backdrop.setAttribute?.('data-agy-no-translate', 'true');
+    backdrop.setAttribute?.('translate', 'no');
     setHtml(backdrop, `
       <div class="agy-ctx-modal" role="dialog" aria-label="Trajectory & Context Debug View">
         <div class="agy-ctx-modal-hdr">

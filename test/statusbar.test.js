@@ -1606,6 +1606,110 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     );
     assert.equal(second384.length, first512.length, 'changing session limit from 512K to 384K must replace trailing suffix without growing byte length');
   });
+
+  it('optimizes rendering: filters out ko-thought-translator / chat streaming mutations and updates core-metrics in-place without recreating limit button', () => {
+    const { isRelevantStatusBarMutation } = require('../src/index');
+    const { createCoreMetricsAdapter } = require('../src/adapters/core-metrics');
+    const { createContextWindowStore } = require('../src/context-window-policy');
+
+    // 1. MutationObserver filter ignores ko-thought-translator, mcp-manager, statusbar, and plain chat text mutations
+    const koNode = {
+      nodeType: 1,
+      tagName: 'SPAN',
+      hasAttribute: (k) => k === 'data-ko-translated',
+      getAttribute: () => null,
+      querySelector: () => null,
+    };
+    const chatStreamParagraph = {
+      nodeType: 1,
+      tagName: 'P',
+      hasAttribute: () => false,
+      getAttribute: () => null,
+      querySelector: () => null,
+    };
+    const statusbarChild = {
+      nodeType: 1,
+      tagName: 'SPAN',
+      className: 'agy-ctx-statusbar',
+      hasAttribute: (k) => k === 'data-agy-no-translate',
+    };
+    assert.equal(
+      isRelevantStatusBarMutation([
+        { type: 'childList', target: chatStreamParagraph, addedNodes: [koNode], removedNodes: [] },
+        { type: 'childList', target: statusbarChild, addedNodes: [chatStreamParagraph], removedNodes: [] },
+      ]),
+      false,
+      'streaming chat paragraphs and ko-thought-translator mutations must not trigger statusbar reflows'
+    );
+
+    const newConvoView = {
+      nodeType: 1,
+      tagName: 'DIV',
+      hasAttribute: () => false,
+      getAttribute: (k) => (k === 'data-testid' ? 'conversation-view' : null),
+      querySelector: () => null,
+    };
+    assert.equal(
+      isRelevantStatusBarMutation([
+        { type: 'childList', target: { nodeType: 1, tagName: 'DIV' }, addedNodes: [newConvoView], removedNodes: [] },
+      ]),
+      true,
+      'mounting a new conversation-view must be detected as relevant'
+    );
+
+    // 2. Surgical in-place DOM update in core-metrics preserves limitBtn reference and avoids innerHTML replacement
+    const store = createContextWindowStore({});
+    const subNodes = {
+      '.agy-ctx-bar-fill': { style: { width: '10%', background: '#58d68d' } },
+      '.agy-ctx-pct-val': { className: 'agy-ctx-pct-val agy-ctx-ok', textContent: '10%' },
+      '.agy-ctx-used-val': { textContent: '51k' },
+      '.agy-ctx-btn-limit': {
+        className: 'agy-ctx-btn agy-ctx-btn-limit agy-ctx-btn-limit-512',
+        textContent: '[ 512k ▾ ]',
+        title: '',
+        attrs: {},
+        getAttribute(k) { return this.attrs[k] ?? null; },
+        setAttribute(k, v) { this.attrs[k] = String(v); },
+      },
+      '.agy-ctx-cache': { textContent: '80%' },
+      '.agy-ctx-quota-slot': { innerHTML: '' },
+    };
+    let setHtmlCallsOnContainer = 0;
+    const containerEl = {
+      attrs: {},
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      querySelector(sel) { return subNodes[sel] || null; },
+    };
+    const adapter = createCoreMetricsAdapter({
+      document: {},
+      setHtml(el, h) {
+        if (el === containerEl) setHtmlCallsOnContainer += 1;
+        el.innerHTML = h;
+      },
+      cwStore: store,
+      getConversationContextWindow: () => '512K',
+      setConversationContextWindow: () => '512K',
+      cycleConversationContextWindow: () => '900K',
+      updateAll: () => {},
+    });
+
+    adapter.render(containerEl, {
+      barEl: {},
+      view: {},
+      cascadeId: 'sess-1',
+      currentCw: '512K',
+      stats: { used: 360000, cachePct: 92 },
+      quota: { pct5h: 70, pct7d: 85, rst5h: '→18:00' },
+    });
+
+    assert.equal(setHtmlCallsOnContainer, 0, 'in-place update must not replace containerEl.innerHTML when sub-elements exist');
+    assert.equal(subNodes['.agy-ctx-bar-fill'].style.width, '70%');
+    assert.equal(subNodes['.agy-ctx-pct-val'].textContent, '70%');
+    assert.ok(subNodes['.agy-ctx-pct-val'].className.includes('agy-ctx-warn'));
+    assert.equal(subNodes['.agy-ctx-used-val'].textContent, '360k');
+    assert.equal(subNodes['.agy-ctx-cache'].textContent, '92%');
+    assert.equal(containerEl.attrs['data-agy-no-translate'], 'true');
+  });
 });
 
 describe('ASAR exact-size transformation', () => {
