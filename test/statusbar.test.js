@@ -2084,4 +2084,45 @@ describe('ASAR exact-size transformation', () => {
     assert.equal(integrity.algorithm, 'SHA256');
     assert.equal(integrity.blocks.length, 1);
   });
+
+  it('ANTIGRAVITY_STATUSBAR-D-0014: preserves cookie-only session context window override against seedSessionIfEmpty and ts=1 remote annotations', () => {
+    const { createContextWindowStore } = require('../src/context-window-policy');
+    const mockDoc = {
+      cookie: 'agy_cw_cookie-only-cid=384K; agy_default_cw=512K',
+    };
+    const emptyLs = {
+      getItem: () => null,
+      setItem: () => {},
+    };
+    const cwStore = createContextWindowStore({
+      document: mockDoc,
+      localStorage: emptyLs,
+    });
+
+    assert.equal(
+      cwStore.hasSessionOverride('cookie-only-cid'),
+      true,
+      'hasSessionOverride must detect cookie-backed session override even when localStorage is empty'
+    );
+    cwStore.seedSessionIfEmpty('cookie-only-cid', '256K');
+    assert.equal(
+      cwStore.getSavedContextWindow('cookie-only-cid'),
+      '384K',
+      'seedSessionIfEmpty must not overwrite cookie-backed session override with Redux default 256K'
+    );
+
+    const mockDoc2 = {
+      cookie: 'agy_cw_cookie-ts-cid=640K',
+    };
+    const cwStore2 = createContextWindowStore({
+      document: mockDoc2,
+      localStorage: emptyLs,
+    });
+    assert.equal(cwStore2.getSavedContextWindow('cookie-ts-cid'), '640K');
+    assert.equal(
+      cwStore2.encodeRemoteAnnotationProfile('cookie-ts-cid'),
+      '640K|512K|1',
+      'cookie-restored override must receive baseline timestamp 1'
+    );
+  });
 });

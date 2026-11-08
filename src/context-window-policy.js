@@ -190,6 +190,9 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
       const cSession = normalize(readCookie('agy_cw_' + cascadeId));
       if (cSession) {
         sessionCwMap.set(cascadeId, cSession);
+        if (!sessionCwTsMap.has(cascadeId)) {
+          sessionCwTsMap.set(cascadeId, 1);
+        }
         return cSession;
       }
     }
@@ -336,11 +339,21 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
   }
 
   function hasSessionOverride(cascadeId) {
-    return Boolean(cascadeId && sessionCwMap.has(cascadeId));
+    if (!cascadeId) return false;
+    if (sessionCwMap.has(cascadeId)) return true;
+    const cSession = normalize(readCookie('agy_cw_' + cascadeId));
+    if (cSession) {
+      sessionCwMap.set(cascadeId, cSession);
+      if (!sessionCwTsMap.has(cascadeId)) {
+        sessionCwTsMap.set(cascadeId, 1);
+      }
+      return true;
+    }
+    return false;
   }
 
   function seedSessionIfEmpty(cascadeId, rawCw) {
-    if (!cascadeId || sessionCwMap.has(cascadeId)) return;
+    if (!cascadeId || hasSessionOverride(cascadeId)) return;
     const norm = normalize(rawCw);
     if (norm) {
       sessionCwMap.set(cascadeId, norm);

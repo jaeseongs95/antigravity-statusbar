@@ -9,7 +9,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v25';
+const STATUSBAR_VERSION = 'v26';
 
 function isIgnoredCustomOrTranslatedNode(node) {
   let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
