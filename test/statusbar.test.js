@@ -1867,39 +1867,55 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       'mobile handleUrlChanged must immediately notify onCascadeChange with the new session UUID'
     );
 
-    // 4. ANTIGRAVITY_STATUSBAR-D-0013 regression:
+    // 4. ANTIGRAVITY_STATUSBAR-D-0013 regression (including SB-D0013-BUG-01~04):
     //    - applyContextWindowToEngine must NOT dispatch pick: { atStep: 999999 }
-    //    - applying a context window to a Low (1419) session must preserve global default.model as Medium (1418)
-    //    - sessions previously poisoned with pick: { atStep: 999999 } and model: 1419 (Low) while syncedKey says Medium (1418) must be recovered to 1418
+    //    - applying a context window to a Low (1419) session must preserve BOTH global default.model as Medium (1418) AND low-convo.model as Low (1419) (SB-D0013-BUG-01)
+    //    - 0-step conversation where user picked High (1417) with pick: { atStep: 0, queuedMessageIds: [] } and syncedKey: undefined must preserve High (1417) (SB-D0013-BUG-02)
+    //    - sessions previously poisoned with pick: { atStep: 999999 } (or v24's atStep: 0 with syncedKey present) must be unlocked with pick: { atStep: -1, queuedMessageIds: [] } so host UBa returns { apply: true, pick: undefined } (SB-D0013-BUG-03)
+    //    - unhydrated store (preferredModel === undefined) must NOT permanently latch the one-shot sanitization flag (SB-D0013-BUG-04)
     const dispatchedActions = [];
     const fakeReduxState = {
-      userStatus: {
-        cascadeModelConfigData: {
-          clientModelConfigs: [
-            { label: 'Gemini 4 Argon (High)', modelOrAlias: { model: 1417 } },
-            { label: 'Gemini 4 Argon (Medium)', modelOrAlias: { model: 1418 } },
-            { label: 'Gemini 4 Argon (Low)', modelOrAlias: { model: 1419 } },
-          ],
-          defaultOverrideModelConfig: { modelOrAlias: { model: 1418 } },
-        },
-      },
+      userStatus: undefined, // Initially unhydrated to test SB-D0013-BUG-04
       modelSelection: {
         byConversation: {
           'poisoned-convo': { model: 1419, customLabel: 'Gemini 4 Argon (Low)', contextWindow: '384K' },
+          'v24-relocked-convo': { model: 1418, customLabel: undefined, contextWindow: '384K' },
           'low-convo': { model: 1419, customLabel: 'Gemini 4 Argon (Low)', contextWindow: '256K' },
+          'zero-step-high-convo': { model: 1417, customLabel: 'Gemini 4 Argon (High)', contextWindow: '256K' },
         },
-        default: { model: 1418, customLabel: undefined, contextWindow: '512K' },
+        default: { model: 1419, customLabel: undefined, contextWindow: '512K' },
         trajectorySync: {
           'poisoned-convo': {
             syncedKey: 'exec-1:10:Gemini 4 Argon (Medium):384K',
             pick: { atStep: 999999, queuedMessageIds: [] },
           },
+          'v24-relocked-convo': {
+            syncedKey: 'exec-v24:Gemini 4 Argon (Low):',
+            pick: { atStep: 0, queuedMessageIds: [] },
+          },
           'low-convo': {
             syncedKey: 'exec-2:5:Gemini 4 Argon (Low):256K',
+          },
+          'zero-step-high-convo': {
+            syncedKey: undefined,
+            pick: { atStep: 0, queuedMessageIds: [] },
           },
         },
       },
     };
+
+    // Host UBa(pick, obs) exact implementation from main.js offset 2385104
+    function hostUBa(a, b) {
+      if (!a) return { apply: true, pick: undefined };
+      const c = (f) => (b.turnKey === undefined ? f : { ...f, checkedTurnKey: b.turnKey });
+      if (b.turnKey !== undefined && a.checkedTurnKey === b.turnKey) return { apply: false, pick: a };
+      if (a.atStep === 0) return { apply: false, pick: c({ ...a, atStep: (b.executionStartStep ?? 0) + 1 }) };
+      if (b.executionStartStep !== undefined && b.executionStartStep <= a.atStep) return { apply: false, pick: c(a) };
+      const d = (a.queuedMessageIds || []).filter((f) => (b.queuedMessageIds || []).includes(f));
+      return d.length < (a.queuedMessageIds || []).length
+        ? { apply: false, pick: c({ ...a, queuedMessageIds: d }) }
+        : { apply: true, pick: undefined };
+    }
 
     const fakeReduxStore = {
       getState() {
@@ -1963,27 +1979,81 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       cwStore: store,
     });
 
+    // First call while userStatus is still unhydrated (SB-D0013-BUG-04):
+    hbRedux.applyContextWindowToEngine(reduxView, 'low-convo', '320K');
+    // Now hydrate userStatus.cascadeModelConfigData (with Protobuf-ES choice.value structure)
+    fakeReduxState.userStatus = {
+      cascadeModelConfigData: {
+        clientModelConfigs: [
+          { label: 'Gemini 4 Argon (High)', modelOrAlias: { choice: { case: 'model', value: 1417 } } },
+          { label: 'Gemini 4 Argon (Medium)', modelOrAlias: { choice: { case: 'model', value: 1418 } } },
+          { label: 'Gemini 4 Argon (Low)', modelOrAlias: { choice: { case: 'model', value: 1419 } } },
+        ],
+        defaultOverrideModelConfig: { modelOrAlias: { choice: { case: 'model', value: 1418 } } },
+      },
+    };
+
     const appliedOk = hbRedux.applyContextWindowToEngine(reduxView, 'low-convo', '384K');
     assert.equal(appliedOk, true);
     assert.equal(
       fakeReduxState.modelSelection.default.model,
       1418,
-      'global default.model must remain Medium (1418) even after applying context window to a Low (1419) conversation'
+      'global default.model must be restored to Medium (1418) after hydration and applying context window to a Low (1419) conversation'
+    );
+    assert.equal(
+      fakeReduxState.modelSelection.byConversation['low-convo'].model,
+      1419,
+      'SB-D0013-BUG-01: legitimate Low (1419) conversation must keep model 1419 and NOT be overwritten to 1418 (Medium)'
+    );
+    assert.equal(
+      fakeReduxState.modelSelection.byConversation['low-convo'].contextWindow,
+      '384K',
+      'low-convo contextWindow must be updated to 384K'
+    );
+    assert.equal(
+      fakeReduxState.modelSelection.byConversation['zero-step-high-convo'].model,
+      1417,
+      'SB-D0013-BUG-02: 0-step conversation with pick.atStep=0 and syncedKey=undefined must preserve user-selected High (1417)'
+    );
+    assert.equal(
+      fakeReduxState.modelSelection.trajectorySync['zero-step-high-convo']?.pick?.atStep,
+      0,
+      'SB-D0013-BUG-02: 0-step conversation pick.atStep=0 must remain untouched'
     );
     assert.equal(
       fakeReduxState.modelSelection.byConversation['poisoned-convo'].model,
       1418,
       'poisoned conversation with atStep=999999 and syncedKey Medium must be recovered from Low (1419) to Medium (1418)'
     );
-    assert.notEqual(
+    assert.equal(
       fakeReduxState.modelSelection.trajectorySync['poisoned-convo']?.pick?.atStep,
-      999999,
-      'poisoned pick.atStep=999999 must be cleared so trajectoryModelObserved sync works'
+      -1,
+      'SB-D0013-BUG-03: poisoned pick.atStep must be set to -1 (not 0 or 999999)'
+    );
+    const ubaPoisoned = hostUBa(fakeReduxState.modelSelection.trajectorySync['poisoned-convo']?.pick, {
+      turnKey: 'turn-1',
+      executionStartStep: 12,
+      queuedMessageIds: [],
+    });
+    assert.deepEqual(
+      ubaPoisoned,
+      { apply: true, pick: undefined },
+      'SB-D0013-BUG-03: host UBa must return { apply: true, pick: undefined } for sanitized poisoned-convo'
+    );
+    const ubaV24Relocked = hostUBa(fakeReduxState.modelSelection.trajectorySync['v24-relocked-convo']?.pick, {
+      turnKey: 'turn-2',
+      executionStartStep: 4042,
+      queuedMessageIds: [],
+    });
+    assert.deepEqual(
+      ubaV24Relocked,
+      { apply: true, pick: undefined },
+      'SB-D0013-BUG-03: host UBa must return { apply: true, pick: undefined } for v24-relocked-convo'
     );
     assert.equal(
-      dispatchedActions.some((a) => a.payload?.pick?.atStep === 999999),
+      dispatchedActions.some((a) => a.payload?.pick?.atStep === 999999 || a.payload?.pick?.atStep === 0),
       false,
-      'applyContextWindowToEngine must never dispatch pick.atStep === 999999'
+      'applyContextWindowToEngine must never dispatch pick.atStep === 999999 or pick.atStep === 0'
     );
 
     sandbox.window.__agyStatusBarCleanup();

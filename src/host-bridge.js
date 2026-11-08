@@ -1781,7 +1781,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       return;
     }
     try {
-      if (reduxStore.__agyPoisonSanitizedV24d) return;
+      if (reduxStore.__agyPoisonSanitizedV25) return;
       const st = reduxStore.getState();
       const ms = st?.modelSelection;
       if (!ms || typeof ms !== 'object') return;
@@ -1796,7 +1796,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       for (const cid of Object.keys(syncMap)) {
         const entry = syncMap[cid];
         const step = entry?.pick?.atStep;
-        if (step !== 999999 && step !== -1 && step !== 0) {
+        if (step === undefined || step === -1) {
           const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
           const mVal = resolveModelValueFromLabel(st, syncedLabel);
           if (mVal !== undefined) {
@@ -1807,24 +1807,27 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       }
 
       const preferredModel = overrideDefaultModel ?? cleanConvoModel;
+      // SB-D0013-BUG-04: Do not run or latch the one-shot sanitization flag until
+      // userStatus / trajectorySync has hydrated enough to resolve preferredModel.
+      if (preferredModel === undefined) return;
+
       const poisonedCids = [];
       let recoveredTargetModel = undefined;
 
       for (const cid of Object.keys(syncMap)) {
         const entry = syncMap[cid];
         const step = entry?.pick?.atStep;
-        const convoModel = byConvoMap?.[cid]?.model;
+        const hasSyncedKey = typeof entry?.syncedKey === 'string' && entry.syncedKey.length > 0;
         const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-        const isPoisonedLow =
-          step === 999999 ||
-          step === -1 ||
-          step === 0 ||
-          (preferredModel !== undefined &&
-            convoModel !== undefined &&
-            convoModel !== preferredModel &&
-            syncedLabel &&
-            /\(low\)/i.test(syncedLabel));
-        if (isPoisonedLow) {
+        // SB-D0013-BUG-01 & BUG-02:
+        // - Never treat normal conversations (step === undefined) as poisoned even if they use a (Low) model.
+        // - Never treat 0-step new conversations (step === 0 && !hasSyncedKey) where the user manually picked a model via host ytc as poisoned.
+        // - Only heal conversations locked by legacy statusbar (step === 999999) or re-locked by v24's atStep:0 dispatch on an existing trajectory (hasSyncedKey && (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined))).
+        const isV24Relocked =
+          hasSyncedKey &&
+          (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined));
+        const isPoisoned = step === 999999 || isV24Relocked;
+        if (isPoisoned) {
           poisonedCids.push(cid);
           const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
           if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
@@ -1833,11 +1836,11 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
         }
       }
 
-      if (poisonedCids.length === 0 && (preferredModel === undefined || ms.default?.model === preferredModel)) {
-        reduxStore.__agyPoisonSanitizedV24d = true;
+      if (poisonedCids.length === 0 && ms.default?.model === preferredModel) {
+        reduxStore.__agyPoisonSanitizedV25 = true;
         return;
       }
-      reduxStore.__agyPoisonSanitizedV24d = true;
+      reduxStore.__agyPoisonSanitizedV25 = true;
 
       const currentDefaultModel = ms.default?.model;
       const currentDefaultCustomLabel = ms.default?.customLabel;
@@ -1855,6 +1858,8 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
             : (preferredModel ?? syncedModelVal ?? safeDefaultModel ?? convo?.model);
         const targetCw = cwStore?.getSavedContextWindow?.(cid) || convo?.contextWindow || desiredDefaultCw;
         if (targetModel !== undefined) {
+          // SB-D0013-BUG-03: Dispatch pick: { atStep: -1, queuedMessageIds: [] } so host UBa
+          // bypasses `a.atStep === 0` and `b.executionStartStep <= a.atStep`, returning `{ apply: true, pick: undefined }`.
           reduxStore.dispatch({
             type: 'modelSelection/modelPicked',
             payload: {
@@ -1862,7 +1867,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
               model: targetModel,
               customLabel: undefined,
               contextWindow: targetCw,
-              pick: { atStep: 0, queuedMessageIds: [] },
+              pick: { atStep: -1, queuedMessageIds: [] },
             },
           });
         }

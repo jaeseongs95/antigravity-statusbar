@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.18
+// @version      1.3.19
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -2962,7 +2962,7 @@
           return;
         }
         try {
-          if (reduxStore.__agyPoisonSanitizedV24d) return;
+          if (reduxStore.__agyPoisonSanitizedV25) return;
           const st = reduxStore.getState();
           const ms = st?.modelSelection;
           if (!ms || typeof ms !== 'object') return;
@@ -2976,7 +2976,7 @@
           for (const cid of Object.keys(syncMap)) {
             const entry = syncMap[cid];
             const step = entry?.pick?.atStep;
-            if (step !== 999999 && step !== -1 && step !== 0) {
+            if (step === undefined || step === -1) {
               const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
               const mVal = resolveModelValueFromLabel(st, syncedLabel);
               if (mVal !== undefined) {
@@ -2986,23 +2986,19 @@
             }
           }
           const preferredModel = overrideDefaultModel ?? cleanConvoModel;
+          if (preferredModel === undefined) return;
           const poisonedCids = [];
           let recoveredTargetModel = undefined;
           for (const cid of Object.keys(syncMap)) {
             const entry = syncMap[cid];
             const step = entry?.pick?.atStep;
-            const convoModel = byConvoMap?.[cid]?.model;
+            const hasSyncedKey = typeof entry?.syncedKey === 'string' && entry.syncedKey.length > 0;
             const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-            const isPoisonedLow =
-              step === 999999 ||
-              step === -1 ||
-              step === 0 ||
-              (preferredModel !== undefined &&
-                convoModel !== undefined &&
-                convoModel !== preferredModel &&
-                syncedLabel &&
-                /\(low\)/i.test(syncedLabel));
-            if (isPoisonedLow) {
+            const isV24Relocked =
+              hasSyncedKey &&
+              (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined));
+            const isPoisoned = step === 999999 || isV24Relocked;
+            if (isPoisoned) {
               poisonedCids.push(cid);
               const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
               if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
@@ -3010,11 +3006,11 @@
               }
             }
           }
-          if (poisonedCids.length === 0 && (preferredModel === undefined || ms.default?.model === preferredModel)) {
-            reduxStore.__agyPoisonSanitizedV24d = true;
+          if (poisonedCids.length === 0 && ms.default?.model === preferredModel) {
+            reduxStore.__agyPoisonSanitizedV25 = true;
             return;
           }
-          reduxStore.__agyPoisonSanitizedV24d = true;
+          reduxStore.__agyPoisonSanitizedV25 = true;
           const currentDefaultModel = ms.default?.model;
           const currentDefaultCustomLabel = ms.default?.customLabel;
           const desiredDefaultCw = cwStore?.getDefaultCw?.() || ms.default?.contextWindow || '256K';
@@ -3037,7 +3033,7 @@
                   model: targetModel,
                   customLabel: undefined,
                   contextWindow: targetCw,
-                  pick: { atStep: 0, queuedMessageIds: [] },
+                  pick: { atStep: -1, queuedMessageIds: [] },
                 },
               });
             }
@@ -4152,7 +4148,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v24';
+    const STATUSBAR_VERSION = 'v25';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
