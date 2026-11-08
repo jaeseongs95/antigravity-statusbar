@@ -1,4 +1,4 @@
-# antigravity-statusbar (`v1.3.13` / `v19`)
+# antigravity-statusbar (`v1.3.21` / `v27`)
 
 **언어 (Languages):** **[English (README.md)](./README.md)** | **한국어 ([README.ko.md](./README.ko.md))**
 
@@ -46,7 +46,7 @@
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
 
-# 1. 단위 테스트 및 번들 통합 회귀 테스트 실행 (14/14 통과)
+# 1. 단위 테스트 및 번들 통합 회귀 테스트 실행 (17/17 통과)
 npm test
 
 # 2. dist/statusbar_autoinject.js 빌드, ~/.gemini/antigravity 설치, app.asar 패치 및 CDP 즉시 주입
@@ -176,7 +176,7 @@ antigravity-statusbar/
 ## 검증 및 테스트
 
 ```bash
-# dist/statusbar_autoinject.js 빌드 및 14개 단위·통합 회귀 테스트 실행
+# dist/statusbar_autoinject.js 빌드 및 17개 단위·통합 회귀 테스트 실행
 npm test
 ```
 

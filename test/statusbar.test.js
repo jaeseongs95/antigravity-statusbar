@@ -2124,5 +2124,58 @@ describe('ASAR exact-size transformation', () => {
       '640K|512K|1',
       'cookie-restored override must receive baseline timestamp 1'
     );
+    cwStore2.syncFromRemoteAnnotations({
+      'cookie-ts-cid': {
+        annotations: {
+          activeProfile: '256K|512K|1',
+        },
+      },
+    });
+    assert.equal(
+      cwStore2.getSavedContextWindow('cookie-ts-cid'),
+      '640K',
+      'SB-D0014-RESIDUAL-01: syncFromRemoteAnnotations with legacy ts=1 remote profile must not overwrite cookie-restored localTs=1 override'
+    );
+
+    let savedCookieJar = '';
+    const cookieWritingDoc = {
+      get cookie() {
+        return savedCookieJar;
+      },
+      set cookie(val) {
+        const pair = String(val).split(';')[0];
+        savedCookieJar = savedCookieJar ? `${savedCookieJar}; ${pair}` : pair;
+      },
+    };
+    const cwStoreWriter = createContextWindowStore({
+      document: cookieWritingDoc,
+      localStorage: emptyLs,
+    });
+    cwStoreWriter.saveContextWindowSetting('saved-cookie-cid', '640K', {
+      updatedAtMs: 1793850000000,
+    });
+
+    const cwStoreReader = createContextWindowStore({
+      document: cookieWritingDoc,
+      localStorage: emptyLs,
+    });
+    assert.equal(cwStoreReader.getSavedContextWindow('saved-cookie-cid'), '640K');
+    assert.equal(
+      cwStoreReader.encodeRemoteAnnotationProfile('saved-cookie-cid'),
+      '640K|512K|1793850000000',
+      'SB-D0014-RESIDUAL-01: cookie must persist and restore the session override timestamp'
+    );
+    cwStoreReader.syncFromRemoteAnnotations({
+      'saved-cookie-cid': {
+        annotations: {
+          activeProfile: '256K|512K|1793840000000',
+        },
+      },
+    });
+    assert.equal(
+      cwStoreReader.getSavedContextWindow('saved-cookie-cid'),
+      '640K',
+      'SB-D0014-RESIDUAL-01: older remote annotation (ts=1793840000000) must not overwrite cookie-restored override (ts=1793850000000)'
+    );
   });
 });

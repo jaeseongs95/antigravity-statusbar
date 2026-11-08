@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.20
+// @version      1.3.21
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -178,19 +178,30 @@
           } catch {}
         }
       }
+      function readSessionCookie(cascadeId) {
+        const raw = readCookie('agy_cw_' + cascadeId);
+        if (!raw || typeof raw !== 'string') return null;
+        const parts = raw.split('|');
+        const cw = normalize(parts[0]);
+        if (!cw) return null;
+        const tsRaw = parts.length > 1 ? parseInt(parts[1], 10) : 1;
+        const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
+        return { cw, ts };
+      }
       function getSavedContextWindow(cascadeId) {
         if (cascadeId && sessionCwMap.has(cascadeId)) {
           const v = normalize(sessionCwMap.get(cascadeId));
           if (v) return v;
         }
         if (cascadeId) {
-          const cSession = normalize(readCookie('agy_cw_' + cascadeId));
+          const cSession = readSessionCookie(cascadeId);
           if (cSession) {
-            sessionCwMap.set(cascadeId, cSession);
-            if (!sessionCwTsMap.has(cascadeId)) {
-              sessionCwTsMap.set(cascadeId, 1);
+            sessionCwMap.set(cascadeId, cSession.cw);
+            const prevTs = sessionCwTsMap.get(cascadeId) || 0;
+            if (cSession.ts > prevTs) {
+              sessionCwTsMap.set(cascadeId, cSession.ts);
             }
-            return cSession;
+            return cSession.cw;
           }
         }
         return normalize(defaultCwCache) || '512K';
@@ -203,7 +214,7 @@
           if (sessionCwMap.has(cascadeId)) sessionCwMap.delete(cascadeId);
           sessionCwMap.set(cascadeId, norm);
           sessionCwTsMap.set(cascadeId, ts);
-          writeCookie('agy_cw_' + cascadeId, norm);
+          writeCookie('agy_cw_' + cascadeId, `${norm}|${ts}`);
           const serialized = serializeSessionMap();
           const serializedTs = serializeSessionTsMap();
           try {
@@ -281,7 +292,7 @@
           if (parsed.sessionCw) {
             const localCw = sessionCwMap.get(cid);
             const localTs = sessionCwTsMap.get(cid) || 0;
-            if (!localCw || parsed.ts > localTs || (localTs <= 1 && parsed.sessionCw !== localCw)) {
+            if (!localCw || parsed.ts > localTs) {
               saveContextWindowSetting(cid, parsed.sessionCw, {
                 fromRemoteSync: true,
                 deferNativeFlush: true,
@@ -332,11 +343,12 @@
       function hasSessionOverride(cascadeId) {
         if (!cascadeId) return false;
         if (sessionCwMap.has(cascadeId)) return true;
-        const cSession = normalize(readCookie('agy_cw_' + cascadeId));
+        const cSession = readSessionCookie(cascadeId);
         if (cSession) {
-          sessionCwMap.set(cascadeId, cSession);
-          if (!sessionCwTsMap.has(cascadeId)) {
-            sessionCwTsMap.set(cascadeId, 1);
+          sessionCwMap.set(cascadeId, cSession.cw);
+          const prevTs = sessionCwTsMap.get(cascadeId) || 0;
+          if (cSession.ts > prevTs) {
+            sessionCwTsMap.set(cascadeId, cSession.ts);
           }
           return true;
         }
@@ -4161,7 +4173,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v26';
+    const STATUSBAR_VERSION = 'v27';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
