@@ -36,6 +36,8 @@ function extractStatsFromMetas(metas) {
         max = Number(cwm.maxContextTokens || 256000);
         if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
           lastMetaStepIndex = Number(m.stepIndices[m.stepIndices.length - 1]);
+        } else if (cm.chatStartMetadata.startStepIndex !== undefined && cm.chatStartMetadata.startStepIndex !== null) {
+          lastMetaStepIndex = Number(cm.chatStartMetadata.startStepIndex);
         }
         foundCtx = true;
       }
@@ -189,7 +191,9 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
   function applyRealtimeCompactionAndUsage(parsed, fullState) {
     if (!fullState || typeof fullState !== 'object') return parsed;
     const cwUsage = fullState.contextWindowUsage;
-    const compactedSteps = fullState.compactionInfo?.compactedAtStepIndices;
+    const compactedSteps = Array.isArray(fullState.compactedAtStepIndices)
+      ? fullState.compactedAtStepIndices
+      : fullState.compactionInfo?.compactedAtStepIndices;
     const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
       ? Number(compactedSteps[compactedSteps.length - 1])
       : -1;
@@ -210,9 +214,12 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
       if (uMax > 0) {
         base.trajectoryMax = uMax;
       }
-      const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
       const uStep = Number(cwUsage.lastStepIndex ?? -1);
       const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+      const rawAfterCompact = cwUsage.estimatedAfterCompaction;
+      const afterCompact = typeof rawAfterCompact === 'boolean'
+        ? (rawAfterCompact ? uEst : 0)
+        : Number(rawAfterCompact || 0);
 
       if (afterCompact > 0 && latestCompactedStep >= 0 && (base.lastMetaStepIndex < 0 || latestCompactedStep >= base.lastMetaStepIndex)) {
         base.used = afterCompact;
@@ -234,11 +241,16 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     const slice = fullState?.trajectorySlice;
     const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
     const totalStepsLen = slice?.totalStepsLength ?? -1;
-    const compactedSteps = fullState?.compactionInfo?.compactedAtStepIndices;
+    const compactedSteps = Array.isArray(fullState?.compactedAtStepIndices)
+      ? fullState.compactedAtStepIndices
+      : fullState?.compactionInfo?.compactedAtStepIndices;
     const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
       ? Number(compactedSteps[compactedSteps.length - 1])
       : -1;
-    const cwAfterCompact = Number(fullState?.contextWindowUsage?.estimatedAfterCompaction || 0);
+    const rawCwAfter = fullState?.contextWindowUsage?.estimatedAfterCompaction;
+    const cwAfterCompact = typeof rawCwAfter === 'boolean'
+      ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
+      : Number(rawCwAfter || 0);
     const cached = stateCache.get(cascadeId);
     const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
     const versionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;

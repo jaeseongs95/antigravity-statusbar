@@ -844,7 +844,9 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
   }
 
   function hookRemoteControlPrototype(proto) {
-    if (!proto || proto.__agyHookV2) return;
+    if (!proto || proto === Object.prototype) return;
+    proto.__agyTargetWin = window;
+    if (Object.prototype.hasOwnProperty.call(proto, '__agyHookV2')) return;
     proto.__agyHooked = true;
     proto.__agyHookV2 = true;
 
@@ -900,6 +902,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       };
     }
     for (const mName of [
+      'handleUrlChanged',
       'managePolling',
       'shouldPoll',
       'loadInstances',
@@ -921,6 +924,12 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
         proto[mName] = function () {
           if (this && !this.destroyed) {
             window.__agyRemoteControlInstance = this;
+          }
+          if (
+            window?.__agyProbingRcInstance &&
+            (mName === 'handleUrlChanged' || mName === 'onIframeLoad' || mName === 'onWindowOnline' || mName === 'loadInstances')
+          ) {
+            return;
           }
           return origFn.apply(this, arguments);
         };
@@ -1108,20 +1117,51 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       }
     }
 
+    if (window) window.__agyProbingRcInstance = true;
     try {
-      if (!window?.__agyRemoteControlInstance && typeof document?.dispatchEvent === 'function') {
-        const BaseEvt = window?.Event || (typeof Event !== 'undefined' ? Event : null);
-        if (BaseEvt) {
-          document.dispatchEvent(new BaseEvt('visibilitychange'));
-        }
+      const BaseEvt = window?.Event || (typeof Event !== 'undefined' ? Event : null);
+      if (!window?.__agyRemoteControlInstance && BaseEvt && typeof document?.dispatchEvent === 'function') {
+        document.dispatchEvent(new BaseEvt('visibilitychange'));
+      }
+      if (!window?.__agyRemoteControlInstance && BaseEvt && typeof window?.dispatchEvent === 'function') {
+        window.dispatchEvent(new BaseEvt('online'));
       }
       if (!window?.__agyRemoteControlInstance && typeof window?.dispatchEvent === 'function') {
         const Evt = window.MessageEvent || (typeof MessageEvent !== 'undefined' ? MessageEvent : null);
         if (Evt) {
-          window.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
+          const iframeEl = rcEl?.querySelector?.('iframe') || document?.querySelector?.('ga-remote-control iframe') || null;
+          const iframeWin = iframeEl?.contentWindow || null;
+          const rawIframeSrc = iframeEl?.getAttribute?.('src') || iframeEl?.src || '';
+          const candidateOrigins = [];
+          try {
+            if (rawIframeSrc) {
+              candidateOrigins.push(new URL(rawIframeSrc, window.location?.href || 'https://antigravity.google.com').origin);
+            }
+          } catch {}
+          if (window.location?.origin && !candidateOrigins.includes(window.location.origin)) {
+            candidateOrigins.push(window.location.origin);
+          }
+          if (!candidateOrigins.includes('https://antigravity.static.usercontent.goog')) {
+            candidateOrigins.push('https://antigravity.static.usercontent.goog');
+          }
+          for (const orig of candidateOrigins) {
+            if (window.__agyRemoteControlInstance) break;
+            window.dispatchEvent(
+              new Evt('message', {
+                data: { type: 'URL_CHANGED', path: '' },
+                origin: orig,
+                source: iframeWin,
+              })
+            );
+          }
+          if (!window.__agyRemoteControlInstance) {
+            window.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
+          }
         }
       }
-    } catch {}
+    } catch {} finally {
+      if (window) window.__agyProbingRcInstance = false;
+    }
 
     return (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed)
       ? window.__agyRemoteControlInstance
@@ -1316,12 +1356,30 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     const koBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*$`, 'm');
     const koEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*$`, 'm');
 
-    const mcpManagerCode = extractAnchoredMarkerBlock(hostBundleText, mcpBeginRe, mcpEndRe);
-    const koTranslatorCode = extractAnchoredMarkerBlock(hostBundleText, koBeginRe, koEndRe);
+    const mcpBeginMatch = mcpBeginRe.exec(hostBundleText);
+    const mcpEndMatch = mcpBeginMatch ? mcpEndRe.exec(hostBundleText.slice(mcpBeginMatch.index)) : null;
+    const mcpB = mcpBeginMatch ? mcpBeginMatch.index : -1;
+    const mcpE = mcpEndMatch ? mcpBeginMatch.index + mcpEndMatch.index : -1;
+    const mcpEndLen = mcpEndMatch ? mcpEndMatch[0].length : 0;
 
-    const hasMcpMarker = Boolean(mcpManagerCode) || hostBundleText.includes('function mountMcpManager(');
-    const hasKoMarker = Boolean(koTranslatorCode) || hostBundleText.includes('__agyKoThoughtCleanup');
-    const hasStatusbarMarker = hostBundleText.includes('function mountStatusBar(') || hostBundleText.includes('agy-ctx-statusbar');
+    const koBeginMatch = koBeginRe.exec(hostBundleText);
+    const koEndMatch = koBeginMatch ? koEndRe.exec(hostBundleText.slice(koBeginMatch.index)) : null;
+    const koB = koBeginMatch ? koBeginMatch.index : -1;
+    const koE = koEndMatch ? koBeginMatch.index + koEndMatch.index : -1;
+    const koEndLen = koEndMatch ? koEndMatch[0].length : 0;
+
+    const mcpManagerCode = mcpB !== -1 && mcpE > mcpB ? hostBundleText.slice(mcpB, mcpE + mcpEndLen) : '';
+    const koTranslatorCode = koB !== -1 && koE > koB ? hostBundleText.slice(koB, koE + koEndLen) : '';
+
+    const firstMarkerIdx = [mcpB, koB].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? hostBundleText.length;
+    const baseSegment = hostBundleText.slice(0, firstMarkerIdx).trim();
+
+    const sbFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'StatusBar'].join('')}\\s*\\(`, 'm');
+    const mcpFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'McpManager'].join('')}\\s*\\(`, 'm');
+
+    const hasStatusbarMarker = sbFuncRe.test(baseSegment);
+    const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
+    const hasKoMarker = Boolean(koTranslatorCode);
 
     const hasStatusbar = hasStatusbarMarker || pluginNames.has('antigravity-statusbar');
     const hasMcpManager = hasMcpMarker || pluginNames.has('antigravity-mcp-manager');

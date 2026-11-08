@@ -160,7 +160,9 @@ function createContextButtonAdapter({
       const fullState = asp?.getState?.();
       if (fullState && typeof fullState === 'object') {
         const cwUsage = fullState.contextWindowUsage;
-        const compactedSteps = fullState.compactionInfo?.compactedAtStepIndices;
+        const compactedSteps = Array.isArray(fullState.compactedAtStepIndices)
+          ? fullState.compactedAtStepIndices
+          : fullState.compactionInfo?.compactedAtStepIndices;
         const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
           ? Number(compactedSteps[compactedSteps.length - 1])
           : -1;
@@ -169,9 +171,12 @@ function createContextButtonAdapter({
           if (uMax > 0) {
             parsed.trajectoryMax = uMax;
           }
-          const afterCompact = Number(cwUsage.estimatedAfterCompaction || 0);
           const uStep = Number(cwUsage.lastStepIndex ?? -1);
           const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+          const rawAfterCompact = cwUsage.estimatedAfterCompaction;
+          const afterCompact = typeof rawAfterCompact === 'boolean'
+            ? (rawAfterCompact ? uEst : 0)
+            : Number(rawAfterCompact || 0);
           if (afterCompact > 0 && latestCompactedStep >= 0 && (parsed.lastMetaStepIndex < 0 || latestCompactedStep >= parsed.lastMetaStepIndex)) {
             parsed.used = afterCompact;
             parsed.foundCtx = true;

@@ -1361,9 +1361,10 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     const { createRpcClient } = require('../src/rpc-client');
     const { createContextButtonAdapter } = require('../src/adapters/context-button');
 
-    // 1. SB-BUG-01: After compaction at step 100 (afterCompact = 33,388), subsequent turns at step 150 with actual estimatedTokensUsed = 120,000 must display 120,000, NOT be overwritten to 33,388!
+    // 1. SB-BUG-01: Real /main.js flattened `fullState.compactedAtStepIndices` (no `compactionInfo`), boolean `estimatedAfterCompaction: true`, and `startStepIndex` without `stepIndices`
     let currentMetaStep = 100;
     let currentMetaTokens = 245000;
+    let isJustCompactedBool = true;
     const view = sandbox.document.querySelector('[data-testid="conversation-view"]');
     const inputBox = view.querySelector('[data-testid="agent-input-box"]');
     const cid = view.getAttribute('data-cascade-id');
@@ -1375,12 +1376,10 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
             totalGeneratorMetadataLength: 5,
             totalStepsLength: currentMetaStep + 1,
           },
-          compactionInfo: {
-            compactedAtStepIndices: [100],
-          },
+          compactedAtStepIndices: [100],
           contextWindowUsage: {
-            estimatedTokensUsed: currentMetaTokens,
-            estimatedAfterCompaction: 33388,
+            estimatedTokensUsed: isJustCompactedBool ? 33388 : currentMetaTokens,
+            estimatedAfterCompaction: isJustCompactedBool,
             maxContextTokens: 512000,
             lastStepIndex: currentMetaStep,
           },
@@ -1396,7 +1395,6 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
           return {
             generatorMetadata: [
               {
-                stepIndices: [currentMetaStep],
                 chatModel: {
                   model: 'MODEL_PLACEHOLDER_M37',
                   usage: { inputTokens: 2000, cacheReadTokens: 8000 },
@@ -1418,55 +1416,67 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       getRemoteRpcServiceForElement: () => null,
     });
 
-    // At step 100 (just compacted, no new turn beyond step 100 yet): should show 33,388
+    // At step 100 (just compacted, boolean estimatedAfterCompaction: true, estimatedTokensUsed: 33388): should show 33,388 (NOT 1!)
     const statsAtCompact = await rpc.fetchCascadeStats(cid, 'csrf-123', inputBox);
-    assert.equal(statsAtCompact.used, 33388, 'immediately after compaction at step 100, used must be 33388');
+    assert.equal(statsAtCompact.used, 33388, 'immediately after compaction at step 100 with boolean estimatedAfterCompaction:true, used must be 33388 (not 1)');
 
     // Now conversation continues to step 150 and actual tokens grow to 120,000 (> 33,388)
+    isJustCompactedBool = false;
     currentMetaStep = 150;
     currentMetaTokens = 120000;
     const statsAfterGrowth = await rpc.fetchCascadeStats(cid, 'csrf-123', inputBox);
     assert.equal(statsAfterGrowth.used, 120000, 'once subsequent turns advance past latestCompactedStep, actual 120000 tokens must NOT be overwritten by old 33388 afterCompact');
 
-    // 2. SB-BUG-02: Angular 19 numeric __ngContext__ + ɵgetLContext / visibilitychange when handleIframeMessage was bound BEFORE bookmarklet
+    // 2. SB-BUG-02: Angular 19 numeric __ngContext__ WITHOUT ɵgetLContext, when handleIframeMessage was .bind(this) BEFORE bookmarklet and ignores '__agy_probe__'
+    let urlChangedMutated = false;
     class ProdRemoteControlComponent {
-      constructor(w, d) {
+      constructor(w) {
+        this.destroyed = false;
         this._bound = this.handleIframeMessage.bind(this);
         w.addEventListener('message', this._bound);
-        d.addEventListener('visibilitychange', () => this.isTabHidden());
       }
-      handleIframeMessage(_ev) {}
-      isTabHidden() { return false; }
+      handleIframeMessage(ev) {
+        if (!ev || ev.data === '__agy_probe__') return;
+        if (ev.data && ev.data.type === 'URL_CHANGED') {
+          this.handleUrlChanged(ev.data.path || '');
+        }
+      }
+      handleUrlChanged(_p) {
+        urlChangedMutated = true;
+      }
       async proxyCommand(_path, _bytes) {
         return { payload: new TextEncoder().encode(JSON.stringify({ ok: true })) };
       }
     }
     const winMsgListeners = [];
-    const docVisListeners = [];
-    const rcElNum = { __ngContext__: 77 };
-    let prodRcInst = null;
+    const rcElNum = { __ngContext__: 77, querySelector: () => null };
     const rcDoc = {
-      addEventListener(t, fn) { if (t === 'visibilitychange') docVisListeners.push(fn); },
-      dispatchEvent(ev) { if (ev?.type === 'visibilitychange') docVisListeners.forEach((f) => f(ev)); },
+      addEventListener() {},
+      dispatchEvent() {},
       querySelector(sel) { return sel === 'ga-remote-control' ? rcElNum : null; },
       querySelectorAll() { return []; },
     };
     const rcWin = {
       document: rcDoc,
+      location: { href: 'https://antigravity.google.com/r/123', origin: 'https://antigravity.google.com' },
       addEventListener(t, fn) { if (t === 'message') winMsgListeners.push(fn); },
       dispatchEvent(ev) { if (ev?.type === 'message') winMsgListeners.forEach((f) => f(ev)); },
       default_GoogleAntigravity: {
         m1: {
           RemoteControlComponent: ProdRemoteControlComponent,
-          '\u0275getLContext'(el) {
-            return el === rcElNum ? { lView: [null, null, [prodRcInst]] } : null;
-          },
         },
       },
       Event: class { constructor(t) { this.type = t; } },
-      MessageEvent: class { constructor(t, i) { this.type = t; this.data = i?.data; } },
+      MessageEvent: class {
+        constructor(t, i) {
+          this.type = t;
+          this.data = i?.data;
+          this.origin = i?.origin;
+          this.source = i?.source;
+        }
+      },
     };
-    prodRcInst = new ProdRemoteControlComponent(rcWin, rcDoc);
+    const prodRcInst = new ProdRemoteControlComponent(rcWin);
     const store = createContextWindowStore({});
     const rcHb = createHostBridge({
       window: rcWin,
@@ -1476,8 +1486,9 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
       cwStore: store,
     });
     const foundSvc = rcHb.getRemoteRpcServiceForElement(null);
-    assert.ok(foundSvc && foundSvc.isRemoteControlHost, 'must acquire RemoteControl instance on Angular 19 numeric __ngContext__');
+    assert.ok(foundSvc && foundSvc.isRemoteControlHost, 'must acquire RemoteControl instance without ɵgetLContext via URL_CHANGED prototype hook');
     assert.equal(rcWin.__agyRemoteControlInstance, prodRcInst);
+    assert.equal(urlChangedMutated, false, 'probing via URL_CHANGED must suppress original handleUrlChanged body');
 
     // 3. SB-BUG-03: fetchHostInstalledPluginInfo returns resolved:false when ReadFile fails even if candidatePaths.length > 0, and preserves Linux leading '/' & decodes Windows '%3A'
     let readAttempts = 0;
@@ -1524,6 +1535,45 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     ];
     const winEncodedInfo = await hbLinux.fetchHostInstalledPluginInfo(null, view);
     assert.equal(winEncodedInfo.geminiDir, 'c:/Users/Lenovo/.gemini');
+
+    // 3b. SB-BUG-03 all 7 install combinations using real buildBundle({ write: false }).bundle without false positives
+    const realSbBundle = buildBundle({ write: false }).bundle;
+    const mcpBeginMark = '// === ' + ['BEGIN_AGY_MCP', 'MANAGER_V1'].join('_') + ' ===';
+    const mcpEndMark = '// === ' + ['END_AGY_MCP', 'MANAGER_V1'].join('_') + ' ===';
+    const koBeginMark = '// === ' + ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_') + ' ===';
+    const koEndMark = '// === ' + ['END_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_') + ' ===';
+    const fakeMcpMarked = [
+      mcpBeginMark,
+      '// Antigravity Custom MCP Server Manager',
+      'function mountMcpManager() { const s = "function mountStatusBar( agy-ctx-statusbar __agyKoThoughtCleanup"; }',
+      mcpEndMark,
+    ].join('\n');
+    const fakeKoMarked = [
+      koBeginMark,
+      'const m = ["function mountStatusBar(", "function mountMcpManager(", "agy-ctx-statusbar"];',
+      'window.__agyKoThoughtCleanup = () => {};',
+      koEndMark,
+    ].join('\n');
+
+    const combos = [
+      { name: '1: sb only', text: realSbBundle, exp: [true, false, false] },
+      { name: '2: mcp only', text: fakeMcpMarked, exp: [false, true, false] },
+      { name: '3: ko only', text: fakeKoMarked, exp: [false, false, true] },
+      { name: '4: sb + mcp', text: `${realSbBundle}\n${fakeMcpMarked}`, exp: [true, true, false] },
+      { name: '5: sb + ko', text: `${realSbBundle}\n${fakeKoMarked}`, exp: [true, false, true] },
+      { name: '6: mcp + ko', text: `${fakeMcpMarked}\n${fakeKoMarked}`, exp: [false, true, true] },
+      { name: '7: sb + mcp + ko', text: `${realSbBundle}\n${fakeMcpMarked}\n${fakeKoMarked}`, exp: [true, true, true] },
+    ];
+    for (const c of combos) {
+      view.__reactFiber$test.memoizedProps.value.core.projectManagementService.lsClient.readFile = async () =>
+        new TextEncoder().encode(c.text);
+      const res = await hbLinux.fetchHostInstalledPluginInfo(null, view);
+      assert.deepEqual(
+        [res.hasStatusbar, res.hasMcpManager, res.hasKoTranslator],
+        c.exp,
+        `combo ${c.name} failed detection`
+      );
+    }
 
     // 4. SB-BUG-04: context-button on Remote Control web uses __agyRcGenLenByCascade / __agyRcStepCountByCascade to avoid offset 0
     sandbox.window.__agyRcGenLenByCascade = { [cid]: 1073 };
