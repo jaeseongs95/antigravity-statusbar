@@ -2177,5 +2177,32 @@ describe('ASAR exact-size transformation', () => {
       '640K',
       'SB-D0014-RESIDUAL-01: older remote annotation (ts=1793840000000) must not overwrite cookie-restored override (ts=1793850000000)'
     );
+
+    // SB-D0014-SYNC-BEFORE-READ-OVERWRITE: calling syncFromRemoteAnnotations BEFORE getSavedContextWindow(cid)
+    // on an unopened sidebar session whose override exists only in document.cookie must load the cookie first
+    // and NOT overwrite 640K (ts=1793850000000) with an older remote annotation 256K (ts=1793840000000)
+    const unopenedCookieDoc = {
+      cookie: 'agy_cw_unopened-cookie-cid=640K%7C1793850000000; agy_default_cw=512K',
+    };
+    const cwStoreUnopened = createContextWindowStore({
+      document: unopenedCookieDoc,
+      localStorage: emptyLs,
+    });
+    const syncRes = cwStoreUnopened.syncFromRemoteAnnotations({
+      'unopened-cookie-cid': {
+        annotations: {
+          activeProfile: '256K|512K|1793840000000',
+        },
+      },
+    });
+    assert.equal(
+      cwStoreUnopened.getSavedContextWindow('unopened-cookie-cid'),
+      '640K',
+      'SB-D0014-SYNC-BEFORE-READ-OVERWRITE: syncFromRemoteAnnotations called before getSavedContextWindow must load cookie override first and preserve 640K against older remote profile 256K'
+    );
+    assert.ok(
+      syncRes.unsyncedLocalIds.includes('unopened-cookie-cid'),
+      'SB-D0014-SYNC-BEFORE-READ-OVERWRITE: unopened cookie override differing from older remote profile must be queued in unsyncedLocalIds'
+    );
   });
 });

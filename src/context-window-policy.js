@@ -298,6 +298,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
       const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
       if (!parsed) continue;
       if (parsed.sessionCw) {
+        hasSessionOverride(cid);
         const localCw = sessionCwMap.get(cid);
         const localTs = sessionCwTsMap.get(cid) || 0;
         if (!localCw || parsed.ts > localTs) {

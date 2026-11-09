@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.21
+// @version      1.3.22
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -290,6 +290,7 @@
           const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
           if (!parsed) continue;
           if (parsed.sessionCw) {
+            hasSessionOverride(cid);
             const localCw = sessionCwMap.get(cid);
             const localTs = sessionCwTsMap.get(cid) || 0;
             if (!localCw || parsed.ts > localTs) {
@@ -4173,7 +4174,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v27';
+    const STATUSBAR_VERSION = 'v28';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
