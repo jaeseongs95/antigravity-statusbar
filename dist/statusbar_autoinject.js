@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.22
+// @version      1.3.23
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -96,6 +96,14 @@
           }
         } catch {}
       }
+      function trimSessionMaps(maxEntries = 200) {
+        while (sessionCwMap.size > maxEntries) {
+          const firstKey = sessionCwMap.keys().next().value;
+          if (firstKey === undefined) break;
+          sessionCwMap.delete(firstKey);
+          sessionCwTsMap.delete(firstKey);
+        }
+      }
       function loadMapFromRaw(raw) {
         if (!raw) return;
         try {
@@ -110,6 +118,7 @@
                 }
               }
             }
+            trimSessionMaps(200);
           }
         } catch {}
       }
@@ -129,13 +138,7 @@
         } catch {}
       }
       function serializeSessionMap() {
-        if (sessionCwMap.size > 200) {
-          const firstKey = sessionCwMap.keys().next().value;
-          if (firstKey !== undefined) {
-            sessionCwMap.delete(firstKey);
-            sessionCwTsMap.delete(firstKey);
-          }
-        }
+        trimSessionMaps(200);
         return JSON.stringify(Object.fromEntries(sessionCwMap.entries()));
       }
       function serializeSessionTsMap() {
@@ -257,6 +260,10 @@
       }
       function encodeRemoteAnnotationProfile(cascadeId) {
         if (!cascadeId) return null;
+        if (!sessionCwMap.has(cascadeId)) {
+          if (!hasSessionOverride(cascadeId)) return null;
+          getSavedContextWindow(cascadeId);
+        }
         const sessionCw = normalize(sessionCwMap.get(cascadeId));
         if (!sessionCw) return null;
         const defCw = normalize(defaultCwCache) || '512K';
@@ -412,411 +419,411 @@
     const require = (spec) => __require(".", spec);
     'use strict';
     const STYLE_CSS = `
-        .agy-ctx-statusbar {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          row-gap: 4px;
-          column-gap: 10px;
-          min-height: 22px;
-          padding: 4px 10px 2px 10px;
-          margin-top: 2px;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          font-size: 11px;
-          font-variant-numeric: tabular-nums;
-          line-height: 1.4;
-          color: rgba(160, 165, 175, 0.88);
-          user-select: none;
-          flex-wrap: wrap;
-          position: relative;
-          text-align: center;
-          contain: layout style;
-        }
-        .agy-ctx-left, .agy-ctx-core {
-          display: contents;
-        }
-        .agy-ctx-group {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 5px;
-          white-space: nowrap;
-        }
-        .agy-ctx-right {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          white-space: nowrap;
-        }
-        .agy-ctx-sep {
-          color: rgba(160, 165, 175, 0.35);
-        }
-        .agy-ctx-bar-wrap {
-          display: inline-flex;
-          align-items: center;
-          width: 44px;
-          height: 5px;
-          background: rgba(128, 128, 128, 0.22);
-          border-radius: 3px;
-          overflow: hidden;
-          vertical-align: middle;
-        }
-        .agy-ctx-bar-fill {
-          height: 100%;
-          border-radius: 3px;
-          transition: width 0.2s ease;
-        }
-        .agy-ctx-ok { color: #58d68d; }
-        .agy-ctx-warn { color: #f5b041; }
-        .agy-ctx-crit { color: #ec7063; }
-        .agy-ctx-cache { color: #5dade2; }
-        .agy-ctx-quota { color: #bb8fce; }
-        .agy-ctx-btn {
-          cursor: pointer;
-          padding: 0px 5px;
-          border-radius: 3px;
-          color: rgba(160, 165, 175, 0.85);
-          background: rgba(128, 128, 128, 0.12);
-          border: 1px solid rgba(128, 128, 128, 0.2);
-          font-family: inherit;
-          font-size: 10.5px;
-          line-height: 1.3;
-          transition: all 0.15s ease;
-        }
-        .agy-ctx-btn:hover {
-          color: #fff;
-          background: rgba(128, 128, 128, 0.28);
-        }
-        .agy-ctx-btn-compact:hover {
-          color: #5dade2;
-          border-color: rgba(93, 173, 226, 0.45);
-          background: rgba(93, 173, 226, 0.14);
-        }
-        .agy-ctx-btn-limit {
-          font-weight: 600;
-          color: #5dade2;
-          background: rgba(93, 173, 226, 0.1);
-          border-color: rgba(93, 173, 226, 0.35);
-          padding: 0px 4px;
-          margin: 0 1px;
-        }
-        .agy-ctx-btn-limit:hover {
-          color: #ffffff;
-          background: rgba(93, 173, 226, 0.25);
-          border-color: rgba(93, 173, 226, 0.6);
-        }
-        .agy-ctx-btn-limit-512 {
-          color: #a569bd;
-          background: rgba(165, 105, 189, 0.12);
-          border-color: rgba(165, 105, 189, 0.4);
-        }
-        .agy-ctx-btn-limit-512:hover {
-          color: #ffffff;
-          background: rgba(165, 105, 189, 0.28);
-          border-color: rgba(165, 105, 189, 0.7);
-        }
-        .agy-ctx-btn-limit-900 {
-          color: #f39c12;
-          background: rgba(243, 156, 18, 0.14);
-          border-color: rgba(243, 156, 18, 0.45);
-        }
-        .agy-ctx-btn-limit-900:hover {
-          color: #ffffff;
-          background: rgba(243, 156, 18, 0.3);
-          border-color: rgba(243, 156, 18, 0.75);
-        }
-        .agy-ctx-menu {
-          position: absolute;
-          bottom: calc(100% + 4px);
-          left: 50%;
-          transform: translateX(-50%);
-          background: #1e1e24;
-          border: 1px solid rgba(128, 128, 128, 0.35);
-          border-radius: 6px;
-          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65);
-          z-index: 10000;
-          padding: 6px 0;
-          display: flex;
-          flex-direction: column;
-          min-width: 215px;
-          text-align: left;
-        }
-        .agy-ctx-menu-hdr {
-          padding: 2px 10px 5px 10px;
-          font-size: 10px;
-          color: #94a3b8;
-          border-bottom: 1px solid rgba(128, 128, 128, 0.2);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        .agy-ctx-custom-row {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          padding: 6px 10px;
-          border-bottom: 1px solid rgba(128, 128, 128, 0.2);
-          background: rgba(255, 255, 255, 0.02);
-        }
-        .agy-ctx-custom-input {
-          flex: 1;
-          min-width: 0;
-          width: 90px;
-          background: #121216;
-          border: 1px solid rgba(93, 173, 226, 0.45);
-          border-radius: 3px;
-          color: #f8fafc;
-          font-family: inherit;
-          font-size: 11px;
-          padding: 3px 6px;
-          outline: none;
-          user-select: text;
-        }
-        .agy-ctx-custom-input:focus {
-          border-color: #5dade2;
-          box-shadow: 0 0 0 1px rgba(93, 173, 226, 0.35);
-        }
-        .agy-ctx-custom-unit {
-          font-size: 10.5px;
-          color: #94a3b8;
-          font-weight: 600;
-        }
-        .agy-ctx-custom-apply {
-          padding: 3px 7px;
-          font-size: 10.5px;
-          font-weight: 600;
-          color: #fff;
-          background: rgba(93, 173, 226, 0.28);
-          border: 1px solid rgba(93, 173, 226, 0.55);
-          border-radius: 3px;
-          cursor: pointer;
-        }
-        .agy-ctx-custom-apply:hover {
-          background: rgba(93, 173, 226, 0.48);
-        }
-        .agy-ctx-menu-item {
-          padding: 5px 10px;
-          font-size: 11px;
-          color: #cbd5e1;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-        }
-        .agy-ctx-menu-item:hover {
-          background: rgba(93, 173, 226, 0.2);
-          color: #ffffff;
-        }
-        .agy-ctx-menu-item.active {
-          font-weight: bold;
-          color: #5dade2;
-        }
-        .agy-ctx-menu-hint {
-          font-size: 9.5px;
-          color: rgba(160, 165, 175, 0.7);
-        }
-        .agy-ctx-modal-backdrop {
-          position: fixed;
-          inset: 0;
-          background: rgba(0, 0, 0, 0.62);
-          backdrop-filter: blur(2px);
-          z-index: 99999;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 20px;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          color: #e2e8f0;
-        }
-        .agy-ctx-modal {
-          background: #18181d;
-          border: 1px solid rgba(148, 163, 184, 0.25);
-          border-radius: 8px;
-          width: 100%;
-          max-width: 820px;
-          max-height: 84vh;
-          display: flex;
-          flex-direction: column;
-          box-shadow: 0 20px 45px rgba(0, 0, 0, 0.7);
-          overflow: hidden;
-        }
-        .agy-ctx-modal-hdr {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 10px 14px;
-          background: #202027;
-          border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-          font-size: 12.5px;
-          font-weight: 600;
-        }
-        .agy-ctx-modal-hdr-actions {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-        .agy-ctx-modal-body {
-          padding: 14px;
-          overflow-y: auto;
-          font-size: 11.5px;
-          line-height: 1.5;
-          display: flex;
-          flex-direction: column;
-          gap: 14px;
-        }
-        .agy-ctx-card-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
-          gap: 8px;
-        }
-        .agy-ctx-card {
-          background: rgba(255, 255, 255, 0.035);
-          border: 1px solid rgba(148, 163, 184, 0.14);
-          border-radius: 6px;
-          padding: 8px 10px;
-        }
-        .agy-ctx-card-lbl {
-          font-size: 10px;
-          color: #94a3b8;
-          margin-bottom: 2px;
-        }
-        .agy-ctx-card-val {
-          font-size: 13.5px;
-          font-weight: 700;
-        }
-        .agy-ctx-sec-title {
-          font-size: 11.5px;
-          font-weight: 600;
-          color: #cbd5e1;
-          margin-bottom: 6px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        .agy-ctx-tbl {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 11px;
-        }
-        .agy-ctx-tbl th, .agy-ctx-tbl td {
-          padding: 4px 8px;
-          border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-          text-align: left;
-        }
-        .agy-ctx-tbl th {
-          color: #94a3b8;
-          font-weight: 600;
-          background: rgba(255, 255, 255, 0.02);
-        }
-        .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
-          text-align: right;
-        }
-        ga-remote-control {
-          display: block;
-          width: 100%;
-          height: 100%;
-        }
-        ga-remote-control .app-container {
-          display: flex !important;
-          flex-direction: column !important;
-          height: 100vh !important;
-          height: 100dvh !important;
-          max-height: 100dvh !important;
-          overflow: hidden !important;
-          box-sizing: border-box !important;
-        }
-        ga-remote-control .iframe-panel {
-          min-height: 0 !important;
-          flex: 1 1 0% !important;
-          overflow: hidden !important;
-        }
-        .agy-rc-host-view {
-          flex-shrink: 0;
-          width: 100%;
-          background: #18181d;
-          border-top: 1px solid rgba(128, 128, 128, 0.25);
-          box-sizing: border-box;
-          padding-bottom: env(safe-area-inset-bottom, 0px);
-          z-index: 1000;
-        }
-        .agy-rc-host-box .agy-ctx-statusbar {
-          margin-top: 0;
-          min-height: 24px;
-          padding: 5px 10px;
-          justify-content: center;
-          row-gap: 4px;
-          column-gap: 12px;
-        }
-        .agy-rc-host-box .agy-ctx-menu {
-          left: 50%;
-          transform: translateX(-50%);
-          bottom: calc(100% + 4px);
-        }
-        @media (max-width: 640px) {
-          .agy-ctx-statusbar,
-          .agy-rc-host-box .agy-ctx-statusbar {
-            min-height: 40px;
-            padding: 4px 8px;
-            row-gap: 3px;
-            column-gap: 8px;
-            font-size: 10.5px;
-          }
-          .agy-ctx-bar-wrap {
-            width: 34px;
-          }
-          .agy-ctx-sep-pipe,
-          .agy-ctx-quota-left {
-            display: none;
-          }
-          .agy-ctx-group-ctx {
-            flex-basis: 100%;
-          }
-          .agy-ctx-menu,
-          .agy-rc-host-box .agy-ctx-menu {
-            min-width: min(250px, calc(100vw - 24px));
-            max-width: calc(100vw - 16px);
-          }
-          .agy-ctx-menu-item {
-            padding: 7px 12px;
-            font-size: 12px;
-          }
-          .agy-ctx-custom-input {
-            font-size: 16px;
-            padding: 4px 8px;
-          }
-          .agy-ctx-custom-apply {
-            padding: 5px 10px;
-            font-size: 11.5px;
-          }
-          .agy-ctx-modal-backdrop {
-            padding: 8px;
-          }
-          .agy-ctx-modal {
-            max-height: 90vh;
-            max-height: 90dvh;
-          }
-          .agy-ctx-modal-hdr {
-            flex-wrap: wrap;
-            gap: 6px;
-            padding: 8px 10px;
-            font-size: 11.5px;
-          }
-          .agy-ctx-modal-body {
-            padding: 10px;
-            gap: 10px;
-          }
-          .agy-ctx-card-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 6px;
-          }
-          .agy-ctx-tbl {
-            display: block;
-            overflow-x: auto;
-          }
-        }
-    `.replace(/\s+/g, ' ').trim();
+    .agy-ctx-statusbar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      row-gap: 4px;
+      column-gap: 10px;
+      min-height: 22px;
+      padding: 4px 10px 2px 10px;
+      margin-top: 2px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.4;
+      color: rgba(160, 165, 175, 0.88);
+      user-select: none;
+      flex-wrap: wrap;
+      position: relative;
+      text-align: center;
+      contain: layout style;
+    }
+    .agy-ctx-left, .agy-ctx-core {
+      display: contents;
+    }
+    .agy-ctx-group {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    .agy-ctx-right {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .agy-ctx-sep {
+      color: rgba(160, 165, 175, 0.35);
+    }
+    .agy-ctx-bar-wrap {
+      display: inline-flex;
+      align-items: center;
+      width: 44px;
+      height: 5px;
+      background: rgba(128, 128, 128, 0.22);
+      border-radius: 3px;
+      overflow: hidden;
+      vertical-align: middle;
+    }
+    .agy-ctx-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.2s ease;
+    }
+    .agy-ctx-ok { color: #58d68d; }
+    .agy-ctx-warn { color: #f5b041; }
+    .agy-ctx-crit { color: #ec7063; }
+    .agy-ctx-cache { color: #5dade2; }
+    .agy-ctx-quota { color: #bb8fce; }
+    .agy-ctx-btn {
+      cursor: pointer;
+      padding: 0px 5px;
+      border-radius: 3px;
+      color: rgba(160, 165, 175, 0.85);
+      background: rgba(128, 128, 128, 0.12);
+      border: 1px solid rgba(128, 128, 128, 0.2);
+      font-family: inherit;
+      font-size: 10.5px;
+      line-height: 1.3;
+      transition: all 0.15s ease;
+    }
+    .agy-ctx-btn:hover {
+      color: #fff;
+      background: rgba(128, 128, 128, 0.28);
+    }
+    .agy-ctx-btn-compact:hover {
+      color: #5dade2;
+      border-color: rgba(93, 173, 226, 0.45);
+      background: rgba(93, 173, 226, 0.14);
+    }
+    .agy-ctx-btn-limit {
+      font-weight: 600;
+      color: #5dade2;
+      background: rgba(93, 173, 226, 0.1);
+      border-color: rgba(93, 173, 226, 0.35);
+      padding: 0px 4px;
+      margin: 0 1px;
+    }
+    .agy-ctx-btn-limit:hover {
+      color: #ffffff;
+      background: rgba(93, 173, 226, 0.25);
+      border-color: rgba(93, 173, 226, 0.6);
+    }
+    .agy-ctx-btn-limit-512 {
+      color: #a569bd;
+      background: rgba(165, 105, 189, 0.12);
+      border-color: rgba(165, 105, 189, 0.4);
+    }
+    .agy-ctx-btn-limit-512:hover {
+      color: #ffffff;
+      background: rgba(165, 105, 189, 0.28);
+      border-color: rgba(165, 105, 189, 0.7);
+    }
+    .agy-ctx-btn-limit-900 {
+      color: #f39c12;
+      background: rgba(243, 156, 18, 0.14);
+      border-color: rgba(243, 156, 18, 0.45);
+    }
+    .agy-ctx-btn-limit-900:hover {
+      color: #ffffff;
+      background: rgba(243, 156, 18, 0.3);
+      border-color: rgba(243, 156, 18, 0.75);
+    }
+    .agy-ctx-menu {
+      position: absolute;
+      bottom: calc(100% + 4px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1e1e24;
+      border: 1px solid rgba(128, 128, 128, 0.35);
+      border-radius: 6px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65);
+      z-index: 10000;
+      padding: 6px 0;
+      display: flex;
+      flex-direction: column;
+      min-width: 215px;
+      text-align: left;
+    }
+    .agy-ctx-menu-hdr {
+      padding: 2px 10px 5px 10px;
+      font-size: 10px;
+      color: #94a3b8;
+      border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .agy-ctx-custom-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 10px;
+      border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .agy-ctx-custom-input {
+      flex: 1;
+      min-width: 0;
+      width: 90px;
+      background: #121216;
+      border: 1px solid rgba(93, 173, 226, 0.45);
+      border-radius: 3px;
+      color: #f8fafc;
+      font-family: inherit;
+      font-size: 11px;
+      padding: 3px 6px;
+      outline: none;
+      user-select: text;
+    }
+    .agy-ctx-custom-input:focus {
+      border-color: #5dade2;
+      box-shadow: 0 0 0 1px rgba(93, 173, 226, 0.35);
+    }
+    .agy-ctx-custom-unit {
+      font-size: 10.5px;
+      color: #94a3b8;
+      font-weight: 600;
+    }
+    .agy-ctx-custom-apply {
+      padding: 3px 7px;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: #fff;
+      background: rgba(93, 173, 226, 0.28);
+      border: 1px solid rgba(93, 173, 226, 0.55);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .agy-ctx-custom-apply:hover {
+      background: rgba(93, 173, 226, 0.48);
+    }
+    .agy-ctx-menu-item {
+      padding: 5px 10px;
+      font-size: 11px;
+      color: #cbd5e1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .agy-ctx-menu-item:hover {
+      background: rgba(93, 173, 226, 0.2);
+      color: #ffffff;
+    }
+    .agy-ctx-menu-item.active {
+      font-weight: bold;
+      color: #5dade2;
+    }
+    .agy-ctx-menu-hint {
+      font-size: 9.5px;
+      color: rgba(160, 165, 175, 0.7);
+    }
+    .agy-ctx-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.62);
+      backdrop-filter: blur(2px);
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #e2e8f0;
+    }
+    .agy-ctx-modal {
+      background: #18181d;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 8px;
+      width: 100%;
+      max-width: 820px;
+      max-height: 84vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.7);
+      overflow: hidden;
+    }
+    .agy-ctx-modal-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: #202027;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      font-size: 12.5px;
+      font-weight: 600;
+    }
+    .agy-ctx-modal-hdr-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .agy-ctx-modal-body {
+      padding: 14px;
+      overflow-y: auto;
+      font-size: 11.5px;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .agy-ctx-card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+      gap: 8px;
+    }
+    .agy-ctx-card {
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .agy-ctx-card-lbl {
+      font-size: 10px;
+      color: #94a3b8;
+      margin-bottom: 2px;
+    }
+    .agy-ctx-card-val {
+      font-size: 13.5px;
+      font-weight: 700;
+    }
+    .agy-ctx-sec-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .agy-ctx-tbl {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    .agy-ctx-tbl th, .agy-ctx-tbl td {
+      padding: 4px 8px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+      text-align: left;
+    }
+    .agy-ctx-tbl th {
+      color: #94a3b8;
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
+      text-align: right;
+    }
+    ga-remote-control {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    ga-remote-control .app-container {
+      display: flex !important;
+      flex-direction: column !important;
+      height: 100vh !important;
+      height: 100dvh !important;
+      max-height: 100dvh !important;
+      overflow: hidden !important;
+      box-sizing: border-box !important;
+    }
+    ga-remote-control .iframe-panel {
+      min-height: 0 !important;
+      flex: 1 1 0% !important;
+      overflow: hidden !important;
+    }
+    .agy-rc-host-view {
+      flex-shrink: 0;
+      width: 100%;
+      background: #18181d;
+      border-top: 1px solid rgba(128, 128, 128, 0.25);
+      box-sizing: border-box;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      z-index: 1000;
+    }
+    .agy-rc-host-box .agy-ctx-statusbar {
+      margin-top: 0;
+      min-height: 24px;
+      padding: 5px 10px;
+      justify-content: center;
+      row-gap: 4px;
+      column-gap: 12px;
+    }
+    .agy-rc-host-box .agy-ctx-menu {
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(100% + 4px);
+    }
+    @media (max-width: 640px) {
+      .agy-ctx-statusbar,
+      .agy-rc-host-box .agy-ctx-statusbar {
+        min-height: 40px;
+        padding: 4px 8px;
+        row-gap: 3px;
+        column-gap: 8px;
+        font-size: 10.5px;
+      }
+      .agy-ctx-bar-wrap {
+        width: 34px;
+      }
+      .agy-ctx-sep-pipe,
+      .agy-ctx-quota-left {
+        display: none;
+      }
+      .agy-ctx-group-ctx {
+        flex-basis: 100%;
+      }
+      .agy-ctx-menu,
+      .agy-rc-host-box .agy-ctx-menu {
+        min-width: min(250px, calc(100vw - 24px));
+        max-width: calc(100vw - 16px);
+      }
+      .agy-ctx-menu-item {
+        padding: 7px 12px;
+        font-size: 12px;
+      }
+      .agy-ctx-custom-input {
+        font-size: 16px;
+        padding: 4px 8px;
+      }
+      .agy-ctx-custom-apply {
+        padding: 5px 10px;
+        font-size: 11.5px;
+      }
+      .agy-ctx-modal-backdrop {
+        padding: 8px;
+      }
+      .agy-ctx-modal {
+        max-height: 90vh;
+        max-height: 90dvh;
+      }
+      .agy-ctx-modal-hdr {
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 8px 10px;
+        font-size: 11.5px;
+      }
+      .agy-ctx-modal-body {
+        padding: 10px;
+        gap: 10px;
+      }
+      .agy-ctx-card-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .agy-ctx-tbl {
+        display: block;
+        overflow-x: auto;
+      }
+    }
+`.replace(/\s+/g, ' ').trim();
     function buildDynamicCwWarnCss(underDefaultCwSet) {
       const selectors = ['[data-testid="model-selector-trigger"][data-agy-cw-warn="0"] div:has(> .text-warning)'];
       for (const cw of underDefaultCwSet) {
@@ -1311,6 +1318,12 @@
         getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
         getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
         getLatestQuota: () => quotaData,
+        dispose() {
+          if (cacheFlushTimer) {
+            clearTimeout(cacheFlushTimer);
+            cacheFlushTimer = null;
+          }
+        },
       };
     }
     module.exports = {
@@ -1969,18 +1982,54 @@
             return encodeTextToBytes(JSON.stringify(j));
           }
           const suffix = buildSendMessageCheckpointSuffix(limit, cw);
+          const readProtobufVarint = (buf, startOffset) => {
+            let val = 0;
+            let shift = 0;
+            for (let i = 0; i < 10; i++) {
+              const idx = startOffset + i;
+              if (idx >= buf.length) return null;
+              const b = buf[idx];
+              val += (b & 0x7f) * (2 ** shift);
+              if ((b & 0x80) === 0) {
+                return { value: val, nextOffset: idx + 1 };
+              }
+              shift += 7;
+            }
+            return null;
+          };
+          const isValidCheckpointSuffixAt = (buf, pos) => {
+            if (pos < 0 || pos >= buf.length || buf[pos] !== 0x2a) return false;
+            const ccLenVar = readProtobufVarint(buf, pos + 1);
+            if (!ccLenVar || ccLenVar.nextOffset + ccLenVar.value !== buf.length) return false;
+            const innerPos = ccLenVar.nextOffset;
+            if (innerPos >= buf.length || buf[innerPos] !== 0x12) return false;
+            const cpLenVar = readProtobufVarint(buf, innerPos + 1);
+            if (!cpLenVar || cpLenVar.nextOffset + cpLenVar.value !== buf.length) return false;
+            const fieldPos = cpLenVar.nextOffset;
+            if (fieldPos >= buf.length || buf[fieldPos] !== 0x28) return false;
+            const limitVar = readProtobufVarint(buf, fieldPos + 1);
+            if (!limitVar || limitVar.value <= 0) return false;
+            if (limitVar.nextOffset === buf.length) return true;
+            const cwTagPos = limitVar.nextOffset;
+            if (cwTagPos + 2 > buf.length || buf[cwTagPos] !== 0xa2 || buf[cwTagPos + 1] !== 0x02) return false;
+            const cwLenVar = readProtobufVarint(buf, cwTagPos + 2);
+            return Boolean(cwLenVar && cwLenVar.value >= 1 && cwLenVar.value <= 16 && cwLenVar.nextOffset + cwLenVar.value === buf.length);
+          };
           const stripTrailingCheckpointSuffix = (bytes) => {
-            if (!bytes || bytes.length < 7) return bytes;
-            for (let pos = Math.max(0, bytes.length - 32); pos <= bytes.length - 7; pos++) {
-              if (bytes[pos] === 0x2a && bytes[pos + 2] === 0x12 && bytes[pos + 4] === 0x28) {
-                const ccLen = bytes[pos + 1];
-                const cpLen = bytes[pos + 3];
-                if (pos + 2 + ccLen === bytes.length && ccLen === cpLen + 2) {
-                  return bytes.subarray(0, pos);
+            if (!bytes || bytes.length < 6) return bytes;
+            let cur = bytes;
+            let stripped = true;
+            while (stripped && cur.length >= 6) {
+              stripped = false;
+              for (let pos = Math.max(0, cur.length - 32); pos <= cur.length - 6; pos++) {
+                if (isValidCheckpointSuffixAt(cur, pos)) {
+                  cur = cur.subarray(0, pos);
+                  stripped = true;
+                  break;
                 }
               }
             }
-            return bytes;
+            return cur;
           };
           const frameLen = u8.length >= 5
             ? (((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4])
@@ -2126,6 +2175,7 @@
         if (um && um[0] && um[0] !== ignoreUuid) return um[0];
         return null;
       }
+      const pendingSniffTimers = new Set();
       function sniffCascadeIdFromRpc(path, body, rcInst) {
         if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
         const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
@@ -2140,10 +2190,12 @@
               window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
               window.__agyRcStepCountByCascade[cid] = (window.__agyRcStepCountByCascade[cid] || 0) + 1;
             }
-            setTimeout(() => {
+            const t = setTimeout(() => {
+              pendingSniffTimers.delete(t);
               lastRcTrajectoryPollTs = 0;
               if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
             }, 1200);
+            pendingSniffTimers.add(t);
           }
           if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
             window.__agyOnCascadeSniffed(cid);
@@ -2601,6 +2653,10 @@
             }
           }
         }
+        if (!candidatePaths.length) {
+          const rcSelectedDir = svc?.rcInst?.localUserInfo?.selectedGeminiDir || window?.__agyRemoteControlInstance?.localUserInfo?.selectedGeminiDir || '';
+          if (rcSelectedDir) candidatePaths.push(rcSelectedDir);
+        }
         let geminiDir = null;
         for (const rawPath of candidatePaths) {
           let decoded = String(rawPath).trim();
@@ -2614,9 +2670,10 @@
           } else if (isFileUri && !norm.startsWith('/') && !/^[A-Za-z]:\//.test(norm)) {
             norm = '/' + norm;
           }
-          const idx = norm.indexOf('/.gemini/');
+          const normWithSlash = norm.endsWith('/') ? norm : norm + '/';
+          const idx = normWithSlash.indexOf('/.gemini/');
           if (idx !== -1) {
-            geminiDir = norm.slice(0, idx + '/.gemini'.length);
+            geminiDir = normWithSlash.slice(0, idx + '/.gemini'.length);
             break;
           }
         }
@@ -2626,14 +2683,15 @@
           const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
           const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
           const rf = await callRpc('readFile', '/exa.language_server_pb.LanguageServerService/ReadFile', { uri });
+          const rfRaw = rf?.content !== undefined ? rf.content : rf?.contents;
           if (rf instanceof Uint8Array || ArrayBuffer.isView(rf) || rf instanceof ArrayBuffer) {
             hostBundleText = decodeBytesToText(rf);
           } else if (typeof rf === 'string' && rf.length > 0) {
             hostBundleText = rf;
-          } else if (rf && (rf.content instanceof Uint8Array || ArrayBuffer.isView(rf.content) || rf.content instanceof ArrayBuffer)) {
-            hostBundleText = decodeBytesToText(rf.content);
-          } else if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
-            hostBundleText = decodeBase64ToUtf8(rf.content);
+          } else if (rfRaw instanceof Uint8Array || ArrayBuffer.isView(rfRaw) || rfRaw instanceof ArrayBuffer) {
+            hostBundleText = decodeBytesToText(rfRaw);
+          } else if (typeof rfRaw === 'string' && rfRaw.length > 0) {
+            hostBundleText = decodeBase64ToUtf8(rfRaw);
           }
           if (!hostBundleText) {
             readAttemptedAndFailed = true;
@@ -2643,22 +2701,40 @@
         const mcpEndStr = ['END_AGY_MCP', 'MANAGER'].join('_');
         const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
         const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
-        const mcpBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpBeginStr}(?:_V1)? ===|\\/\\* === ${mcpBeginStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
-        const mcpEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpEndStr}(?:_V1)? ===|\\/\\* === ${mcpEndStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
-        const koBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*$`, 'm');
-        const koEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*$`, 'm');
-        const mcpBeginMatch = mcpBeginRe.exec(hostBundleText);
-        const mcpEndMatch = mcpBeginMatch ? mcpEndRe.exec(hostBundleText.slice(mcpBeginMatch.index)) : null;
-        const mcpB = mcpBeginMatch ? mcpBeginMatch.index : -1;
-        const mcpE = mcpEndMatch ? mcpBeginMatch.index + mcpEndMatch.index : -1;
-        const mcpEndLen = mcpEndMatch ? mcpEndMatch[0].length : 0;
-        const koBeginMatch = koBeginRe.exec(hostBundleText);
-        const koEndMatch = koBeginMatch ? koEndRe.exec(hostBundleText.slice(koBeginMatch.index)) : null;
-        const koB = koBeginMatch ? koBeginMatch.index : -1;
-        const koE = koEndMatch ? koBeginMatch.index + koEndMatch.index : -1;
-        const koEndLen = koEndMatch ? koEndMatch[0].length : 0;
-        const mcpManagerCode = mcpB !== -1 && mcpE > mcpB ? hostBundleText.slice(mcpB, mcpE + mcpEndLen) : '';
-        const koTranslatorCode = koB !== -1 && koE > koB ? hostBundleText.slice(koB, koE + koEndLen) : '';
+        const mcpBeginRe = new RegExp(`^(?:\\/\\/ === ${mcpBeginStr}(?:_V1)? ===|\\/\\* === ${mcpBeginStr}(?:_V1)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+        const mcpEndRe = new RegExp(`^(?:\\/\\/ === ${mcpEndStr}(?:_V1)? ===|\\/\\* === ${mcpEndStr}(?:_V1)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+        const koBeginRe = new RegExp(`^(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*\\r?$`, 'gm');
+        const koEndRe = new RegExp(`^(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*\\r?$`, 'gm');
+        const findAnchoredSpan = (text, beginRe, endRe) => {
+          beginRe.lastIndex = 0;
+          const bMatch = beginRe.exec(text);
+          if (!bMatch) return { start: -1, end: -1 };
+          const start = bMatch.index;
+          endRe.lastIndex = bMatch.index + bMatch[0].length;
+          let eMatch = endRe.exec(text);
+          if (!eMatch) return { start, end: -1 };
+          let end = eMatch.index + eMatch[0].length;
+          while (true) {
+            const afterEnd = text.slice(end);
+            const nlMatch = /^(?:\r?\n)+/.exec(afterEnd);
+            if (!nlMatch) break;
+            const nextLineIdx = end + nlMatch[0].length;
+            endRe.lastIndex = nextLineIdx;
+            const nextEnd = endRe.exec(text);
+            if (nextEnd && nextEnd.index === nextLineIdx) {
+              end = nextEnd.index + nextEnd[0].length;
+            } else {
+              break;
+            }
+          }
+          return { start, end };
+        };
+        const mcpSpan = findAnchoredSpan(hostBundleText, mcpBeginRe, mcpEndRe);
+        const koSpan = findAnchoredSpan(hostBundleText, koBeginRe, koEndRe);
+        const mcpB = mcpSpan.start;
+        const koB = koSpan.start;
+        const mcpManagerCode = mcpSpan.start !== -1 && mcpSpan.end > mcpSpan.start ? hostBundleText.slice(mcpSpan.start, mcpSpan.end).trim() : '';
+        const koTranslatorCode = koSpan.start !== -1 && koSpan.end > koSpan.start ? hostBundleText.slice(koSpan.start, koSpan.end).trim() : '';
         const firstMarkerIdx = [mcpB, koB].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? hostBundleText.length;
         const baseSegment = hostBundleText.slice(0, firstMarkerIdx).trim();
         const sbFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'StatusBar'].join('')}\\s*\\(`, 'm');
@@ -3297,6 +3373,12 @@
         fetchHostInstalledPluginInfo,
         injectCheckpointLimitIntoSendRequest,
         buildSendMessageCheckpointSuffix,
+        dispose() {
+          for (const t of pendingSniffTimers) {
+            clearTimeout(t);
+          }
+          pendingSniffTimers.clear();
+        },
       };
     }
     module.exports = {
@@ -3421,9 +3503,9 @@
         if (!leftEl || !rightEl) {
           cleanupChildMenus(barEl);
           setHtml(barEl, `
-            <div class="agy-ctx-left"></div>
-            <div class="agy-ctx-right"></div>
-          `);
+        <div class="agy-ctx-left"></div>
+        <div class="agy-ctx-right"></div>
+      `);
           leftEl = barEl.querySelector('.agy-ctx-left');
           rightEl = barEl.querySelector('.agy-ctx-right');
         }
@@ -3592,17 +3674,17 @@
         const hdr = document.createElement('div');
         hdr.className = 'agy-ctx-menu-hdr';
         setHtml(hdr, `
-          <span>세션 컨텍스트 한도</span>
-          <span style="opacity:0.75">${escHtml(sessionLabel)}</span>
-        `);
+      <span>세션 컨텍스트 한도</span>
+      <span style="opacity:0.75">${escHtml(sessionLabel)}</span>
+    `);
         menu.appendChild(hdr);
         const customRow = document.createElement('div');
         customRow.className = 'agy-ctx-custom-row';
         setHtml(customRow, `
-          <input type="text" inputmode="numeric" pattern="[0-9]*" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
-          <span class="agy-ctx-custom-unit">K</span>
-          <button type="button" class="agy-ctx-custom-apply">적용</button>
-        `);
+      <input type="text" inputmode="numeric" pattern="[0-9]*" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
+      <span class="agy-ctx-custom-unit">K</span>
+      <button type="button" class="agy-ctx-custom-apply">적용</button>
+    `);
         menu.appendChild(customRow);
         let iframeDoc = null;
         try {
@@ -3664,9 +3746,9 @@
           item.className = 'agy-ctx-menu-item' + (cw === currentCw ? ' active' : '');
           item.setAttribute('data-cw-option', cw);
           setHtml(item, `
-            <span>${cw === currentCw ? '✓ ' : '  '}${escHtml(cw)}</span>
-            <span class="agy-ctx-menu-hint">${escHtml(cwStore.getQuotaHint(cw))}</span>
-          `);
+        <span>${cw === currentCw ? '✓ ' : '  '}${escHtml(cw)}</span>
+        <span class="agy-ctx-menu-hint">${escHtml(cwStore.getQuotaHint(cw))}</span>
+      `);
           item.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -3734,14 +3816,14 @@
             }
           }
           const html = `
-            <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
-              <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
-              <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
-              <span class="agy-ctx-sep">·</span>
-              <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
-            </span>
-            <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
-          `;
+        <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
+          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
+          <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
+          <span class="agy-ctx-sep">·</span>
+          <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
+        </span>
+        <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
+      `;
           if (containerEl.__lastHtml !== html) {
             containerEl.__lastHtml = html;
             const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
@@ -3887,19 +3969,19 @@
         backdrop.setAttribute?.('data-agy-no-translate', 'true');
         backdrop.setAttribute?.('translate', 'no');
         setHtml(backdrop, `
-          <div class="agy-ctx-modal" role="dialog" aria-label="Trajectory & Context Debug View">
-            <div class="agy-ctx-modal-hdr">
-              <span>Trajectory &amp; Context Debug View <span style="opacity:0.6;font-weight:400;font-size:11px">(${escHtml(cascadeId || 'unknown')})</span></span>
-              <div class="agy-ctx-modal-hdr-actions">
-                <button type="button" class="agy-ctx-btn" id="agy-ctx-toggle-inline-debug" title="채팅창 상단 내장 Trajectory Stats 표시 토글">[ inline stats ]</button>
-                <button type="button" class="agy-ctx-btn" id="agy-ctx-modal-close" title="닫기 (ESC)">[ × ]</button>
-              </div>
-            </div>
-            <div class="agy-ctx-modal-body" id="agy-ctx-modal-body">
-              <div style="opacity:0.75">컨텍스트 메타데이터를 불러오는 중…</div>
-            </div>
+      <div class="agy-ctx-modal" role="dialog" aria-label="Trajectory & Context Debug View">
+        <div class="agy-ctx-modal-hdr">
+          <span>Trajectory &amp; Context Debug View <span style="opacity:0.6;font-weight:400;font-size:11px">(${escHtml(cascadeId || 'unknown')})</span></span>
+          <div class="agy-ctx-modal-hdr-actions">
+            <button type="button" class="agy-ctx-btn" id="agy-ctx-toggle-inline-debug" title="채팅창 상단 내장 Trajectory Stats 표시 토글">[ inline stats ]</button>
+            <button type="button" class="agy-ctx-btn" id="agy-ctx-modal-close" title="닫기 (ESC)">[ × ]</button>
           </div>
-        `);
+        </div>
+        <div class="agy-ctx-modal-body" id="agy-ctx-modal-body">
+          <div style="opacity:0.75">컨텍스트 메타데이터를 불러오는 중…</div>
+        </div>
+      </div>
+    `);
         const closeModal = () => {
           backdrop.remove();
           window?.removeEventListener?.('keydown', onKeyDown);
@@ -4034,38 +4116,38 @@
               const gTok = Number(g.numTokens || 0);
               const gPct = used > 0 ? ((gTok / used) * 100).toFixed(1) : '0.0';
               return `<tr>
-                <td>${escHtml(g.name || g.type || g.source || 'Section')}</td>
-                <td class="num">${fmtNum(gTok)}</td>
-                <td class="num">${gPct}%</td>
-              </tr>`;
+            <td>${escHtml(g.name || g.type || g.source || 'Section')}</td>
+            <td class="num">${fmtNum(gTok)}</td>
+            <td class="num">${gPct}%</td>
+          </tr>`;
             }).join('');
             breakdownHtml = `
-              <div>
-                <div class="agy-ctx-sec-title"><span>Context Window Token Breakdown</span><span>Total: ${fmtNum(latestCwm?.tokenBreakdown?.totalTokens || used)}</span></div>
-                <table class="agy-ctx-tbl">
-                  <thead><tr><th>Group / Source</th><th class="num">Tokens</th><th class="num">Share</th></tr></thead>
-                  <tbody>${rows}</tbody>
-                </table>
-              </div>
-            `;
+          <div>
+            <div class="agy-ctx-sec-title"><span>Context Window Token Breakdown</span><span>Total: ${fmtNum(latestCwm?.tokenBreakdown?.totalTokens || used)}</span></div>
+            <table class="agy-ctx-tbl">
+              <thead><tr><th>Group / Source</th><th class="num">Tokens</th><th class="num">Share</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `;
           } else if (latestSections.length > 0) {
             const rows = latestSections.map((s, idx) => {
               const textLen = (s.content || s.templatedContent || '').length;
               return `<tr>
-                <td>#${idx + 1} ${escHtml(s.title || s.tokenType || 'PromptSection')}</td>
-                <td>${escHtml(s.tokenSource || s.metadata?.sourceType || '-')}</td>
-                <td class="num">${fmtNum(textLen)} chars</td>
-              </tr>`;
+            <td>#${idx + 1} ${escHtml(s.title || s.tokenType || 'PromptSection')}</td>
+            <td>${escHtml(s.tokenSource || s.metadata?.sourceType || '-')}</td>
+            <td class="num">${fmtNum(textLen)} chars</td>
+          </tr>`;
             }).join('');
             breakdownHtml = `
-              <div>
-                <div class="agy-ctx-sec-title"><span>Prompt Sections (${latestSections.length})</span></div>
-                <table class="agy-ctx-tbl">
-                  <thead><tr><th>Section Title</th><th>Source</th><th class="num">Size</th></tr></thead>
-                  <tbody>${rows}</tbody>
-                </table>
-              </div>
-            `;
+          <div>
+            <div class="agy-ctx-sec-title"><span>Prompt Sections (${latestSections.length})</span></div>
+            <table class="agy-ctx-tbl">
+              <thead><tr><th>Section Title</th><th>Source</th><th class="num">Size</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `;
           }
           const recentTurns = [];
           for (let i = metas.length - 1; i >= 0 && recentTurns.length < 12; i--) {
@@ -4082,62 +4164,62 @@
             const totP = inTok + crTok;
             const cPct = totP > 0 ? Math.round((crTok / totP) * 100) + '%' : '-';
             recentTurns.push(`
-              <tr>
-                <td>#${escHtml(stepIdx)}</td>
-                <td>${escHtml(cm.modelDisplayName || cm.responseModel || cm.model || '-')}</td>
-                <td class="num">${cwm?.estimatedTokensUsed ? fmtNum(cwm.estimatedTokensUsed) : '-'}</td>
-                <td class="num">${fmtNum(crTok)} (${cPct})</td>
-                <td class="num">${fmtNum(inTok)}</td>
-                <td class="num">${fmtNum(outTok)}${thkTok ? ` <span style="opacity:0.65">(+${fmtNum(thkTok)} thk)</span>` : ''}</td>
-              </tr>
-            `);
+          <tr>
+            <td>#${escHtml(stepIdx)}</td>
+            <td>${escHtml(cm.modelDisplayName || cm.responseModel || cm.model || '-')}</td>
+            <td class="num">${cwm?.estimatedTokensUsed ? fmtNum(cwm.estimatedTokensUsed) : '-'}</td>
+            <td class="num">${fmtNum(crTok)} (${cPct})</td>
+            <td class="num">${fmtNum(inTok)}</td>
+            <td class="num">${fmtNum(outTok)}${thkTok ? ` <span style="opacity:0.65">(+${fmtNum(thkTok)} thk)</span>` : ''}</td>
+          </tr>
+        `);
           }
           const info = hostBridge.getModelSelectorContextForView(view);
           const reduxSessionCw = info?.reduxStore?.getState?.()?.modelSelection?.byConversation?.[cascadeId]?.contextWindow || currentCw;
           if (bodyEl) {
             setHtml(bodyEl, `
-              <div class="agy-ctx-card-grid">
-                <div class="agy-ctx-card">
-                  <div class="agy-ctx-card-lbl">Context Used / Session Limit (${escHtml(reduxSessionCw)})</div>
-                  <div class="agy-ctx-card-val" style="color:${barColor}">${pct}% (${fmtNum(used)} / ${fmtNum(maxLimit)})</div>
-                  <div style="margin-top:5px;height:5px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden">
-                    <div style="width:${pct}%;height:100%;background:${barColor}"></div>
-                  </div>
-                </div>
-                <div class="agy-ctx-card">
-                  <div class="agy-ctx-card-lbl">Prompt Cache Hit Rate</div>
-                  <div class="agy-ctx-card-val agy-ctx-cache">${parsed.cachePct}%</div>
-                  <div style="font-size:10px;color:#94a3b8;margin-top:2px">Cache: ${fmtNum(parsed.cacheRead)} · Fresh Input: ${fmtNum(parsed.inputTok)}</div>
-                </div>
-                <div class="agy-ctx-card">
-                  <div class="agy-ctx-card-lbl">Trajectory Metadata</div>
-                  <div class="agy-ctx-card-val">${fmtNum(totalStepsLen)} steps · ${fmtNum(totalGenLen)} turns</div>
-                  <div style="font-size:10px;color:#94a3b8;margin-top:2px">Last Turn Max: ${fmtNum(parsed.trajectoryMax)} · Model: ${escHtml(latestModel || '-')}</div>
-                </div>
+          <div class="agy-ctx-card-grid">
+            <div class="agy-ctx-card">
+              <div class="agy-ctx-card-lbl">Context Used / Session Limit (${escHtml(reduxSessionCw)})</div>
+              <div class="agy-ctx-card-val" style="color:${barColor}">${pct}% (${fmtNum(used)} / ${fmtNum(maxLimit)})</div>
+              <div style="margin-top:5px;height:5px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden">
+                <div style="width:${pct}%;height:100%;background:${barColor}"></div>
               </div>
-              ${breakdownHtml}
-              <div>
-                <div class="agy-ctx-sec-title">
-                  <span>Recent Generator Turns (Latest ${recentTurns.length} of ${totalGenLen || metas.length})</span>
-                  <span style="font-weight:400;opacity:0.7">Trajectory ID: ${escHtml(trajectoryId || cascadeId)}</span>
-                </div>
-                <table class="agy-ctx-tbl">
-                  <thead>
-                    <tr>
-                      <th>Step</th>
-                      <th>Model</th>
-                      <th class="num">Est. Ctx</th>
-                      <th class="num">Cache Read</th>
-                      <th class="num">Fresh Input</th>
-                      <th class="num">Output (+Think)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${recentTurns.length ? recentTurns.join('') : '<tr><td colspan="6" style="opacity:0.6">생성된 턴 메타데이터가 아직 없습니다.</td></tr>'}
-                  </tbody>
-                </table>
-              </div>
-            `);
+            </div>
+            <div class="agy-ctx-card">
+              <div class="agy-ctx-card-lbl">Prompt Cache Hit Rate</div>
+              <div class="agy-ctx-card-val agy-ctx-cache">${parsed.cachePct}%</div>
+              <div style="font-size:10px;color:#94a3b8;margin-top:2px">Cache: ${fmtNum(parsed.cacheRead)} · Fresh Input: ${fmtNum(parsed.inputTok)}</div>
+            </div>
+            <div class="agy-ctx-card">
+              <div class="agy-ctx-card-lbl">Trajectory Metadata</div>
+              <div class="agy-ctx-card-val">${fmtNum(totalStepsLen)} steps · ${fmtNum(totalGenLen)} turns</div>
+              <div style="font-size:10px;color:#94a3b8;margin-top:2px">Last Turn Max: ${fmtNum(parsed.trajectoryMax)} · Model: ${escHtml(latestModel || '-')}</div>
+            </div>
+          </div>
+          ${breakdownHtml}
+          <div>
+            <div class="agy-ctx-sec-title">
+              <span>Recent Generator Turns (Latest ${recentTurns.length} of ${totalGenLen || metas.length})</span>
+              <span style="font-weight:400;opacity:0.7">Trajectory ID: ${escHtml(trajectoryId || cascadeId)}</span>
+            </div>
+            <table class="agy-ctx-tbl">
+              <thead>
+                <tr>
+                  <th>Step</th>
+                  <th>Model</th>
+                  <th class="num">Est. Ctx</th>
+                  <th class="num">Cache Read</th>
+                  <th class="num">Fresh Input</th>
+                  <th class="num">Output (+Think)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${recentTurns.length ? recentTurns.join('') : '<tr><td colspan="6" style="opacity:0.6">생성된 턴 메타데이터가 아직 없습니다.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        `);
           }
         } catch (err) {
           if (bodyEl) {
@@ -4665,7 +4747,19 @@
       win.__agyStatusBarCleanup = () => {
         delete win.__agyStatusBarActiveVersion;
         clearIntervalFn(timer);
+        win.removeEventListener?.('DOMContentLoaded', attachBodyObserver);
         if (obs) obs.disconnect();
+        for (const adapter of registry.getSortedAdapters()) {
+          if (typeof adapter.unmount === 'function') {
+            try { adapter.unmount(); } catch {}
+          }
+        }
+        if (typeof rpcClient?.dispose === 'function') {
+          try { rpcClient.dispose(); } catch {}
+        }
+        if (typeof hostBridge?.dispose === 'function') {
+          try { hostBridge.dispose(); } catch {}
+        }
         const m = doc.getElementById('agy-ctx-debug-modal');
         if (m) {
           if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
@@ -4680,6 +4774,19 @@
         for (const b of bars) b.remove();
         const hostViews = doc.querySelectorAll('.agy-rc-host-view');
         for (const hv of hostViews) hv.remove();
+        const styleEl = doc.getElementById?.('agy-ctx-statusbar-style');
+        if (styleEl && typeof styleEl.remove === 'function') {
+          styleEl.remove();
+        }
+        try {
+          const iframeStyle = doc.querySelector?.('ga-remote-control iframe')?.contentDocument?.getElementById?.('agy-ctx-statusbar-style');
+          if (iframeStyle && typeof iframeStyle.remove === 'function') iframeStyle.remove();
+        } catch {}
+        try {
+          delete win.agyStatusBar;
+        } catch {
+          win.agyStatusBar = undefined;
+        }
       };
       win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
       return win.agyStatusBar;

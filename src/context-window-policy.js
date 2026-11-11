@@ -92,6 +92,15 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     } catch {}
   }
 
+  function trimSessionMaps(maxEntries = 200) {
+    while (sessionCwMap.size > maxEntries) {
+      const firstKey = sessionCwMap.keys().next().value;
+      if (firstKey === undefined) break;
+      sessionCwMap.delete(firstKey);
+      sessionCwTsMap.delete(firstKey);
+    }
+  }
+
   function loadMapFromRaw(raw) {
     if (!raw) return;
     try {
@@ -106,6 +115,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
             }
           }
         }
+        trimSessionMaps(200);
       }
     } catch {}
   }
@@ -127,13 +137,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
   }
 
   function serializeSessionMap() {
-    if (sessionCwMap.size > 200) {
-      const firstKey = sessionCwMap.keys().next().value;
-      if (firstKey !== undefined) {
-        sessionCwMap.delete(firstKey);
-        sessionCwTsMap.delete(firstKey);
-      }
-    }
+    trimSessionMaps(200);
     return JSON.stringify(Object.fromEntries(sessionCwMap.entries()));
   }
 
@@ -263,6 +267,10 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
 
   function encodeRemoteAnnotationProfile(cascadeId) {
     if (!cascadeId) return null;
+    if (!sessionCwMap.has(cascadeId)) {
+      if (!hasSessionOverride(cascadeId)) return null;
+      getSavedContextWindow(cascadeId);
+    }
     const sessionCw = normalize(sessionCwMap.get(cascadeId));
     if (!sessionCw) return null;
     const defCw = normalize(defaultCwCache) || '512K';

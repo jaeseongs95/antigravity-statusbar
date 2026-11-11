@@ -687,19 +687,57 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
 
       const suffix = buildSendMessageCheckpointSuffix(limit, cw);
 
-      // Strip any previously injected trailing 0x2a cascade_config suffix (`[0x2a, ccLen, 0x12, cpLen, 0x28, ...]`)
+      // Strip any previously injected trailing 0x2a cascade_config suffix (`[0x2a, ccLen, 0x12, cpLen, 0x28, varint...]`)
+      const readProtobufVarint = (buf, startOffset) => {
+        let val = 0;
+        let shift = 0;
+        for (let i = 0; i < 10; i++) {
+          const idx = startOffset + i;
+          if (idx >= buf.length) return null;
+          const b = buf[idx];
+          val += (b & 0x7f) * (2 ** shift);
+          if ((b & 0x80) === 0) {
+            return { value: val, nextOffset: idx + 1 };
+          }
+          shift += 7;
+        }
+        return null;
+      };
+
+      const isValidCheckpointSuffixAt = (buf, pos) => {
+        if (pos < 0 || pos >= buf.length || buf[pos] !== 0x2a) return false;
+        const ccLenVar = readProtobufVarint(buf, pos + 1);
+        if (!ccLenVar || ccLenVar.nextOffset + ccLenVar.value !== buf.length) return false;
+        const innerPos = ccLenVar.nextOffset;
+        if (innerPos >= buf.length || buf[innerPos] !== 0x12) return false;
+        const cpLenVar = readProtobufVarint(buf, innerPos + 1);
+        if (!cpLenVar || cpLenVar.nextOffset + cpLenVar.value !== buf.length) return false;
+        const fieldPos = cpLenVar.nextOffset;
+        if (fieldPos >= buf.length || buf[fieldPos] !== 0x28) return false;
+        const limitVar = readProtobufVarint(buf, fieldPos + 1);
+        if (!limitVar || limitVar.value <= 0) return false;
+        if (limitVar.nextOffset === buf.length) return true;
+        const cwTagPos = limitVar.nextOffset;
+        if (cwTagPos + 2 > buf.length || buf[cwTagPos] !== 0xa2 || buf[cwTagPos + 1] !== 0x02) return false;
+        const cwLenVar = readProtobufVarint(buf, cwTagPos + 2);
+        return Boolean(cwLenVar && cwLenVar.value >= 1 && cwLenVar.value <= 16 && cwLenVar.nextOffset + cwLenVar.value === buf.length);
+      };
+
       const stripTrailingCheckpointSuffix = (bytes) => {
-        if (!bytes || bytes.length < 7) return bytes;
-        for (let pos = Math.max(0, bytes.length - 32); pos <= bytes.length - 7; pos++) {
-          if (bytes[pos] === 0x2a && bytes[pos + 2] === 0x12 && bytes[pos + 4] === 0x28) {
-            const ccLen = bytes[pos + 1];
-            const cpLen = bytes[pos + 3];
-            if (pos + 2 + ccLen === bytes.length && ccLen === cpLen + 2) {
-              return bytes.subarray(0, pos);
+        if (!bytes || bytes.length < 6) return bytes;
+        let cur = bytes;
+        let stripped = true;
+        while (stripped && cur.length >= 6) {
+          stripped = false;
+          for (let pos = Math.max(0, cur.length - 32); pos <= cur.length - 6; pos++) {
+            if (isValidCheckpointSuffixAt(cur, pos)) {
+              cur = cur.subarray(0, pos);
+              stripped = true;
+              break;
             }
           }
         }
-        return bytes;
+        return cur;
       };
 
       // 2. Connect-RPC / gRPC-Web 5-byte framed envelope (`[flags(1B), length(4B), payload]`)
@@ -861,6 +899,8 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     return null;
   }
 
+  const pendingSniffTimers = new Set();
+
   function sniffCascadeIdFromRpc(path, body, rcInst) {
     if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
     const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
@@ -875,10 +915,12 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
           window.__agyRcStepCountByCascade = window.__agyRcStepCountByCascade || {};
           window.__agyRcStepCountByCascade[cid] = (window.__agyRcStepCountByCascade[cid] || 0) + 1;
         }
-        setTimeout(() => {
+        const t = setTimeout(() => {
+          pendingSniffTimers.delete(t);
           lastRcTrajectoryPollTs = 0;
           if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
         }, 1200);
+        pendingSniffTimers.add(t);
       }
       if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
         window.__agyOnCascadeSniffed(cid);
@@ -1358,6 +1400,11 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       }
     }
 
+    if (!candidatePaths.length) {
+      const rcSelectedDir = svc?.rcInst?.localUserInfo?.selectedGeminiDir || window?.__agyRemoteControlInstance?.localUserInfo?.selectedGeminiDir || '';
+      if (rcSelectedDir) candidatePaths.push(rcSelectedDir);
+    }
+
     let geminiDir = null;
     for (const rawPath of candidatePaths) {
       let decoded = String(rawPath).trim();
@@ -1371,9 +1418,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       } else if (isFileUri && !norm.startsWith('/') && !/^[A-Za-z]:\//.test(norm)) {
         norm = '/' + norm;
       }
-      const idx = norm.indexOf('/.gemini/');
+      const normWithSlash = norm.endsWith('/') ? norm : norm + '/';
+      const idx = normWithSlash.indexOf('/.gemini/');
       if (idx !== -1) {
-        geminiDir = norm.slice(0, idx + '/.gemini'.length);
+        geminiDir = normWithSlash.slice(0, idx + '/.gemini'.length);
         break;
       }
     }
@@ -1384,14 +1432,15 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
       const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
       const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
       const rf = await callRpc('readFile', '/exa.language_server_pb.LanguageServerService/ReadFile', { uri });
+      const rfRaw = rf?.content !== undefined ? rf.content : rf?.contents;
       if (rf instanceof Uint8Array || ArrayBuffer.isView(rf) || rf instanceof ArrayBuffer) {
         hostBundleText = decodeBytesToText(rf);
       } else if (typeof rf === 'string' && rf.length > 0) {
         hostBundleText = rf;
-      } else if (rf && (rf.content instanceof Uint8Array || ArrayBuffer.isView(rf.content) || rf.content instanceof ArrayBuffer)) {
-        hostBundleText = decodeBytesToText(rf.content);
-      } else if (rf && typeof rf.content === 'string' && rf.content.length > 0) {
-        hostBundleText = decodeBase64ToUtf8(rf.content);
+      } else if (rfRaw instanceof Uint8Array || ArrayBuffer.isView(rfRaw) || rfRaw instanceof ArrayBuffer) {
+        hostBundleText = decodeBytesToText(rfRaw);
+      } else if (typeof rfRaw === 'string' && rfRaw.length > 0) {
+        hostBundleText = decodeBase64ToUtf8(rfRaw);
       }
       if (!hostBundleText) {
         readAttemptedAndFailed = true;
@@ -1403,25 +1452,43 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
     const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER_V2'].join('_');
 
-    const mcpBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpBeginStr}(?:_V1)? ===|\\/\\* === ${mcpBeginStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
-    const mcpEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${mcpEndStr}(?:_V1)? ===|\\/\\* === ${mcpEndStr}(?:_V1)? === \\*\\/)[ \\t]*$`, 'm');
-    const koBeginRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*$`, 'm');
-    const koEndRe = new RegExp(`^[ \\t]*(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*$`, 'm');
+    const mcpBeginRe = new RegExp(`^(?:\\/\\/ === ${mcpBeginStr}(?:_V1)? ===|\\/\\* === ${mcpBeginStr}(?:_V1)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+    const mcpEndRe = new RegExp(`^(?:\\/\\/ === ${mcpEndStr}(?:_V1)? ===|\\/\\* === ${mcpEndStr}(?:_V1)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+    const koBeginRe = new RegExp(`^(?:\\/\\/ === ${koBeginStr} ===|\\/\\* === ${koBeginStr} === \\*\\/)[ \\t]*\\r?$`, 'gm');
+    const koEndRe = new RegExp(`^(?:\\/\\/ === ${koEndStr} ===|\\/\\* === ${koEndStr} === \\*\\/)[ \\t]*\\r?$`, 'gm');
 
-    const mcpBeginMatch = mcpBeginRe.exec(hostBundleText);
-    const mcpEndMatch = mcpBeginMatch ? mcpEndRe.exec(hostBundleText.slice(mcpBeginMatch.index)) : null;
-    const mcpB = mcpBeginMatch ? mcpBeginMatch.index : -1;
-    const mcpE = mcpEndMatch ? mcpBeginMatch.index + mcpEndMatch.index : -1;
-    const mcpEndLen = mcpEndMatch ? mcpEndMatch[0].length : 0;
+    const findAnchoredSpan = (text, beginRe, endRe) => {
+      beginRe.lastIndex = 0;
+      const bMatch = beginRe.exec(text);
+      if (!bMatch) return { start: -1, end: -1 };
+      const start = bMatch.index;
+      endRe.lastIndex = bMatch.index + bMatch[0].length;
+      let eMatch = endRe.exec(text);
+      if (!eMatch) return { start, end: -1 };
+      let end = eMatch.index + eMatch[0].length;
+      while (true) {
+        const afterEnd = text.slice(end);
+        const nlMatch = /^(?:\r?\n)+/.exec(afterEnd);
+        if (!nlMatch) break;
+        const nextLineIdx = end + nlMatch[0].length;
+        endRe.lastIndex = nextLineIdx;
+        const nextEnd = endRe.exec(text);
+        if (nextEnd && nextEnd.index === nextLineIdx) {
+          end = nextEnd.index + nextEnd[0].length;
+        } else {
+          break;
+        }
+      }
+      return { start, end };
+    };
 
-    const koBeginMatch = koBeginRe.exec(hostBundleText);
-    const koEndMatch = koBeginMatch ? koEndRe.exec(hostBundleText.slice(koBeginMatch.index)) : null;
-    const koB = koBeginMatch ? koBeginMatch.index : -1;
-    const koE = koEndMatch ? koBeginMatch.index + koEndMatch.index : -1;
-    const koEndLen = koEndMatch ? koEndMatch[0].length : 0;
+    const mcpSpan = findAnchoredSpan(hostBundleText, mcpBeginRe, mcpEndRe);
+    const koSpan = findAnchoredSpan(hostBundleText, koBeginRe, koEndRe);
+    const mcpB = mcpSpan.start;
+    const koB = koSpan.start;
 
-    const mcpManagerCode = mcpB !== -1 && mcpE > mcpB ? hostBundleText.slice(mcpB, mcpE + mcpEndLen) : '';
-    const koTranslatorCode = koB !== -1 && koE > koB ? hostBundleText.slice(koB, koE + koEndLen) : '';
+    const mcpManagerCode = mcpSpan.start !== -1 && mcpSpan.end > mcpSpan.start ? hostBundleText.slice(mcpSpan.start, mcpSpan.end).trim() : '';
+    const koTranslatorCode = koSpan.start !== -1 && koSpan.end > koSpan.start ? hostBundleText.slice(koSpan.start, koSpan.end).trim() : '';
 
     const firstMarkerIdx = [mcpB, koB].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? hostBundleText.length;
     const baseSegment = hostBundleText.slice(0, firstMarkerIdx).trim();
@@ -2119,6 +2186,12 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore }) 
     fetchHostInstalledPluginInfo,
     injectCheckpointLimitIntoSendRequest,
     buildSendMessageCheckpointSuffix,
+    dispose() {
+      for (const t of pendingSniffTimers) {
+        clearTimeout(t);
+      }
+      pendingSniffTimers.clear();
+    },
   };
 }
 

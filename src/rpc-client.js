@@ -403,6 +403,12 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
     getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
     getLatestQuota: () => quotaData,
+    dispose() {
+      if (cacheFlushTimer) {
+        clearTimeout(cacheFlushTimer);
+        cacheFlushTimer = null;
+      }
+    },
   };
 }
 

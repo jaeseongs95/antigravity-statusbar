@@ -20,10 +20,32 @@ const TARGET_PATCHER = path.join(AGY_DIR, 'ensure_statusbar_patch.js');
 
 const SRC_PATCHER = path.join(__dirname, 'ensure_statusbar_patch.js');
 
-const MCP_BEGIN = '// === BEGIN_AGY_MCP_MANAGER_V1 ===';
-const MCP_END = '// === END_AGY_MCP_MANAGER_V1 ===';
-const KO_BEGIN = '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===';
-const KO_END = '// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===';
+const MCP_BEGIN_RE = /^(?:\/\/ === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const MCP_END_RE = /^(?:\/\/ === END_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === END_AGY_MCP_MANAGER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const KO_BEGIN_RE = /^(?:\/\/ === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const KO_END_RE = /^(?:\/\/ === END_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === END_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+
+function extractAnchoredCompanionBlock(source, beginRe, endRe) {
+  if (!source || typeof source !== 'string') return '';
+  beginRe.lastIndex = 0;
+  const beginMatch = beginRe.exec(source);
+  if (!beginMatch) return '';
+  const startIdx = beginMatch.index;
+
+  endRe.lastIndex = startIdx + beginMatch[0].length;
+  const firstEnd = endRe.exec(source);
+  if (!firstEnd) return '';
+
+  let endIdx = firstEnd.index + firstEnd[0].length;
+  while (true) {
+    endRe.lastIndex = endIdx;
+    const nextEnd = endRe.exec(source);
+    if (!nextEnd) break;
+    if (source.slice(endIdx, nextEnd.index).trim() !== '') break;
+    endIdx = nextEnd.index + nextEnd[0].length;
+  }
+  return source.slice(startIdx, endIdx).trim();
+}
 
 function install() {
   const { outFile } = buildBundle();
@@ -31,20 +53,16 @@ function install() {
 
   let baseCode = fs.readFileSync(outFile, 'utf8').replace(/\r\n/g, '\n').trimEnd() + '\n';
 
-  // Preserve embedded antigravity-mcp-manager and ko-thought-translator blocks if already present
+  // Preserve embedded antigravity-mcp-manager and ko-thought-translator blocks only when anchored at column 0
   if (fs.existsSync(TARGET_AUTOINJECT)) {
-    const existing = fs.readFileSync(TARGET_AUTOINJECT, 'utf8');
-    const mcpB = existing.indexOf(MCP_BEGIN);
-    const mcpE = existing.indexOf(MCP_END);
-    if (mcpB !== -1 && mcpE !== -1 && mcpE > mcpB) {
-      const mcpBlock = existing.slice(mcpB, mcpE + MCP_END.length);
+    const existing = fs.readFileSync(TARGET_AUTOINJECT, 'utf8').replace(/\r\n/g, '\n');
+    const mcpBlock = extractAnchoredCompanionBlock(existing, MCP_BEGIN_RE, MCP_END_RE);
+    if (mcpBlock) {
       baseCode += `\n${mcpBlock}\n`;
     }
-    const bIdx = existing.indexOf(KO_BEGIN);
-    const eIdx = existing.indexOf(KO_END);
-    if (bIdx !== -1 && eIdx !== -1 && eIdx > bIdx) {
-      const embeddedBlock = existing.slice(bIdx, eIdx + KO_END.length);
-      baseCode += `\n${embeddedBlock}\n`;
+    const koBlock = extractAnchoredCompanionBlock(existing, KO_BEGIN_RE, KO_END_RE);
+    if (koBlock) {
+      baseCode += `\n${koBlock}\n`;
     }
   }
 
@@ -82,4 +100,4 @@ if (require.main === module) {
   install();
 }
 
-module.exports = { install };
+module.exports = { install, extractAnchoredCompanionBlock };

@@ -33,16 +33,113 @@ function normalizeId(relPath) {
 }
 
 function stripCommentsAndEmptyLines(source) {
-  return source
-    .split('\n')
-    .filter((line) => {
-      const t = line.trim();
-      if (!t) return false;
-      if (t.startsWith('//')) return false;
-      return true;
-    })
-    .map((line) => (line ? `    ${line}` : ''))
-    .join('\n');
+  const lines = source.split('\n');
+  const out = [];
+  const stack = [];
+  let inBlockComment = false;
+
+  for (const line of lines) {
+    const startsInTemplate = stack.length > 0 && stack[stack.length - 1].mode === 'TEMPLATE';
+    const startsInBlockComment = inBlockComment;
+
+    // Advance lexical state across this line
+    let i = 0;
+    let inSingle = false;
+    let inDouble = false;
+    while (i < line.length) {
+      const ch = line[i];
+      const next = line[i + 1] || '';
+      const top = stack.length > 0 ? stack[stack.length - 1] : null;
+
+      if (top && top.mode === 'TEMPLATE') {
+        if (ch === '\\') {
+          i += 2;
+          continue;
+        }
+        if (ch === '`') {
+          stack.pop();
+          i += 1;
+          continue;
+        }
+        if (ch === '$' && next === '{') {
+          stack.push({ mode: 'TEMPLATE_EXPR', braceDepth: 1 });
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (inBlockComment) {
+        if (ch === '*' && next === '/') {
+          inBlockComment = false;
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (inSingle) {
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === "'") inSingle = false;
+        i += 1;
+        continue;
+      }
+
+      if (inDouble) {
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === '"') inDouble = false;
+        i += 1;
+        continue;
+      }
+
+      if (ch === '/' && next === '/') {
+        break;
+      }
+      if (ch === '/' && next === '*') {
+        inBlockComment = true;
+        i += 2;
+        continue;
+      }
+      if (ch === "'") {
+        inSingle = true;
+        i += 1;
+        continue;
+      }
+      if (ch === '"') {
+        inDouble = true;
+        i += 1;
+        continue;
+      }
+      if (ch === '`') {
+        stack.push({ mode: 'TEMPLATE' });
+        i += 1;
+        continue;
+      }
+      if (top && top.mode === 'TEMPLATE_EXPR') {
+        if (ch === '{') {
+          top.braceDepth += 1;
+        } else if (ch === '}') {
+          top.braceDepth -= 1;
+          if (top.braceDepth === 0) stack.pop();
+        }
+      }
+      i += 1;
+    }
+
+    if (startsInTemplate) {
+      out.push(line);
+      continue;
+    }
+
+    const t = line.trim();
+    if (!t) continue;
+    if (!startsInBlockComment && t.startsWith('//')) continue;
+    out.push(`    ${line}`);
+  }
+
+  return out.join('\n');
 }
 
 function buildBundle(options = {}) {

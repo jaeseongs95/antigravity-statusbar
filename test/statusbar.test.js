@@ -2206,3 +2206,455 @@ describe('ASAR exact-size transformation', () => {
     );
   });
 });
+
+describe('D-0015..D-0021 full audit regressions', () => {
+  it('D-0015: install.js and host-bridge extractCompanionBlocks ignore indented marker literals and preserve block-comment/double-wrapped companion blocks', async () => {
+    const { createHostBridge } = require('../src/host-bridge.js');
+    const installCode = fs.readFileSync(SRC_INSTALL_PATH, 'utf8').replace(/^#!.*\n/, '');
+    const existingBundle = [
+      '/* statusbar old */',
+      'function mountStatusBar() {}',
+      '',
+      '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+      '/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */',
+      '(() => {',
+      '  const markerLiterals = [',
+      "    '// === BEGIN_AGY_MCP_MANAGER_V1 ===',",
+      "    '// === END_AGY_MCP_MANAGER_V1 ===',",
+      "    '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===',",
+      '  ];',
+      '  // === BEGIN_AGY_MCP_MANAGER_V1 ===',
+      '  // === END_AGY_MCP_MANAGER_V1 ===',
+      '  globalThis.__koMarkerCount = markerLiterals.length;',
+      '})();',
+      '/* === END_AGY_KO_THOUGHT_LOCALIZER_V2 === */',
+      '// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+      '',
+    ].join('\n');
+
+    const virtualFiles = new Map();
+    const fakeHome = '/virtual-home';
+    const targetAuto = path.join(fakeHome, '.gemini', 'antigravity', 'statusbar_autoinject.js');
+    virtualFiles.set(targetAuto, existingBundle);
+    virtualFiles.set('/virtual-out/statusbar_autoinject.js', '(() => { function mountStatusBar() {} globalThis.__sbOk = true; })();\n');
+
+    const customRequire = (spec) => {
+      if (spec === 'fs') {
+        return {
+          mkdirSync() {},
+          existsSync: (p) => virtualFiles.has(p) || p === SRC_PATCHER_PATH,
+          readFileSync: (p) => virtualFiles.get(p) || '',
+          writeFileSync: (p, data) => virtualFiles.set(p, String(data)),
+          copyFileSync() {},
+        };
+      }
+      if (spec === 'os') return { homedir: () => fakeHome };
+      if (spec === 'path') return path;
+      if (spec === 'child_process') {
+        return { spawnSync: () => ({ status: 0, stdout: '', stderr: '' }) };
+      }
+      if (spec === './build') {
+        return { buildBundle: () => ({ outFile: '/virtual-out/statusbar_autoinject.js' }) };
+      }
+      return require(spec);
+    };
+
+    const mod = { exports: {} };
+    const sbInstallCtx = vm.createContext({
+      require: customRequire,
+      module: mod,
+      exports: mod.exports,
+      __dirname: path.dirname(SRC_INSTALL_PATH),
+      __filename: SRC_INSTALL_PATH,
+      process: {
+        env: { USERPROFILE: fakeHome, HOME: fakeHome },
+        execPath: process.execPath,
+        stdout: { write() {} },
+        stderr: { write() {} },
+        exit() {},
+      },
+      Buffer,
+      console,
+    });
+    new vm.Script(installCode, { filename: 'install.js' }).runInContext(sbInstallCtx);
+    mod.exports.install();
+
+    const merged = virtualFiles.get(targetAuto);
+    assert.ok(merged, 'D-0015: install() must write merged statusbar_autoinject.js');
+    assert.doesNotThrow(
+      () => new vm.Script(merged, { filename: 'merged_statusbar_autoinject.js' }),
+      'D-0015: install() must not slice indented string literals into a broken MCP block causing SyntaxError'
+    );
+    const evalCtx = vm.createContext({ globalThis: {} });
+    evalCtx.globalThis = evalCtx;
+    new vm.Script(merged).runInContext(evalCtx);
+    assert.equal(evalCtx.__sbOk, true);
+    assert.equal(evalCtx.__koMarkerCount, 3, 'D-0015: ko-thought-translator block must execute intact');
+    assert.equal(
+      /^\/\/ === BEGIN_AGY_MCP_MANAGER_V1 ===$/m.test(merged),
+      false,
+      'D-0015: install() must not synthesize a top-level MCP block when none was installed'
+    );
+
+    // Also verify block-comment-only companion markers (`/* === BEGIN_... === */`) are preserved by install()
+    const blockCommentExisting = [
+      'function mountStatusBar() {}',
+      '/* === BEGIN_AGY_MCP_MANAGER === */',
+      'globalThis.__mcpBlockCommentOk = 1;',
+      '/* === END_AGY_MCP_MANAGER === */',
+      '/* === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 === */',
+      'globalThis.__koBlockCommentOk = 2;',
+      '/* === END_AGY_KO_THOUGHT_LOCALIZER_V2 === */',
+    ].join('\n');
+    virtualFiles.set(targetAuto, blockCommentExisting);
+    mod.exports.install();
+    const mergedBlockComment = virtualFiles.get(targetAuto);
+    const evalCtx2 = vm.createContext({});
+    evalCtx2.globalThis = evalCtx2;
+    new vm.Script(mergedBlockComment).runInContext(evalCtx2);
+    assert.equal(evalCtx2.__mcpBlockCommentOk, 1, 'D-0015: block-comment MCP block must be preserved');
+    assert.equal(evalCtx2.__koBlockCommentOk, 2, 'D-0015: block-comment KO block must be preserved');
+
+    // Verify hostBridge.fetchHostInstalledPluginInfo ignores indented markers and captures trailing outer end marker
+    const encodedBytes = new TextEncoder().encode(existingBundle);
+    const fakeRc = {
+      destroyed: false,
+      localUserInfo: { selectedGeminiDir: '/virtual-home/.gemini' },
+      async proxyCommand(method) {
+        if (String(method).includes('GetCustomizationStates')) {
+          return { payload: new TextEncoder().encode(JSON.stringify({ states: [] })) };
+        }
+        if (String(method).includes('ReadFile')) {
+          return { payload: new TextEncoder().encode(JSON.stringify({ contents: Buffer.from(encodedBytes).toString('base64') })) };
+        }
+        return { payload: new Uint8Array(0) };
+      },
+    };
+    const fakeWin = {
+      __agyRemoteControlInstance: fakeRc,
+      fetch: async () => ({ ok: true }),
+      document: { querySelector: () => null, querySelectorAll: () => [] },
+    };
+    const cwStore = createContextWindowStore({ document: { cookie: '' }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} } });
+    const bridge = createHostBridge({
+      window: fakeWin,
+      document: fakeWin.document,
+      cwStore,
+      rpcClient: { extractStatsFromMetas: () => null },
+    });
+    const hostInfo = await bridge.fetchHostInstalledPluginInfo({});
+    assert.equal(hostInfo.hasStatusbar, true);
+    assert.equal(hostInfo.hasKoTranslator, true);
+    assert.equal(hostInfo.hasMcpManager, false, 'D-0015: indented MCP marker comments/literals inside KO block must not set hasMcpManager=true');
+    assert.ok(
+      hostInfo.koTranslatorCode.endsWith('// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ==='),
+      'D-0015: double-wrapped KO block must include the final outer end marker line'
+    );
+  });
+
+  it('D-0016: ensure_statusbar_patch configureTargetViaCdp rejects on Runtime.evaluate exceptionDetails and requires all bundled plugins active', async () => {
+    const patcherSrc = fs.readFileSync(SRC_PATCHER_PATH, 'utf8').replace(/^#!.*\n/, '');
+    let nextWsBehavior = null;
+    let lastSentPayload = null;
+    class FakeWebSocket {
+      constructor(url) {
+        this.url = url;
+        setImmediate(() => {
+          if (typeof this.onopen === 'function') this.onopen();
+        });
+      }
+      send(raw) {
+        lastSentPayload = JSON.parse(raw);
+        if (nextWsBehavior) nextWsBehavior(this, lastSentPayload);
+      }
+      close() {}
+    }
+    const ctx = vm.createContext({
+      require,
+      module: { exports: {} },
+      exports: {},
+      __dirname: path.dirname(SRC_PATCHER_PATH),
+      __filename: SRC_PATCHER_PATH,
+      process: { ...process, argv: [process.execPath, SRC_PATCHER_PATH], exit() {} },
+      WebSocket: FakeWebSocket,
+      Buffer,
+      setTimeout,
+      clearTimeout,
+      console,
+    });
+    new vm.Script(
+      patcherSrc + '\n;globalThis.__testConfigureCdp = configureTargetViaCdp;',
+      { filename: 'ensure_statusbar_patch.js' }
+    ).runInContext(ctx);
+
+    nextWsBehavior = (ws) => {
+      setImmediate(() => {
+        ws.onmessage({
+          data: JSON.stringify({
+            id: 1,
+            result: {
+              result: { type: 'object', subtype: 'error', description: 'SyntaxError: Unexpected token' },
+              exceptionDetails: { text: 'Uncaught SyntaxError: Unexpected token' },
+            },
+          }),
+        });
+      });
+    };
+    await assert.rejects(
+      () => ctx.__testConfigureCdp('ws://127.0.0.1:9222/devtools/page/1', 'window.__x = 1;', 'hash-1', 1000),
+      /SyntaxError/,
+      'D-0016: configureTargetViaCdp must reject when Runtime.evaluate returns exceptionDetails'
+    );
+
+    const multiPluginScript = [
+      'function mountStatusBar() { window.agyStatusBar = {}; window.__agyStatusBarCleanup = () => {}; }',
+      'function mountMcpManager() { window.agyMcpManager = { destroy() {} }; }',
+      'window.__injectedRuns = (window.__injectedRuns || 0) + 1;',
+      'mountStatusBar(); mountMcpManager();',
+    ].join('\n');
+    nextWsBehavior = (ws) => {
+      setImmediate(() => {
+        ws.onmessage({ data: JSON.stringify({ id: 1, result: { result: { value: 'INJECTED_OK' } } }) });
+      });
+    };
+    await ctx.__testConfigureCdp('ws://127.0.0.1:9222/devtools/page/1', multiPluginScript, 'hash-multi', 1000);
+    const expr = lastSentPayload.params.expression;
+
+    // Case A: Statusbar is active on welcome screen (no .agy-ctx-statusbar DOM node), AND MCP manager is active -> ALREADY_ACTIVE
+    const welcomeWin = {
+      agyStatusBar: {},
+      __agyStatusBarCleanup: () => {},
+      agyMcpManager: { destroy() {} },
+      __agyStatusBarHash: 'hash-multi',
+      document: { querySelector: () => null },
+    };
+    welcomeWin.window = welcomeWin;
+    const resWelcome = vm.runInNewContext(expr, welcomeWin);
+    assert.equal(
+      resWelcome,
+      'ALREADY_ACTIVE',
+      'D-0016: mounted statusbar on welcome screen without .agy-ctx-statusbar DOM must still be recognized as ALREADY_ACTIVE'
+    );
+
+    // Case B: Statusbar is active, but bundled MCP manager is missing -> must re-inject instead of short-circuiting via OR
+    const partialWin = {
+      agyStatusBar: {},
+      __agyStatusBarCleanup: () => {},
+      __agyStatusBarHash: 'hash-multi',
+      document: { querySelector: () => ({}) },
+    };
+    partialWin.window = partialWin;
+    const resPartial = vm.runInNewContext(expr, partialWin);
+    assert.equal(
+      resPartial,
+      'INJECTED_OK',
+      'D-0016: when one bundled companion plugin is inactive, CDP guard must re-inject instead of returning ALREADY_ACTIVE'
+    );
+    assert.equal(partialWin.__injectedRuns, 1);
+  });
+
+  it('D-0017: scripts/build.js preserves blank lines, // lines, and zero-indentation inside multiline template literals', () => {
+    const buildSrc = fs.readFileSync(SRC_BUILD_PATH, 'utf8').replace(/^#!.*\n/, '');
+    const sampleTemplate = [
+      'const tpl = `first line',
+      '',
+      '// comment-like line inside template literal',
+      'no-indent line`;',
+      '// real comment to strip',
+      'module.exports = { tpl };',
+    ].join('\n');
+
+    const customRequire = (spec) => {
+      if (spec === 'fs') {
+        return {
+          readFileSync: (p) => {
+            if (String(p).endsWith('package.json')) return JSON.stringify({ version: '1.3.23' });
+            if (String(p).endsWith('index.js')) return "module.exports = require('./dom-styles');\n";
+            if (String(p).endsWith('dom-styles.js')) return sampleTemplate;
+            return 'module.exports = {};\n';
+          },
+          mkdirSync() {},
+          writeFileSync() {},
+        };
+      }
+      return require(spec);
+    };
+    const mod = { exports: {} };
+    const ctx = vm.createContext({
+      require: customRequire,
+      module: mod,
+      exports: mod.exports,
+      __dirname: path.dirname(SRC_BUILD_PATH),
+      __filename: SRC_BUILD_PATH,
+      process,
+      Buffer,
+      console,
+    });
+    new vm.Script(buildSrc, { filename: 'build.js' }).runInContext(ctx);
+    const { bundle } = mod.exports.buildBundle({ write: false });
+    const evalMod = { exports: {} };
+    const evalBox = vm.createContext({});
+    // Capture exported value by replacing final `__require('.', './index');` with global assignment
+    const runnable = bundle.replace("__require('.', './index');", "globalThis.__out = __require('.', './index');");
+    evalBox.globalThis = evalBox;
+    new vm.Script(runnable).runInContext(evalBox);
+    assert.equal(
+      evalBox.__out.tpl,
+      'first line\n\n// comment-like line inside template literal\nno-indent line',
+      'D-0017: bundler must preserve blank lines, // prefixes, and indentation inside multiline template literals'
+    );
+  });
+
+  it('D-0018: context-window-policy encodes cookie-only session overrides for server sync and enforces 200-entry cap on bulk maps', () => {
+    const lsMap = new Map();
+    const fakeLs = {
+      getItem: (k) => (lsMap.has(k) ? lsMap.get(k) : null),
+      setItem: (k, v) => lsMap.set(k, String(v)),
+      removeItem: (k) => lsMap.delete(k),
+    };
+    const cookieOnlyStore = createContextWindowStore({
+      document: { cookie: 'agy_cw_cookie-push-cid=900K%7C1793900000000; agy_default_cw=512K' },
+      localStorage: fakeLs,
+    });
+    const encoded = cookieOnlyStore.encodeRemoteAnnotationProfile('cookie-push-cid');
+    assert.ok(
+      typeof encoded === 'string' && encoded.includes('900K'),
+      'D-0018: encodeRemoteAnnotationProfile must restore cookie-only session override instead of returning null'
+    );
+
+    const bulkObj = {};
+    for (let i = 0; i < 210; i++) {
+      bulkObj[`cid-${String(i).padStart(3, '0')}`] = '512K';
+    }
+    lsMap.set('agy-session-ctx-windows-v1', JSON.stringify(bulkObj));
+    const cappedStore = createContextWindowStore({
+      document: { cookie: '' },
+      localStorage: fakeLs,
+    });
+    cappedStore.saveContextWindowSetting('cid-new', '900K');
+    const persisted = JSON.parse(lsMap.get('agy-session-ctx-windows-v1'));
+    assert.ok(
+      Object.keys(persisted).length <= 200,
+      `D-0018: serialized session map must enforce <= 200 entries cap, got ${Object.keys(persisted).length}`
+    );
+  });
+
+  it('D-0019: stripTrailingCheckpointSuffix preserves user protobuf payloads whose trailing bytes falsely resemble 1-byte suffix offsets and replaces multi-byte varint suffixes', () => {
+    const { createHostBridge } = require('../src/host-bridge.js');
+    const cwStore = createContextWindowStore({
+      document: { cookie: '' },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    });
+    const bridge = createHostBridge({
+      window: { fetch: async () => ({ ok: true }) },
+      document: { querySelector: () => null, querySelectorAll: () => [] },
+      cwStore,
+      rpcClient: { extractStatsFromMetas: () => null },
+    });
+    const sendRpcPath = '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage';
+
+    // Payload starts with valid protobuf field 1 string (`0x0a, 0x02, 0x68, 0x69`) followed by 7 bytes
+    // `[0x2a, 0x05, 0x12, 0x03, 0x28, 0x01, 0x10]` where `0x28, 0x01` ends 1 byte early (`0x10` extra field),
+    // so it is NOT a valid single-varint maxTokenLimit suffix!
+    cwStore.saveContextWindowSetting(null, '512K');
+    const falseLookalike = new Uint8Array([0x0a, 0x02, 0x68, 0x69, 0x2a, 0x05, 0x12, 0x03, 0x28, 0x01, 0x10]);
+    const expectedSuffix = bridge.buildSendMessageCheckpointSuffix(512000, '512K');
+    const out = bridge.injectCheckpointLimitIntoSendRequest(sendRpcPath, falseLookalike, null);
+    assert.equal(
+      out.length,
+      falseLookalike.length + expectedSuffix.length,
+      'D-0019: false-lookalike trailing bytes must NOT be stripped from user protobuf payload'
+    );
+    assert.deepEqual(Array.from(out.subarray(0, falseLookalike.length)), Array.from(falseLookalike));
+
+    // Conversely, a genuine prior checkpoint suffix (e.g. 256K -> replaced by 900K) MUST be cleanly replaced once
+    const baseMsg = new Uint8Array([0x0a, 0x02, 0x68, 0x69]);
+    cwStore.saveContextWindowSetting(null, '256K');
+    const with256k = bridge.injectCheckpointLimitIntoSendRequest(sendRpcPath, baseMsg, null);
+    cwStore.saveContextWindowSetting(null, '900K');
+    const with900k = bridge.injectCheckpointLimitIntoSendRequest(sendRpcPath, with256k, null);
+    const suffix900k = bridge.buildSendMessageCheckpointSuffix(900000, '900K');
+    assert.equal(with900k.length, baseMsg.length + suffix900k.length);
+    assert.deepEqual(Array.from(with900k.subarray(baseMsg.length)), Array.from(suffix900k));
+  });
+
+  it('D-0020: __agyStatusBarCleanup unmounts registered adapters, removes injected style tag, and clears window.agyStatusBar', () => {
+    const styleEl = { id: 'agy-ctx-statusbar-style', removed: false, remove() { this.removed = true; } };
+    const headChildren = [];
+    const fakeDoc = {
+      cookie: '',
+      head: {
+        appendChild(el) {
+          el.remove = () => {
+            el.removed = true;
+            const i = headChildren.indexOf(el);
+            if (i !== -1) headChildren.splice(i, 1);
+          };
+          headChildren.push(el);
+          return el;
+        },
+      },
+      body: {},
+      documentElement: {},
+      createElement(tag) {
+        return {
+          tagName: String(tag).toUpperCase(),
+          id: '',
+          className: '',
+          textContent: '',
+          style: {},
+          children: [],
+          attrs: {},
+          setAttribute(k, v) { this.attrs[k] = String(v); },
+          getAttribute(k) { return this.attrs[k] ?? null; },
+          appendChild(c) { this.children.push(c); return c; },
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          remove() { this.removed = true; },
+        };
+      },
+      getElementById(id) {
+        return headChildren.find((c) => c.id === id) || (id === styleEl.id && !styleEl.removed ? styleEl : null) || null;
+      },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    };
+    const fakeWin = {
+      document: fakeDoc,
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      setInterval: () => 1,
+      clearInterval() {},
+      MutationObserver: class { observe() {} disconnect() {} },
+    };
+
+    const api = mountStatusBar({ window: fakeWin, document: fakeDoc });
+    let customUnmounted = 0;
+    api.registerAdapter({
+      id: 'cleanup-probe-adapter',
+      slot: 'right',
+      render() {},
+      unmount() { customUnmounted += 1; },
+    });
+    assert.ok(fakeDoc.getElementById('agy-ctx-statusbar-style'), 'style element should exist after mount');
+    assert.ok(fakeWin.agyStatusBar, 'window.agyStatusBar should exist after mount');
+
+    fakeWin.__agyStatusBarCleanup();
+    assert.equal(customUnmounted, 1, 'D-0020: __agyStatusBarCleanup must call adapter.unmount()');
+    assert.equal(fakeDoc.getElementById('agy-ctx-statusbar-style'), null, 'D-0020: __agyStatusBarCleanup must remove injected style tag');
+    assert.equal(fakeWin.agyStatusBar, undefined, 'D-0020: __agyStatusBarCleanup must clear window.agyStatusBar');
+  });
+
+  it('D-0021: README.md and README.ko.md match actual runtime API paths and remote annotation key', () => {
+    const readmeEn = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+    const readmeKo = fs.readFileSync(path.join(__dirname, '..', 'README.ko.md'), 'utf8');
+
+    assert.equal(readmeEn.includes('getContextEstimate()'), false, 'D-0021: README.md must not reference non-existent getContextEstimate()');
+    assert.equal(readmeKo.includes('getContextEstimate()'), false, 'D-0021: README.ko.md must not reference non-existent getContextEstimate()');
+    assert.equal(readmeEn.includes('agyCwLimit'), false, 'D-0021: README.md must not reference stale agyCwLimit key');
+    assert.equal(readmeKo.includes('agyCwLimit'), false, 'D-0021: README.ko.md must not reference stale agyCwLimit key');
+    assert.ok(readmeEn.includes('contextWindowUsage.estimatedAfterCompaction'), 'D-0021: README.md must document contextWindowUsage.estimatedAfterCompaction');
+    assert.ok(readmeKo.includes('contextWindowUsage.estimatedAfterCompaction'), 'D-0021: README.ko.md must document contextWindowUsage.estimatedAfterCompaction');
+    assert.ok(readmeEn.includes('activeProfile'), 'D-0021: README.md must document annotations.activeProfile');
+    assert.ok(readmeKo.includes('activeProfile'), 'D-0021: README.ko.md must document annotations.activeProfile');
+  });
+});

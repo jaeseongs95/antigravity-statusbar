@@ -542,7 +542,19 @@ function mountStatusBar(env = {}) {
   win.__agyStatusBarCleanup = () => {
     delete win.__agyStatusBarActiveVersion;
     clearIntervalFn(timer);
+    win.removeEventListener?.('DOMContentLoaded', attachBodyObserver);
     if (obs) obs.disconnect();
+    for (const adapter of registry.getSortedAdapters()) {
+      if (typeof adapter.unmount === 'function') {
+        try { adapter.unmount(); } catch {}
+      }
+    }
+    if (typeof rpcClient?.dispose === 'function') {
+      try { rpcClient.dispose(); } catch {}
+    }
+    if (typeof hostBridge?.dispose === 'function') {
+      try { hostBridge.dispose(); } catch {}
+    }
     const m = doc.getElementById('agy-ctx-debug-modal');
     if (m) {
       if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
@@ -557,6 +569,19 @@ function mountStatusBar(env = {}) {
     for (const b of bars) b.remove();
     const hostViews = doc.querySelectorAll('.agy-rc-host-view');
     for (const hv of hostViews) hv.remove();
+    const styleEl = doc.getElementById?.('agy-ctx-statusbar-style');
+    if (styleEl && typeof styleEl.remove === 'function') {
+      styleEl.remove();
+    }
+    try {
+      const iframeStyle = doc.querySelector?.('ga-remote-control iframe')?.contentDocument?.getElementById?.('agy-ctx-statusbar-style');
+      if (iframeStyle && typeof iframeStyle.remove === 'function') iframeStyle.remove();
+    } catch {}
+    try {
+      delete win.agyStatusBar;
+    } catch {
+      win.agyStatusBar = undefined;
+    }
   };
   win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
 

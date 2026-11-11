@@ -23,11 +23,11 @@ Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary to
 
 - **Real-Time Context, Cache & Quota Telemetry**:
   - Displays current context token usage (`pct%`, `used / limit`), prompt cache hit rate (`cache %`), and `5h` / `7d` remaining quota directly inside the chat input box.
-  - Immediately reflects post-compacting token reductions (`agentStateProvider.getContextEstimate().estimatedAfterCompaction`) in both the statusbar and the `[ context ]` trajectory debug modal right after `Compacting` completes.
+  - Immediately reflects post-compacting token reductions (`agentStateProvider.getState().contextWindowUsage.estimatedAfterCompaction`) in both the statusbar and the `[ context ]` trajectory debug modal right after `Compacting` completes.
 - **Per-Session Arbitrary Context Limit (`32K` – `980K`) & Backend Checkpointer Sync**:
   - Click `[ 256k ▾ ]` to select from presets (`128K`, `256K`, `384K`, `512K`, `750K`, `900K`) or enter any custom value between `32` and `980` (`K` tokens).
   - Intercepts both `fetch` (including `Request` objects) and `Transport.send` / `sendUnary` (`SendUserCascadeMessage`) across JSON, Connect-framed JSON, and Protobuf binary payloads to inject `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`), ensuring `language_server.exe` honors your chosen limit instead of triggering premature compaction at `256K`.
-  - Persists limits per `cascadeId` across `localStorage`, cookies, `nativeStorage`, and server annotations (`agyCwLimit`) for seamless Desktop ↔ Mobile sync while isolating Redux's global default so changing one conversation never pollutes other sessions.
+  - Persists limits per `cascadeId` across `localStorage`, cookies, `nativeStorage`, and server trajectory annotations (`annotations.activeProfile`) for seamless Desktop ↔ Mobile sync while isolating Redux's global default so changing one conversation never pollutes other sessions.
   - Automatically hides the yellow warning icon (`⚠️`) in the native model selector pill when the session limit is `<= 256K` while keeping the `· {cw}` badge visible.
 - **Zero-Offset `app.asar` & Live CDP Auto-Patcher**:
   - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` with **0 byte-offset drift** and recalculates `ElectronAsarIntegrity` SHA-256 block hashes.

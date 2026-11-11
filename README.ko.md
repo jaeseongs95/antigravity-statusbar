@@ -23,11 +23,11 @@
 
 - **실시간 컨텍스트·캐시·쿼터 표시 및 `Compacting` 직후 반영**:
   - 현재 대화 세션의 컨텍스트 토큰 사용률(`pct%`, `used / limit`), 프롬프트 캐시 적중률(`cache %`), `5h` / `7d` 잔여 쿼터를 채팅 입력창 하단에서 실시간으로 보여줍니다.
-  - 대화 압축(`Compacting`)이 완료된 직후 새 메시지를 보내기 전에도 `agentStateProvider.getContextEstimate().estimatedAfterCompaction` 수치를 상태바와 `[ context ]` 디버그 모달 양쪽에 즉시 반영합니다.
+  - 대화 압축(`Compacting`)이 완료된 직후 새 메시지를 보내기 전에도 `agentStateProvider.getState().contextWindowUsage.estimatedAfterCompaction` 수치를 상태바와 `[ context ]` 디버그 모달 양쪽에 즉시 반영합니다.
 - **세션별 컨텍스트 한도 자유 입력(`32K` – `980K`) 및 백엔드 체크포인터(`max_token_limit`) 동기화**:
   - 하단바의 `[ 256k ▾ ]` 버튼을 클릭해 프리셋(`128K`, `256K`, `384K`, `512K`, `750K`, `900K`)을 선택하거나 `32`~`980` (`K` 토큰) 사이의 원하는 값을 직접 입력할 수 있습니다.
   - `SendUserCascadeMessage` 요청(`fetch` `Request` 객체, 일반 JSON, 5바이트 Connect 프레임 JSON, Protobuf 바이너리 모두 포함) 전송 시 `cascadeConfig.checkpointConfig.maxTokenLimit`(`field 5`)에 선택된 토큰 한도(예: `384000`)를 주입하여 백엔드 `language_server.exe`가 기본값 `256K`에서 조기 압축하지 않고 사용자가 지정한 한도를 그대로 따르도록 동기화합니다.
-  - 세션 식별자(`cascadeId`)별로 `localStorage`, 쿠키, `nativeStorage` 및 서버 어노테이션(`agyCwLimit`)에 저장되어 데스크톱과 모바일·원격 웹 간에 자동 동기화되며, Redux 전역 기본값을 격리해 다른 대화방을 오염시키지 않습니다.
+  - 세션 식별자(`cascadeId`)별로 `localStorage`, 쿠키, `nativeStorage` 및 서버 트래젝토리 어노테이션(`annotations.activeProfile`)에 저장되어 데스크톱과 모바일·원격 웹 간에 자동 동기화되며, Redux 전역 기본값을 격리해 다른 대화방을 오염시키지 않습니다.
   - 세션 한도가 `256K` 이하(`<= 256K`)일 때는 네이티브 모델 선택기의 `· {cw}` 배지는 유지하면서 노란색 주의 아이콘(`⚠️`)만 깔끔하게 숨깁니다.
 - **오프셋 보존(`0` drift) `app.asar` 패처 및 무재시작 실시간 CDP 주입**:
   - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.

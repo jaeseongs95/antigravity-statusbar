@@ -358,11 +358,23 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
       reject(new Error('WebSocket evaluation timeout'));
     }, timeoutMs);
 
+    const expectsStatusbar = /(?:^|[^\w$])mountStatusBar\s*\(|__agyStatusBarCleanup/.test(scriptCode);
+    const expectsMcp = /(?:^|[^\w$])mountMcpManager\s*\(|BEGIN_AGY_MCP_MANAGER/.test(scriptCode);
+    const expectsKo = /KO_THOUGHT_LOCALIZER|__agyKoThoughtCleanup/.test(scriptCode);
+    const activeChecks = [];
+    if (expectsStatusbar) {
+      activeChecks.push('Boolean(window.agyStatusBar && typeof window.__agyStatusBarCleanup === "function")');
+    }
+    if (expectsMcp) {
+      activeChecks.push('Boolean(window.agyMcpManager && typeof window.agyMcpManager.destroy === "function")');
+    }
+    if (expectsKo) {
+      activeChecks.push('Boolean(typeof window.__agyKoThoughtCleanup === "function" || window.__agyKoLocalizerActive)');
+    }
+    const activeGuardExpr = activeChecks.length > 0 ? activeChecks.join(' && ') : 'false';
+
     const immediateExpr = `(() => {
-      const hasActivePlugin =
-        Boolean(document.querySelector('.agy-ctx-statusbar') && window.__agyStatusBarCleanup) ||
-        Boolean(window.agyMcpManager) ||
-        Boolean(window.__agyKoThoughtCleanup);
+      const hasActivePlugin = ${activeGuardExpr};
       if (hasActivePlugin && window.__agyStatusBarHash === ${JSON.stringify(scriptHash)}) {
         return 'ALREADY_ACTIVE';
       }
@@ -399,6 +411,16 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
           settled = true;
           clearTimeout(timer);
           try { ws.close(); } catch {}
+          if (msg.error) {
+            reject(new Error(msg.error.message || 'CDP Runtime.evaluate error'));
+            return;
+          }
+          if (msg?.result?.exceptionDetails) {
+            const det = msg.result.exceptionDetails;
+            const desc = det?.exception?.description || det?.text || 'CDP Runtime.evaluate exception';
+            reject(new Error(desc));
+            return;
+          }
           resolve(msg?.result?.result?.value ?? null);
         }
       } catch (err) {
