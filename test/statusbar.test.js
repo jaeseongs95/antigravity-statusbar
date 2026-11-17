@@ -2913,8 +2913,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.ok(readmeKo.startsWith(expectedHeader), `D-0021: README.ko.md title must start with ${expectedHeader}`);
     assert.equal(readmeEn.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.md');
     assert.equal(readmeKo.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.ko.md');
-    assert.ok(readmeEn.includes('30/30'), 'D-0021: README.md must state 30/30 tests');
-    assert.ok(readmeKo.includes('30/30'), 'D-0021: README.ko.md must state 30/30 tests');
+    assert.ok(readmeEn.includes('31/31'), 'D-0021: README.md must state 31/31 tests');
+    assert.ok(readmeKo.includes('31/31'), 'D-0021: README.ko.md must state 31/31 tests');
     assert.equal(readmeEn.includes('getContextEstimate()'), false, 'D-0021: README.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeKo.includes('getContextEstimate()'), false, 'D-0021: README.ko.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeEn.includes('agyCwLimit'), false, 'D-0021: README.md must not reference stale agyCwLimit key');
@@ -3166,15 +3166,15 @@ describe('D-0015..D-0021 full audit regressions', () => {
   });
 
   it('D-0025 & D-0026: multi-policy TrustedTypes + Blob fallback in companion loader, quota HTML escaping, empty title removal, bounded cascade maps, and iframe DOM cleanup', async () => {
-    // 1. Strict TrustedTypes that blocks agy-rc-* but allows 'default' policy
+    // 1. Strict TrustedTypes that blocks primary agy-statusbar / agy-rc-* but allows plugin-scoped 'agy-statusbar-companion'
     const appendedScripts = [];
     const strictWin = {
       location: { hostname: 'antigravity.google.com' },
       trustedTypes: {
         createPolicy(name, rules) {
-          if (name !== 'default') throw new TypeError(`Policy ${name} disallowed by CSP`);
+          if (name !== 'agy-statusbar-companion') throw new TypeError(`Policy ${name} disallowed by CSP`);
           return {
-            createScript: (s) => `TT_DEFAULT:${rules.createScript(s)}`,
+            createScript: (s) => `TT_COMPANION:${rules.createScript(s)}`,
             createScriptURL: (u) => u,
           };
         },
@@ -3184,7 +3184,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
         hasStatusbar: true,
         hasMcpManager: true,
         hasKoTranslator: false,
-        mcpManagerCode: 'window.__mcpLoadedViaDefaultTT = true;',
+        mcpManagerCode: 'window.__mcpLoadedViaCompanionTT = true;',
       },
     };
     const strictDoc = {
@@ -3193,8 +3193,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
       querySelector: () => null,
     };
     await ensureRemoteCompanionScripts(strictWin, strictDoc, null, null);
-    assert.equal(appendedScripts.length, 1, 'D-0025: companion script must be injected using fallback default TrustedTypes policy');
-    assert.ok(String(appendedScripts[0].text).startsWith('TT_DEFAULT:'), 'D-0025: default policy createScript must be used');
+    assert.equal(appendedScripts.length, 1, 'D-0025: companion script must be injected using secondary plugin-scoped TrustedTypes policy');
+    assert.ok(String(appendedScripts[0].text).startsWith('TT_COMPANION:'), 'D-0025: agy-statusbar-companion policy createScript must be used');
 
     // 2. Adapter registry clears title attribute when dynamic title becomes empty string
     const { createAdapterRegistry } = require('../src/adapter-registry');
@@ -3377,5 +3377,130 @@ describe('D-0015..D-0021 full audit regressions', () => {
 
     const relTpl = fs.readFileSync(path.join(rootDir, 'docs', 'templates', 'RELEASE_NOTES_TEMPLATE.md'), 'utf8');
     assert.ok(relTpl.includes('[English]') && relTpl.includes('[한국어]'), 'D-0029: RELEASE_NOTES_TEMPLATE.md must contain both English and Korean inline sections');
+  });
+
+  it('D-0031 & D-0032: isRemoteHost blocks substring domain spoofing and TrustedTypes never registers global passthrough policies', async () => {
+    const { resolveHostAdapterConfig } = require('../src/host-adapter-config');
+    const { createTrustedHtmlSetter } = require('../src/dom-styles');
+
+    const defaultCfg = resolveHostAdapterConfig();
+    assert.equal(defaultCfg.isRemoteHost('antigravity.google.com'), true);
+    assert.equal(defaultCfg.isRemoteHost('r.antigravity.google.com'), true);
+    assert.equal(
+      defaultCfg.isRemoteHost('antigravity.google.com.evil.example'),
+      false,
+      'D-0031: suffix-appended attacker domain must NOT match remoteHostDomains'
+    );
+    assert.equal(
+      defaultCfg.isRemoteHost('evil-antigravity.google.com'),
+      false,
+      'D-0031: hyphen-prefixed attacker domain without dot boundary must NOT match remoteHostDomains'
+    );
+
+    const dottedCfg = resolveHostAdapterConfig({ remoteHostDomains: ['.portal.example.', '  '] });
+    assert.equal(dottedCfg.isRemoteHost('portal.example'), true);
+    assert.equal(dottedCfg.isRemoteHost('sub.portal.example'), true);
+    assert.equal(dottedCfg.isRemoteHost('portal.example.attacker.test'), false);
+    assert.equal(dottedCfg.isRemoteHost('fakeportal.example'), false);
+
+    const forbiddenGlobalPolicies = new Set(['default', 'dompurify', 'angular', 'angular#unsafe-bypass', 'nextjs#bundler']);
+    const attemptedHtmlPolicies = [];
+    const htmlWin = {
+      trustedTypes: {
+        createPolicy(name) {
+          attemptedHtmlPolicies.push(name);
+          throw new TypeError(`Disallowed policy ${name}`);
+        },
+      },
+    };
+    let fragmentInserted = false;
+    const htmlDoc = {
+      createRange() {
+        return {
+          selectNodeContents() {},
+          deleteContents() {},
+          createContextualFragment(h) {
+            return { fragmentHtml: h };
+          },
+        };
+      },
+    };
+    const setHtml = createTrustedHtmlSetter(htmlWin, htmlDoc);
+    const targetEl = {
+      set innerHTML(_v) {
+        throw new TypeError('TrustedHTML required');
+      },
+      appendChild(frag) {
+        if (frag && frag.fragmentHtml === '<span>ok</span>') fragmentInserted = true;
+      },
+    };
+    setHtml(targetEl, '<span>ok</span>');
+    assert.equal(fragmentInserted, true, 'D-0032: Range contextualFragment fallback must work when all policies are blocked');
+    for (const p of attemptedHtmlPolicies) {
+      assert.equal(forbiddenGlobalPolicies.has(p), false, `D-0032: createTrustedHtmlSetter must never attempt global policy '${p}'`);
+      assert.ok(p.startsWith('agy-statusbar'), `D-0032: policy '${p}' must be namespaced under agy-statusbar`);
+    }
+
+    const attemptedScriptPolicies = [];
+    const appendedEls = [];
+    let revokedBlobUrl = '';
+    const scriptWin = {
+      location: { hostname: 'antigravity.google.com' },
+      Blob: class {
+        constructor(parts) {
+          this.parts = parts;
+        }
+      },
+      URL: {
+        createObjectURL() {
+          return 'blob:https://antigravity.google.com/companion-1';
+        },
+        revokeObjectURL(u) {
+          revokedBlobUrl = u;
+        },
+      },
+      trustedTypes: {
+        createPolicy(name) {
+          attemptedScriptPolicies.push(name);
+          throw new TypeError(`Disallowed policy ${name}`);
+        },
+      },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: true,
+        hasKoTranslator: false,
+        mcpManagerCode: 'window.__mcpCompanionBlobFallback = 1;',
+      },
+    };
+    const scriptDoc = {
+      head: {
+        appendChild(el) {
+          appendedEls.push(el);
+          if (typeof el._onload === 'function') el._onload();
+        },
+      },
+      createElement(tag) {
+        return {
+          tagName: tag,
+          src: '',
+          set text(_v) {
+            throw new TypeError('TrustedScript required');
+          },
+          addEventListener(ev, fn) {
+            if (ev === 'load') this._onload = fn;
+          },
+        };
+      },
+      querySelector: () => null,
+    };
+    await ensureRemoteCompanionScripts(scriptWin, scriptDoc, null, null);
+    assert.equal(appendedEls.length, 1, 'D-0032: Blob URL fallback must inject script when TrustedTypes policies are disallowed');
+    assert.equal(appendedEls[0].src, 'blob:https://antigravity.google.com/companion-1');
+    assert.equal(revokedBlobUrl, 'blob:https://antigravity.google.com/companion-1');
+    for (const p of attemptedScriptPolicies) {
+      assert.equal(forbiddenGlobalPolicies.has(p), false, `D-0032: injectScriptText must never attempt global policy '${p}'`);
+      assert.ok(p.startsWith('agy-statusbar') || p.startsWith('agy-rc-'), `D-0032: policy '${p}' must be plugin-scoped`);
+    }
   });
 });

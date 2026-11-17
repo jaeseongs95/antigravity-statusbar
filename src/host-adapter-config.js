@@ -28,9 +28,15 @@ function resolveHostAdapterConfig(overrides, win) {
     ''
   );
   const csrfHeaderName = String(src.csrfHeaderName || DEFAULT_HOST_ADAPTER_CONFIG.csrfHeaderName).trim();
-  const remoteHostDomains = Array.isArray(src.remoteHostDomains) && src.remoteHostDomains.length > 0
-    ? src.remoteHostDomains.map((d) => String(d).trim().toLowerCase()).filter(Boolean)
-    : [...DEFAULT_HOST_ADAPTER_CONFIG.remoteHostDomains];
+  const normalizedCustomDomains = Array.isArray(src.remoteHostDomains)
+    ? src.remoteHostDomains
+        .map((d) => String(d).trim().toLowerCase().replace(/^\.+|\.+$/g, ''))
+        .filter(Boolean)
+    : [];
+  const remoteHostDomains =
+    normalizedCustomDomains.length > 0
+      ? normalizedCustomDomains
+      : [...DEFAULT_HOST_ADAPTER_CONFIG.remoteHostDomains];
   const staticCdnOrigins = Array.isArray(src.staticCdnOrigins) && src.staticCdnOrigins.length > 0
     ? src.staticCdnOrigins.map((o) => String(o).trim()).filter(Boolean)
     : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
@@ -58,9 +64,9 @@ function resolveHostAdapterConfig(overrides, win) {
       return headers;
     },
     isRemoteHost(hostname) {
-      const host = String(hostname || '').trim().toLowerCase();
+      const host = String(hostname || '').trim().toLowerCase().replace(/\.+$/, '');
       if (!host) return false;
-      return remoteHostDomains.some((d) => host === d || host.endsWith(`.${d}`) || host.includes(d));
+      return remoteHostDomains.some((d) => host === d || host.endsWith(`.${d}`));
     },
   };
 }

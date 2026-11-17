@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.24
+// @version      1.3.25
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -41,9 +41,15 @@
         ''
       );
       const csrfHeaderName = String(src.csrfHeaderName || DEFAULT_HOST_ADAPTER_CONFIG.csrfHeaderName).trim();
-      const remoteHostDomains = Array.isArray(src.remoteHostDomains) && src.remoteHostDomains.length > 0
-        ? src.remoteHostDomains.map((d) => String(d).trim().toLowerCase()).filter(Boolean)
-        : [...DEFAULT_HOST_ADAPTER_CONFIG.remoteHostDomains];
+      const normalizedCustomDomains = Array.isArray(src.remoteHostDomains)
+        ? src.remoteHostDomains
+            .map((d) => String(d).trim().toLowerCase().replace(/^\.+|\.+$/g, ''))
+            .filter(Boolean)
+        : [];
+      const remoteHostDomains =
+        normalizedCustomDomains.length > 0
+          ? normalizedCustomDomains
+          : [...DEFAULT_HOST_ADAPTER_CONFIG.remoteHostDomains];
       const staticCdnOrigins = Array.isArray(src.staticCdnOrigins) && src.staticCdnOrigins.length > 0
         ? src.staticCdnOrigins.map((o) => String(o).trim()).filter(Boolean)
         : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
@@ -70,9 +76,9 @@
           return headers;
         },
         isRemoteHost(hostname) {
-          const host = String(hostname || '').trim().toLowerCase();
+          const host = String(hostname || '').trim().toLowerCase().replace(/\.+$/, '');
           if (!host) return false;
-          return remoteHostDomains.some((d) => host === d || host.endsWith(`.${d}`) || host.includes(d));
+          return remoteHostDomains.some((d) => host === d || host.endsWith(`.${d}`));
         },
       };
     }
@@ -941,11 +947,7 @@
       if (window?.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
         const names = [
           'agy-statusbar',
-          'angular#unsafe-bypass',
-          'angular',
-          'default',
-          'dompurify',
-          'nextjs#bundler',
+          'agy-statusbar-html',
           'agy-statusbar-' + Date.now(),
         ];
         for (const name of names) {
@@ -4513,7 +4515,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v30';
+    const STATUSBAR_VERSION = 'v31';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
@@ -4623,12 +4625,9 @@
       let policy = win?.__agyTrustedTypesPolicy || null;
       if (!policy && win?.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
         const policyNames = [
-          'agy-rc-' + Date.now(),
           'agy-statusbar',
-          'angular#unsafe-bypass',
-          'angular',
-          'default',
-          'dompurify',
+          'agy-statusbar-companion',
+          'agy-rc-' + Date.now(),
         ];
         for (const name of policyNames) {
           try {

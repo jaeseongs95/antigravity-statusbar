@@ -453,11 +453,7 @@ function createTrustedHtmlSetter(window, document) {
   if (window?.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
     const names = [
       'agy-statusbar',
-      'angular#unsafe-bypass',
-      'angular',
-      'default',
-      'dompurify',
-      'nextjs#bundler',
+      'agy-statusbar-html',
       'agy-statusbar-' + Date.now(),
     ];
     for (const name of names) {
