@@ -208,9 +208,37 @@ function createCoreMetricsAdapter({
         }
       }
 
+      const sessionChanged = Boolean(containerEl.__lastCascadeId && containerEl.__lastCascadeId !== cascadeId);
+      containerEl.__lastCascadeId = cascadeId;
+
+      if (ctx.deferUncachedMetrics) {
+        const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
+        if (existingLimitBtn) {
+          const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
+          if (existingLimitBtn.className !== nextLimitClass) existingLimitBtn.className = nextLimitClass;
+          if (existingLimitBtn.getAttribute?.('title') !== limitTitle) {
+            existingLimitBtn.setAttribute?.('title', limitTitle);
+            existingLimitBtn.title = limitTitle;
+          }
+          const nextLimitText = `[ ${currentCw.toLowerCase()} ▾ ]`;
+          if (existingLimitBtn.textContent !== nextLimitText) existingLimitBtn.textContent = nextLimitText;
+          containerEl.__pendingCrossSessionNoTransition = true;
+          containerEl.__lastHtml = null;
+          return;
+        }
+        if (containerEl.__lastHtml) {
+          containerEl.__pendingCrossSessionNoTransition = true;
+          containerEl.__lastHtml = null;
+          return;
+        }
+      }
+
+      const suppressBarTransition = sessionChanged || Boolean(containerEl.__pendingCrossSessionNoTransition);
+      containerEl.__pendingCrossSessionNoTransition = false;
+
       const html = `
         <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
-          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
+          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}${suppressBarTransition ? ';transition:none' : ''}"></span></span>
           <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
           <span class="agy-ctx-sep">·</span>
           <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
@@ -218,7 +246,7 @@ function createCoreMetricsAdapter({
         <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
       `;
 
-      if (containerEl.__lastHtml !== html) {
+      if (containerEl.__lastHtml !== html || suppressBarTransition) {
         containerEl.__lastHtml = html;
         const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
         const pctValEl = containerEl.querySelector?.('.agy-ctx-pct-val');
@@ -229,6 +257,7 @@ function createCoreMetricsAdapter({
 
         if (barFill && pctValEl && usedValEl && existingLimitBtn && cacheEl && quotaSlotEl) {
           if (barFill.style) {
+            barFill.style.transition = suppressBarTransition ? 'none' : '';
             barFill.style.width = `${pct}%`;
             barFill.style.background = barColor;
           }
@@ -256,6 +285,10 @@ function createCoreMetricsAdapter({
 
         containerEl.__lastQuotaHtml = quotaHtml;
         setHtml(containerEl, html);
+        const mountedFill = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-bar-fill') : null;
+        if (mountedFill && mountedFill.style && suppressBarTransition) {
+          mountedFill.style.transition = 'none';
+        }
 
         const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
         if (limitBtn) {

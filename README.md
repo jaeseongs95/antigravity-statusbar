@@ -1,4 +1,4 @@
-# antigravity-statusbar (`v1.3.25` / `v31`)
+# antigravity-statusbar (`v1.3.26` / `v32`)
 
 **Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)**
 
@@ -46,7 +46,7 @@ Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary to
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
 
-# 1. Run unit & bundle integration tests (30/30 tests)
+# 1. Run unit & bundle integration tests (32/32 tests)
 npm test
 
 # 2. Build dist/statusbar_autoinject.js, install to ~/.gemini/antigravity, patch app.asar & live-inject via CDP
@@ -169,7 +169,7 @@ antigravity-statusbar/
 │   ├── ensure_statusbar_patch.js  # Zero-offset ASAR patcher + app_storage sync + live CDP injector
 │   └── install.js                 # Builds bundle, installs to ~/.gemini/antigravity & runs patcher
 ├── test/
-│   └── statusbar.test.js          # Module unit tests + runtime bundle integration & regression tests (31/31)
+│   └── statusbar.test.js          # Module unit tests + runtime bundle integration & regression tests (32/32)
 ├── README.md                      # English documentation
 ├── README.ko.md                   # Korean documentation
 └── package.json
@@ -180,7 +180,7 @@ antigravity-statusbar/
 ## Verification & Testing
 
 ```bash
-# Build dist/statusbar_autoinject.js and run all 31 unit + integration test suites (31/31)
+# Build dist/statusbar_autoinject.js and run all 32 unit + integration test suites (32/32)
 npm test
 ```
 

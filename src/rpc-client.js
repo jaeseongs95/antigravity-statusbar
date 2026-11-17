@@ -273,12 +273,21 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     return base;
   }
 
-  function fetchCascadeStats(cascadeId, csrf, inputBox) {
-    if (!cascadeId || cascadeId === 'remote-session') {
-      return Promise.resolve(null);
+  function isStateForCascade(fullState, cascadeId) {
+    if (!fullState || typeof fullState !== 'object') return false;
+    const stateCid =
+      fullState.conversationId ||
+      fullState.cascadeId ||
+      fullState.trajectorySlice?.conversationId ||
+      fullState.trajectorySlice?.cascadeId ||
+      null;
+    if (stateCid && cascadeId && stateCid !== cascadeId) {
+      return false;
     }
-    const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
-    const fullState = asp?.getState?.();
+    return true;
+  }
+
+  function extractVersionMetrics(fullState) {
     const slice = fullState?.trajectorySlice;
     const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
     const totalStepsLen = slice?.totalStepsLength ?? -1;
@@ -292,9 +301,25 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     const cwAfterCompact = typeof rawCwAfter === 'boolean'
       ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
       : Number(rawCwAfter || 0);
+    return {
+      totalGenLen,
+      totalStepsLen,
+      latestCompactedStep,
+      cwAfterCompact,
+      versionKey: `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`,
+    };
+  }
+
+  function fetchCascadeStats(cascadeId, csrf, inputBox) {
+    if (!cascadeId || cascadeId === 'remote-session') {
+      return Promise.resolve(null);
+    }
+    const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
+    const rawState = asp?.getState?.();
+    const fullState = isStateForCascade(rawState, cascadeId) ? rawState : null;
+    const { totalGenLen, totalStepsLen, versionKey } = extractVersionMetrics(fullState);
     const cached = stateCache.get(cascadeId);
     const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
-    const versionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
     const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
 
     if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
@@ -372,7 +397,9 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           }
         }
 
-        parsed = applyRealtimeCompactionAndUsage(parsed, fullState);
+        const latestRaw = asp?.getState?.();
+        const latestState = isStateForCascade(latestRaw, cascadeId) ? latestRaw : fullState;
+        parsed = applyRealtimeCompactionAndUsage(parsed, latestState);
 
         if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
           return cached || null;
@@ -382,13 +409,14 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           setBoundedGenLen(cascadeId, discoveredGenLen);
         }
 
-        const finalVersionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
+        const { versionKey: finalVersionKey } = extractVersionMetrics(latestState);
         const data = {
           used: parsed.used,
           trajectoryMax: parsed.trajectoryMax,
           cacheRead: parsed.cacheRead,
           inputTok: parsed.inputTok,
           cachePct: parsed.cachePct,
+          lastMetaStepIndex: parsed.lastMetaStepIndex,
           knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
           versionKey: finalVersionKey,
           ts: Date.now(),
@@ -410,7 +438,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     const cached = cascadeId ? (stateCache.get(cascadeId) || null) : null;
     const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
     const fullState = asp?.getState?.();
-    if (!fullState || typeof fullState !== 'object') {
+    if (!isStateForCascade(fullState, cascadeId)) {
       return cached;
     }
     const merged = applyRealtimeCompactionAndUsage(cached ? { ...cached, foundCtx: true } : null, fullState);

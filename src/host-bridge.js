@@ -25,7 +25,28 @@ function setBoundedMapRecord(win, propName, key, val) {
 
 const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
 
+function cleanupLegacyObjectPrototypeCwGetters(extraWin) {
+  const protos = [Object.prototype];
+  try {
+    if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
+      protos.push(extraWin.Object.prototype);
+    }
+  } catch {}
+  for (const proto of protos) {
+    try {
+      for (const key of Object.getOwnPropertyNames(proto)) {
+        if (!/^\d+K$/.test(key)) continue;
+        const desc = Object.getOwnPropertyDescriptor(proto, key);
+        if (desc && desc.configurable && typeof desc.get === 'function' && String(desc.get).includes('512000')) {
+          delete proto[key];
+        }
+      }
+    } catch {}
+  }
+}
+
 function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
+  cleanupLegacyObjectPrototypeCwGetters(extraWin);
   if (!cw) return;
   const kNum = parseInt(cw, 10);
   if (!isNaN(kNum) && kNum > 0 && kNum <= 256 && underDefaultCwSet && !underDefaultCwSet.has(cw)) {
@@ -34,37 +55,12 @@ function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extra
       try { onStyleUpdate(); } catch {}
     }
   }
-  if (cw === '256K' || cw === '512K' || cw === '900K') return;
-  if (isNaN(kNum) || kNum <= 0) return;
-  const tokens = kNum * 1000;
-  const protos = [Object.prototype];
-  try {
-    if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
-      protos.push(extraWin.Object.prototype);
-    }
-  } catch {}
-  for (const proto of protos) {
-    if (Object.prototype.hasOwnProperty.call(proto, cw)) continue;
-    try {
-      Object.defineProperty(proto, cw, {
-        configurable: true,
-        enumerable: false,
-        get() {
-          if (this && this['512K'] === 512000 && this['900K'] === 900000) {
-            return tokens;
-          }
-          if (this && typeof this['512K'] === 'string' && this['512K'].indexOf('512K') !== -1) {
-            return `${cw} custom context limit (${tokens.toLocaleString('en-US')} tokens)`;
-          }
-          return undefined;
-        },
-      });
-    } catch {}
-  }
 }
 
 function createHostBridge({ window, document, localStorage, fetchFn, cwStore, hostConfig }) {
   const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
+  const cleanupCallbacks = [];
+  cleanupLegacyObjectPrototypeCwGetters();
   // Ensure context-window-selector flag is enabled in customFlagOverrides
   try {
     const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
@@ -86,14 +82,16 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
   try {
     if (window && !window.__agyLsClientDecoratorHooked) {
       window.__agyLsClientDecoratorHooked = true;
+      const hadOwnDec = Object.prototype.hasOwnProperty.call(window, '__JETSKI_LS_CLIENT_DECORATOR__');
       const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
-      window.__JETSKI_LS_CLIENT_DECORATOR__ = function (client) {
+      const wrappedDec = function (client) {
         const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
         if (decorated && typeof decorated === 'object') {
           window.__agyCapturedLsClient = decorated;
           if (typeof decorated.subscribeToPlugins === 'function' && typeof decorated.getAllPlugins === 'function' && !decorated.__agyPluginsStreamPatched) {
             decorated.__agyPluginsStreamPatched = true;
-            const origSub = decorated.subscribeToPlugins.bind(decorated);
+            const origSubRaw = decorated.subscribeToPlugins;
+            const origSub = origSubRaw.bind(decorated);
             decorated.subscribeToPlugins = function (req, opts) {
               const stream = origSub(req, opts);
               if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream;
@@ -144,10 +142,26 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
                 },
               };
             };
+            cleanupCallbacks.push(() => {
+              try {
+                decorated.subscribeToPlugins = origSubRaw;
+                delete decorated.__agyPluginsStreamPatched;
+              } catch {}
+            });
           }
         }
         return decorated;
       };
+      window.__JETSKI_LS_CLIENT_DECORATOR__ = wrappedDec;
+      cleanupCallbacks.push(() => {
+        try {
+          if (window.__JETSKI_LS_CLIENT_DECORATOR__ === wrappedDec) {
+            if (hadOwnDec) window.__JETSKI_LS_CLIENT_DECORATOR__ = prevDec;
+            else delete window.__JETSKI_LS_CLIENT_DECORATOR__;
+          }
+          delete window.__agyLsClientDecoratorHooked;
+        } catch {}
+      });
     }
   } catch {}
 
@@ -211,7 +225,10 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     return inputBox;
   }
 
-  function ensureModelContextWindowOptions(modelObj, extraCw) {
+  const frozenModelCloneCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+  const patchedStoreConfigsCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+
+  function ensureModelContextWindowOptions(modelObj, extraCw, forceClone = false) {
     if (!modelObj || typeof modelObj !== 'object') return modelObj;
     const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
     const existingNames = new Set(
@@ -238,20 +255,40 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
       return modelObj;
     }
     const nextArr = [...curArr, ...toAdd];
-    try {
-      if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
-        modelObj.contextWindowOptions.push(...toAdd);
-      } else {
-        modelObj.contextWindowOptions = nextArr;
+    if (!forceClone) {
+      try {
+        if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
+          modelObj.contextWindowOptions.push(...toAdd);
+          return modelObj;
+        }
+        if (Object.isExtensible(modelObj)) {
+          modelObj.contextWindowOptions = nextArr;
+          return modelObj;
+        }
+      } catch {}
+    }
+    const wantedKey = wanted.join('|');
+    if (frozenModelCloneCache) {
+      const byKey = frozenModelCloneCache.get(modelObj);
+      if (byKey && byKey.has(wantedKey)) {
+        return byKey.get(wantedKey);
       }
-    } catch {}
+    }
     try {
       const proto = Object.getPrototypeOf(modelObj);
-      if (proto && proto !== Object.prototype) {
-        const clone = Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr });
-        return clone;
+      const clone =
+        proto && proto !== Object.prototype
+          ? Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr })
+          : { ...modelObj, contextWindowOptions: nextArr };
+      if (frozenModelCloneCache) {
+        let byKey = frozenModelCloneCache.get(modelObj);
+        if (!byKey) {
+          byKey = new Map();
+          frozenModelCloneCache.set(modelObj, byKey);
+        }
+        byKey.set(wantedKey, clone);
       }
-      return { ...modelObj, contextWindowOptions: nextArr };
+      return clone;
     } catch {
       return modelObj;
     }
@@ -263,12 +300,20 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     if (cwin) ensureFetchHook(cwin);
     if (!document) return;
     const now = Date.now();
+    const effectiveExtraKey =
+      extraCw && !PRESET_CONTEXT_WINDOWS.includes(extraCw) ? String(extraCw) : '__presets__';
     const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
     for (const d of docs) {
       const views = d.querySelectorAll('[data-testid="conversation-view"]');
       for (const view of views) {
-        const cacheKey = String(extraCw || '');
-        if (view.__agyCwsPatchTs && now - view.__agyCwsPatchTs < 3000 && view.__agyCwsPatchExtraCw === cacheKey) {
+        const cacheKey = effectiveExtraKey;
+        const currentCid = view.getAttribute?.('data-cascade-id') || '';
+        if (
+          view.__agyCwsPatchTs &&
+          now - view.__agyCwsPatchTs < 3000 &&
+          view.__agyCwsPatchExtraCw === cacheKey &&
+          view.__agyCwsPatchCid === currentCid
+        ) {
           continue;
         }
         const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
@@ -292,6 +337,12 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
                       return origGet.apply(this, arguments);
                     };
                     val.__cwsPatched = true;
+                    cleanupCallbacks.push(() => {
+                      try {
+                        val.get = origGet;
+                        delete val.__cwsPatched;
+                      } catch {}
+                    });
                   } catch {}
                 }
               }
@@ -301,7 +352,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
               if (val.selectedModel && typeof val.selectedModel === 'object') {
                 patchedAny = true;
                 const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
-                if (nextSm !== val.selectedModel) {
+                if (nextSm !== val.selectedModel && Object.isExtensible(val)) {
                   try { val.selectedModel = nextSm; } catch {}
                 }
               }
@@ -314,10 +365,16 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
                       try { val.modelOptions[i] = nextOpt; } catch {}
                     }
                   }
-                } else {
-                  try {
-                    val.modelOptions = val.modelOptions.map((opt) => ensureModelContextWindowOptions(opt, extraCw));
-                  } catch {}
+                } else if (Object.isExtensible(val)) {
+                  let changedOpt = false;
+                  const mapped = val.modelOptions.map((opt) => {
+                    const nextOpt = ensureModelContextWindowOptions(opt, extraCw);
+                    if (nextOpt !== opt) changedOpt = true;
+                    return nextOpt;
+                  });
+                  if (changedOpt) {
+                    try { val.modelOptions = mapped; } catch {}
+                  }
                 }
               }
               if (val.store && typeof val.store.getState === 'function') {
@@ -325,28 +382,51 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
                 const st = val.store.getState();
                 const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
                 if (Array.isArray(clientConfigs)) {
-                  let needsReduxUpdate = false;
-                  const updatedConfigs = [];
-                  for (const cfg of clientConfigs) {
-                    const nextCfg = ensureModelContextWindowOptions(cfg, extraCw);
-                    updatedConfigs.push(nextCfg);
-                    if (nextCfg !== cfg) {
-                      needsReduxUpdate = true;
+                  let storeRec = patchedStoreConfigsCache ? patchedStoreConfigsCache.get(val.store) : null;
+                  const alreadyHandledRef =
+                    storeRec &&
+                    storeRec.configsRefs.has(clientConfigs) &&
+                    storeRec.extraCwKeys.has(cacheKey);
+                  if (!alreadyHandledRef) {
+                    let needsReduxUpdate = false;
+                    const updatedConfigs = [];
+                    for (const cfg of clientConfigs) {
+                      const nextCfg = ensureModelContextWindowOptions(cfg, extraCw, true);
+                      updatedConfigs.push(nextCfg);
+                      if (nextCfg !== cfg) {
+                        needsReduxUpdate = true;
+                      }
                     }
-                  }
-                  if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
-                    try {
-                      val.store.dispatch({
-                        type: 'userStatus/setUserStatus',
-                        payload: {
-                          ...st.userStatus,
-                          cascadeModelConfigData: {
-                            ...st.userStatus.cascadeModelConfigData,
-                            clientModelConfigs: updatedConfigs,
+                    if (!storeRec && patchedStoreConfigsCache) {
+                      storeRec = {
+                        configsRefs: new WeakSet(),
+                        extraCwKeys: new Set(),
+                      };
+                      patchedStoreConfigsCache.set(val.store, storeRec);
+                    }
+                    if (storeRec) {
+                      storeRec.configsRefs.add(clientConfigs);
+                      storeRec.configsRefs.add(updatedConfigs);
+                      storeRec.extraCwKeys.add(cacheKey);
+                    }
+                    if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
+                      try {
+                        val.store.dispatch({
+                          type: 'userStatus/setUserStatus',
+                          payload: {
+                            ...st.userStatus,
+                            cascadeModelConfigData: {
+                              ...st.userStatus.cascadeModelConfigData,
+                              clientModelConfigs: updatedConfigs,
+                            },
                           },
-                        },
-                      });
-                    } catch {}
+                        });
+                        const afterConfigs = val.store.getState()?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+                        if (storeRec && Array.isArray(afterConfigs)) {
+                          storeRec.configsRefs.add(afterConfigs);
+                        }
+                      } catch {}
+                    }
                   }
                 }
               }
@@ -357,6 +437,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
         if (patchedAny) {
           view.__agyCwsPatchTs = now;
           view.__agyCwsPatchExtraCw = cacheKey;
+          view.__agyCwsPatchCid = currentCid;
         }
       }
     }
@@ -433,9 +514,11 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     const effView = resolveEffectiveView(view);
     if (!effView) return null;
     const now = Date.now();
+    const currentCid = effView.getAttribute?.('data-cascade-id') || view?.getAttribute?.('data-cascade-id') || '';
     const cachedCtx = effView.__agyMsCtxCache;
     if (
       cachedCtx &&
+      effView.__agyMsCtxCacheCid === currentCid &&
       now - (effView.__agyMsCtxCacheTs || 0) < 400 &&
       (!cachedCtx.triggerEl || cachedCtx.triggerEl.isConnected !== false) &&
       (cachedCtx.msCtx || cachedCtx.reduxStore || cachedCtx.legacyCtx)
@@ -482,6 +565,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     if (msCtx || reduxStore || legacyCtx) {
       effView.__agyMsCtxCache = res;
       effView.__agyMsCtxCacheTs = now;
+      effView.__agyMsCtxCacheCid = currentCid;
     }
     return res;
   }
@@ -986,6 +1070,16 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
       wrappedFetch.__agyCwHooked = true;
       wrappedFetch.__agyCwHookV2 = true;
       w.fetch = wrappedFetch;
+      cleanupCallbacks.push(() => {
+        try {
+          if (w.fetch === wrappedFetch && w.__agyOrigFetch) {
+            w.fetch = w.__agyOrigFetch;
+          }
+          delete w.__agyOrigFetch;
+          delete w.__agyInjectCheckpointLimit;
+          delete w.__agySniffCascadeFromRpc;
+        } catch {}
+      });
     } catch {}
   }
 
@@ -998,15 +1092,26 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
       if (typeof lsClient.sendUserCascadeMessage === 'function') {
         const origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
         lsClient.__agyOrigSendUserCascadeMessage = origSend;
-        lsClient.sendUserCascadeMessage = function (req, ...rest) {
+        const wrappedSend = function (req, ...rest) {
           const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-        const nextReq = injectFn(
-          resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
-          req,
-          null
-        );
+          const nextReq = injectFn(
+            resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
+            req,
+            null
+          );
           return origSend.call(this, nextReq, ...rest);
         };
+        lsClient.sendUserCascadeMessage = wrappedSend;
+        cleanupCallbacks.push(() => {
+          try {
+            if (lsClient.sendUserCascadeMessage === wrappedSend) {
+              lsClient.sendUserCascadeMessage = origSend;
+            }
+            delete lsClient.__agyOrigSendUserCascadeMessage;
+            delete lsClient.__agyCwHooked;
+            delete lsClient.__agyCwHookV2;
+          } catch {}
+        });
       }
     } catch {}
     return lsClient;
@@ -1172,6 +1277,46 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
         };
       }
     }
+
+    cleanupCallbacks.push(() => {
+      try {
+        if (proto.__agyOrigHandleIframeMessage) {
+          proto.handleIframeMessage = proto.__agyOrigHandleIframeMessage;
+          delete proto.__agyOrigHandleIframeMessage;
+        }
+        if (proto.__agyOrigHandlePortRequest) {
+          proto.handlePortRequest = proto.__agyOrigHandlePortRequest;
+          delete proto.__agyOrigHandlePortRequest;
+        }
+        for (const mName of [
+          'proxyCommand',
+          'streamProxyCommand',
+          'handleUrlChanged',
+          'managePolling',
+          'shouldPoll',
+          'loadInstances',
+          'isDisconnected',
+          'onIframeLoad',
+          'onWindowOnline',
+          'onWindowOffline',
+          'isOffline',
+          'isDirectIngressMode',
+          'isTabHidden',
+          'getSelectedInstance',
+          'instanceInfos',
+          'remoteConversationsInfos',
+        ]) {
+          const origKey = `__agyOrig_${mName}`;
+          if (proto[origKey]) {
+            proto[mName] = proto[origKey];
+            delete proto[origKey];
+          }
+        }
+        delete proto.__agyHooked;
+        delete proto.__agyHookV2;
+        delete proto.__agyTargetWin;
+      } catch {}
+    });
   }
 
   function getRemoteControlInstance(onCascadeChange) {
@@ -2055,7 +2200,9 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
 
       const currentDefaultModel = ms.default?.model;
       const currentDefaultCustomLabel = ms.default?.customLabel;
-      const desiredDefaultCw = cwStore?.getDefaultCw?.() || ms.default?.contextWindow || '256K';
+      const desiredDefaultCw = cwStore?.hasExplicitDefaultCw?.()
+        ? cwStore.getDefaultCw()
+        : (ms.default?.contextWindow || '256K');
       const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
 
       for (const cid of poisonedCids) {
@@ -2098,6 +2245,15 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     } catch {}
   }
 
+  function setTriggerCwAttribute(triggerEl, cwStr) {
+    if (!triggerEl || typeof triggerEl.setAttribute !== 'function') return;
+    const str = String(cwStr);
+    if (triggerEl.getAttribute('data-context-window') !== str) {
+      triggerEl.__agyInternalDomCw = str;
+      triggerEl.setAttribute('data-context-window', str);
+    }
+  }
+
   function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
     const targetCw = cwStore.normalize(rawTargetCw);
     if (!view || !cascadeId || !targetCw) return false;
@@ -2120,27 +2276,31 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     window.__agyLastAppliedContextWindowByCascade = window.__agyLastAppliedContextWindowByCascade || {};
     const lastAppliedForCascade = window.__agyLastAppliedContextWindowByCascade[cascadeId];
     const initialState = reduxStore ? reduxStore.getState() : null;
-    const initialReduxCw = initialState?.modelSelection?.byConversation?.[cascadeId]?.contextWindow;
-    const reduxAlreadyMatches = !reduxStore || initialReduxCw === targetCw;
+    const initialByConvo = initialState?.modelSelection?.byConversation?.[cascadeId];
+    const defaultReduxCw = cwStore.normalize(initialState?.modelSelection?.default?.contextWindow) || '256K';
+    const effectiveInitialReduxCw = cwStore.normalize(initialByConvo?.contextWindow) || defaultReduxCw;
+    const reduxAlreadyMatches = !reduxStore || effectiveInitialReduxCw === targetCw;
 
     if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
-      if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
-        triggerEl.setAttribute('data-context-window', String(targetCw));
-      }
+      window.__agyLastAppliedContextWindow = applyKey;
+      setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
+      setTriggerCwAttribute(triggerEl, targetCw);
       return true;
     }
 
     if (msCtx || reduxStore) {
       const state = initialState;
-      const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
-      const currentInRedux = byConvo?.contextWindow || msCtx?.contextWindow?.selected || currentInDom || '256K';
+      const byConvo = initialByConvo;
+      const currentInRedux = reduxStore
+        ? effectiveInitialReduxCw
+        : (cwStore.normalize(msCtx?.contextWindow?.selected) || currentInDom || '256K');
       const selectedModelObj = msCtx?.selectedModel;
       if (selectedModelObj) {
         ensureModelContextWindowOptions(selectedModelObj, targetCw);
       }
       let dispatched = false;
 
-      if (currentInRedux !== targetCw || (reduxStore && byConvo?.contextWindow !== targetCw) || force) {
+      if (currentInRedux !== targetCw || force) {
         const prevDefault = state?.modelSelection?.default;
         const prevDefaultModel = prevDefault?.model;
         const prevDefaultCustomLabel = prevDefault?.customLabel;
@@ -2180,15 +2340,20 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
         if (dispatched && reduxStore) {
           const nextState = reduxStore.getState();
           const defObj = nextState?.modelSelection?.default;
-          const desiredDefaultCw = cwStore.getDefaultCw() || prevDefaultCw || '256K';
+          const desiredDefaultCw =
+            prevDefaultCw !== undefined
+              ? prevDefaultCw
+              : (cwStore.hasExplicitDefaultCw?.() ? cwStore.getDefaultCw() : '256K');
           const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
           const desiredDefaultCustomLabel =
             prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
+          const defCwNormalized = cwStore.normalize(defObj?.contextWindow) || '256K';
+          const desiredCwNormalized = cwStore.normalize(desiredDefaultCw) || '256K';
           if (
             defObj &&
             (defObj.model !== desiredDefaultModel ||
               defObj.customLabel !== desiredDefaultCustomLabel ||
-              defObj.contextWindow !== desiredDefaultCw)
+              defCwNormalized !== desiredCwNormalized)
           ) {
             reduxStore.dispatch({
               type: 'modelSelection/modelPicked',
@@ -2206,9 +2371,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
       if (dispatched || currentInRedux === targetCw) {
         window.__agyLastAppliedContextWindow = applyKey;
         setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-        if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
-          triggerEl.setAttribute('data-context-window', String(targetCw));
-        }
+        setTriggerCwAttribute(triggerEl, targetCw);
         return true;
       }
       return false;
@@ -2227,9 +2390,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
       }
       window.__agyLastAppliedContextWindow = applyKey;
       setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-      if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
-        triggerEl.setAttribute('data-context-window', String(targetCw));
-      }
+      setTriggerCwAttribute(triggerEl, targetCw);
       return true;
     }
     return false;
@@ -2335,6 +2496,18 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
         clearTimeout(t);
       }
       pendingSniffTimers.clear();
+      while (cleanupCallbacks.length > 0) {
+        const fn = cleanupCallbacks.pop();
+        try { fn(); } catch {}
+      }
+      try {
+        if (window) {
+          delete window.__agyInjectCheckpointLimit;
+          delete window.__agySniffCascadeFromRpc;
+          delete window.__agyOnCascadeSniffed;
+          delete window.__agyProbingRcInstance;
+        }
+      } catch {}
     },
   };
 }

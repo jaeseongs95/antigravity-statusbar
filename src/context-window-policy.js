@@ -71,6 +71,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
   const sessionCwMap = new Map();
   const sessionCwTsMap = new Map();
   let defaultCwCache = '512K';
+  let hasExplicitDefault = false;
 
   const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
 
@@ -154,9 +155,15 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
   // Synchronous initial load from localStorage + cookie
   try {
     const lsDef = normalize(localStorage?.getItem(DEFAULT_CW_KEY));
-    if (lsDef) defaultCwCache = lsDef;
+    if (lsDef) {
+      defaultCwCache = lsDef;
+      hasExplicitDefault = true;
+    }
     const cDef = normalize(readCookie('agy_default_cw'));
-    if (cDef) defaultCwCache = cDef;
+    if (cDef) {
+      defaultCwCache = cDef;
+      hasExplicitDefault = true;
+    }
     loadTsMapFromRaw(localStorage?.getItem(STORAGE_TS_MAP_KEY));
     loadMapFromRaw(localStorage?.getItem(STORAGE_MAP_KEY));
   } catch {}
@@ -169,6 +176,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
           const savedDef = normalize(items[DEFAULT_CW_KEY]);
           if (savedDef) {
             defaultCwCache = savedDef;
+            hasExplicitDefault = true;
           }
           if (items[STORAGE_TS_MAP_KEY]) {
             loadTsMapFromRaw(items[STORAGE_TS_MAP_KEY]);
@@ -243,6 +251,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
       }
     } else {
       defaultCwCache = norm;
+      hasExplicitDefault = true;
       sessionCwTsMap.set('__default__', ts);
       const serializedTs = serializeSessionTsMap();
       writeCookie('agy_default_cw', norm);
@@ -421,6 +430,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     seedSessionIfEmpty,
     migrateSessionOverride,
     getDefaultCw,
+    hasExplicitDefaultCw: () => hasExplicitDefault,
   };
 }
 

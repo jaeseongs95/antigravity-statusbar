@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.25
+// @version      1.3.26
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -154,6 +154,7 @@
       const sessionCwMap = new Map();
       const sessionCwTsMap = new Map();
       let defaultCwCache = '512K';
+      let hasExplicitDefault = false;
       const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
       function readCookie(name) {
         try {
@@ -227,9 +228,15 @@
       }
       try {
         const lsDef = normalize(localStorage?.getItem(DEFAULT_CW_KEY));
-        if (lsDef) defaultCwCache = lsDef;
+        if (lsDef) {
+          defaultCwCache = lsDef;
+          hasExplicitDefault = true;
+        }
         const cDef = normalize(readCookie('agy_default_cw'));
-        if (cDef) defaultCwCache = cDef;
+        if (cDef) {
+          defaultCwCache = cDef;
+          hasExplicitDefault = true;
+        }
         loadTsMapFromRaw(localStorage?.getItem(STORAGE_TS_MAP_KEY));
         loadMapFromRaw(localStorage?.getItem(STORAGE_MAP_KEY));
       } catch {}
@@ -241,6 +248,7 @@
               const savedDef = normalize(items[DEFAULT_CW_KEY]);
               if (savedDef) {
                 defaultCwCache = savedDef;
+                hasExplicitDefault = true;
               }
               if (items[STORAGE_TS_MAP_KEY]) {
                 loadTsMapFromRaw(items[STORAGE_TS_MAP_KEY]);
@@ -312,6 +320,7 @@
           }
         } else {
           defaultCwCache = norm;
+          hasExplicitDefault = true;
           sessionCwTsMap.set('__default__', ts);
           const serializedTs = serializeSessionTsMap();
           writeCookie('agy_default_cw', norm);
@@ -481,6 +490,7 @@
         seedSessionIfEmpty,
         migrateSessionOverride,
         getDefaultCw,
+        hasExplicitDefaultCw: () => hasExplicitDefault,
       };
     }
     module.exports = {
@@ -552,6 +562,9 @@
       height: 100%;
       border-radius: 3px;
       transition: width 0.2s ease;
+    }
+    [data-agy-session-switching="1"] .agy-ctx-bar-fill {
+      transition: none !important;
     }
     .agy-ctx-ok { color: #58d68d; }
     .agy-ctx-warn { color: #f5b041; }
@@ -940,6 +953,127 @@
         }
       }
     }
+    const SAFE_HTML_TAGS = new Set([
+      'div', 'span', 'strong', 'button', 'input', 'table', 'thead', 'tbody',
+      'tr', 'th', 'td', 'code', 'br', 'small', 'b', 'i', 'p', 'section', 'header', 'label', 'ul', 'li',
+    ]);
+    const VOID_HTML_TAGS = new Set(['br', 'input', 'hr', 'img']);
+    function decodeHtmlEntities(str) {
+      return String(str ?? '')
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+        .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+    }
+    function applyInlineStyleString(el, cssText) {
+      if (!el || !el.style || !cssText) return;
+      try {
+        el.style.cssText = cssText;
+      } catch {}
+      const decls = String(cssText).split(';');
+      for (const decl of decls) {
+        const colon = decl.indexOf(':');
+        if (colon <= 0) continue;
+        const rawProp = decl.slice(0, colon).trim();
+        const rawVal = decl.slice(colon + 1).trim();
+        if (!rawProp || !rawVal) continue;
+        const camelProp = rawProp.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        try { el.style[camelProp] = rawVal; } catch {}
+      }
+    }
+    function renderHtmlViaSafeDomBuilder(doc, rootEl, rawHtml) {
+      if (!doc || typeof doc.createElement !== 'function' || !rootEl) return;
+      if ('textContent' in rootEl) {
+        rootEl.textContent = '';
+      } else {
+        while (rootEl.firstChild && typeof rootEl.removeChild === 'function') {
+          rootEl.removeChild(rootEl.firstChild);
+        }
+      }
+      const html = String(rawHtml ?? '');
+      if (!html) return;
+      const appendText = (parent, txt) => {
+        if (!txt) return;
+        const decoded = decodeHtmlEntities(txt);
+        if (typeof doc.createTextNode === 'function') {
+          parent.appendChild(doc.createTextNode(decoded));
+        } else {
+          const span = doc.createElement('span');
+          span.textContent = decoded;
+          parent.appendChild(span);
+        }
+      };
+      const stack = [rootEl];
+      const tokenRe = /<!--[\s\S]*?-->|<\/([a-zA-Z0-9-]+)\s*>|<([a-zA-Z0-9-]+)((?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
+      let lastIdx = 0;
+      let skippedDisallowedTag = null;
+      let m;
+      while ((m = tokenRe.exec(html)) !== null) {
+        const textBefore = html.slice(lastIdx, m.index);
+        if (!skippedDisallowedTag && textBefore) {
+          appendText(stack[stack.length - 1], textBefore);
+        }
+        lastIdx = tokenRe.lastIndex;
+        const closingTag = m[1] ? m[1].toLowerCase() : null;
+        const openingTag = m[2] ? m[2].toLowerCase() : null;
+        const attrChunk = m[3] || '';
+        const selfClosing = Boolean(m[4]);
+        if (skippedDisallowedTag) {
+          if (closingTag === skippedDisallowedTag) {
+            skippedDisallowedTag = null;
+          }
+          continue;
+        }
+        if (closingTag) {
+          if (SAFE_HTML_TAGS.has(closingTag) && stack.length > 1) {
+            stack.pop();
+          }
+          continue;
+        }
+        if (!openingTag) continue;
+        if (!SAFE_HTML_TAGS.has(openingTag)) {
+          if (!selfClosing && !VOID_HTML_TAGS.has(openingTag)) {
+            skippedDisallowedTag = openingTag;
+          }
+          continue;
+        }
+        const el = doc.createElement(openingTag);
+        if (attrChunk) {
+          const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+          let am;
+          while ((am = attrRe.exec(attrChunk)) !== null) {
+            const attrName = am[1];
+            const lowerAttr = attrName.toLowerCase();
+            if (lowerAttr.startsWith('on') || lowerAttr === 'srcdoc') continue;
+            const rawVal = am[2] ?? am[3] ?? am[4] ?? '';
+            const val = decodeHtmlEntities(rawVal);
+            if ((lowerAttr === 'href' || lowerAttr === 'src' || lowerAttr === 'action') && /^\s*javascript:/i.test(val)) {
+              continue;
+            }
+            if (typeof el.setAttribute === 'function') {
+              el.setAttribute(attrName, val);
+            }
+            if (lowerAttr === 'class') el.className = val;
+            else if (lowerAttr === 'id') el.id = val;
+            else if (lowerAttr === 'title') el.title = val;
+            else if (lowerAttr === 'type') el.type = val;
+            else if (lowerAttr === 'value') el.value = val;
+            else if (lowerAttr === 'placeholder') el.placeholder = val;
+            else if (lowerAttr === 'style') applyInlineStyleString(el, val);
+          }
+        }
+        stack[stack.length - 1].appendChild(el);
+        if (!selfClosing && !VOID_HTML_TAGS.has(openingTag)) {
+          stack.push(el);
+        }
+      }
+      if (!skippedDisallowedTag && lastIdx < html.length) {
+        appendText(stack[stack.length - 1], html.slice(lastIdx));
+      }
+    }
     function createTrustedHtmlSetter(window, document) {
       if (window?.__agyTrustedHtmlPolicy) {
         return (el, html) => { el.innerHTML = window.__agyTrustedHtmlPolicy.createHTML(html); };
@@ -962,12 +1096,7 @@
         try {
           el.innerHTML = html;
         } catch {
-          if (document && typeof document.createRange === 'function') {
-            const range = document.createRange();
-            range.selectNodeContents(el);
-            range.deleteContents();
-            el.appendChild(range.createContextualFragment(html));
-          }
+          renderHtmlViaSafeDomBuilder(document, el, html);
         }
       };
     }
@@ -1275,12 +1404,20 @@
         }
         return base;
       }
-      function fetchCascadeStats(cascadeId, csrf, inputBox) {
-        if (!cascadeId || cascadeId === 'remote-session') {
-          return Promise.resolve(null);
+      function isStateForCascade(fullState, cascadeId) {
+        if (!fullState || typeof fullState !== 'object') return false;
+        const stateCid =
+          fullState.conversationId ||
+          fullState.cascadeId ||
+          fullState.trajectorySlice?.conversationId ||
+          fullState.trajectorySlice?.cascadeId ||
+          null;
+        if (stateCid && cascadeId && stateCid !== cascadeId) {
+          return false;
         }
-        const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
-        const fullState = asp?.getState?.();
+        return true;
+      }
+      function extractVersionMetrics(fullState) {
         const slice = fullState?.trajectorySlice;
         const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
         const totalStepsLen = slice?.totalStepsLength ?? -1;
@@ -1294,9 +1431,24 @@
         const cwAfterCompact = typeof rawCwAfter === 'boolean'
           ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
           : Number(rawCwAfter || 0);
+        return {
+          totalGenLen,
+          totalStepsLen,
+          latestCompactedStep,
+          cwAfterCompact,
+          versionKey: `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`,
+        };
+      }
+      function fetchCascadeStats(cascadeId, csrf, inputBox) {
+        if (!cascadeId || cascadeId === 'remote-session') {
+          return Promise.resolve(null);
+        }
+        const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
+        const rawState = asp?.getState?.();
+        const fullState = isStateForCascade(rawState, cascadeId) ? rawState : null;
+        const { totalGenLen, totalStepsLen, versionKey } = extractVersionMetrics(fullState);
         const cached = stateCache.get(cascadeId);
         const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
-        const versionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
         const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
         if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
           return Promise.resolve(cached);
@@ -1367,20 +1519,23 @@
                 parsed = extractStatsFromMetas(metas);
               }
             }
-            parsed = applyRealtimeCompactionAndUsage(parsed, fullState);
+            const latestRaw = asp?.getState?.();
+            const latestState = isStateForCascade(latestRaw, cascadeId) ? latestRaw : fullState;
+            parsed = applyRealtimeCompactionAndUsage(parsed, latestState);
             if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
               return cached || null;
             }
             if (discoveredGenLen > 0) {
               setBoundedGenLen(cascadeId, discoveredGenLen);
             }
-            const finalVersionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;
+            const { versionKey: finalVersionKey } = extractVersionMetrics(latestState);
             const data = {
               used: parsed.used,
               trajectoryMax: parsed.trajectoryMax,
               cacheRead: parsed.cacheRead,
               inputTok: parsed.inputTok,
               cachePct: parsed.cachePct,
+              lastMetaStepIndex: parsed.lastMetaStepIndex,
               knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
               versionKey: finalVersionKey,
               ts: Date.now(),
@@ -1400,7 +1555,7 @@
         const cached = cascadeId ? (stateCache.get(cascadeId) || null) : null;
         const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
         const fullState = asp?.getState?.();
-        if (!fullState || typeof fullState !== 'object') {
+        if (!isStateForCascade(fullState, cascadeId)) {
           return cached;
         }
         const merged = applyRealtimeCompactionAndUsage(cached ? { ...cached, foundCtx: true } : null, fullState);
@@ -1456,7 +1611,27 @@
       }
     }
     const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
+    function cleanupLegacyObjectPrototypeCwGetters(extraWin) {
+      const protos = [Object.prototype];
+      try {
+        if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
+          protos.push(extraWin.Object.prototype);
+        }
+      } catch {}
+      for (const proto of protos) {
+        try {
+          for (const key of Object.getOwnPropertyNames(proto)) {
+            if (!/^\d+K$/.test(key)) continue;
+            const desc = Object.getOwnPropertyDescriptor(proto, key);
+            if (desc && desc.configurable && typeof desc.get === 'function' && String(desc.get).includes('512000')) {
+              delete proto[key];
+            }
+          }
+        } catch {}
+      }
+    }
     function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
+      cleanupLegacyObjectPrototypeCwGetters(extraWin);
       if (!cw) return;
       const kNum = parseInt(cw, 10);
       if (!isNaN(kNum) && kNum > 0 && kNum <= 256 && underDefaultCwSet && !underDefaultCwSet.has(cw)) {
@@ -1465,36 +1640,11 @@
           try { onStyleUpdate(); } catch {}
         }
       }
-      if (cw === '256K' || cw === '512K' || cw === '900K') return;
-      if (isNaN(kNum) || kNum <= 0) return;
-      const tokens = kNum * 1000;
-      const protos = [Object.prototype];
-      try {
-        if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
-          protos.push(extraWin.Object.prototype);
-        }
-      } catch {}
-      for (const proto of protos) {
-        if (Object.prototype.hasOwnProperty.call(proto, cw)) continue;
-        try {
-          Object.defineProperty(proto, cw, {
-            configurable: true,
-            enumerable: false,
-            get() {
-              if (this && this['512K'] === 512000 && this['900K'] === 900000) {
-                return tokens;
-              }
-              if (this && typeof this['512K'] === 'string' && this['512K'].indexOf('512K') !== -1) {
-                return `${cw} custom context limit (${tokens.toLocaleString('en-US')} tokens)`;
-              }
-              return undefined;
-            },
-          });
-        } catch {}
-      }
     }
     function createHostBridge({ window, document, localStorage, fetchFn, cwStore, hostConfig }) {
       const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
+      const cleanupCallbacks = [];
+      cleanupLegacyObjectPrototypeCwGetters();
       try {
         const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
         const flags = raw ? JSON.parse(raw) : {};
@@ -1514,14 +1664,16 @@
       try {
         if (window && !window.__agyLsClientDecoratorHooked) {
           window.__agyLsClientDecoratorHooked = true;
+          const hadOwnDec = Object.prototype.hasOwnProperty.call(window, '__JETSKI_LS_CLIENT_DECORATOR__');
           const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
-          window.__JETSKI_LS_CLIENT_DECORATOR__ = function (client) {
+          const wrappedDec = function (client) {
             const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
             if (decorated && typeof decorated === 'object') {
               window.__agyCapturedLsClient = decorated;
               if (typeof decorated.subscribeToPlugins === 'function' && typeof decorated.getAllPlugins === 'function' && !decorated.__agyPluginsStreamPatched) {
                 decorated.__agyPluginsStreamPatched = true;
-                const origSub = decorated.subscribeToPlugins.bind(decorated);
+                const origSubRaw = decorated.subscribeToPlugins;
+                const origSub = origSubRaw.bind(decorated);
                 decorated.subscribeToPlugins = function (req, opts) {
                   const stream = origSub(req, opts);
                   if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream;
@@ -1572,10 +1724,26 @@
                     },
                   };
                 };
+                cleanupCallbacks.push(() => {
+                  try {
+                    decorated.subscribeToPlugins = origSubRaw;
+                    delete decorated.__agyPluginsStreamPatched;
+                  } catch {}
+                });
               }
             }
             return decorated;
           };
+          window.__JETSKI_LS_CLIENT_DECORATOR__ = wrappedDec;
+          cleanupCallbacks.push(() => {
+            try {
+              if (window.__JETSKI_LS_CLIENT_DECORATOR__ === wrappedDec) {
+                if (hadOwnDec) window.__JETSKI_LS_CLIENT_DECORATOR__ = prevDec;
+                else delete window.__JETSKI_LS_CLIENT_DECORATOR__;
+              }
+              delete window.__agyLsClientDecoratorHooked;
+            } catch {}
+          });
         }
       } catch {}
       function getAccessibleRemoteIframeWin() {
@@ -1633,7 +1801,9 @@
         }
         return inputBox;
       }
-      function ensureModelContextWindowOptions(modelObj, extraCw) {
+      const frozenModelCloneCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const patchedStoreConfigsCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+      function ensureModelContextWindowOptions(modelObj, extraCw, forceClone = false) {
         if (!modelObj || typeof modelObj !== 'object') return modelObj;
         const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
         const existingNames = new Set(
@@ -1660,20 +1830,40 @@
           return modelObj;
         }
         const nextArr = [...curArr, ...toAdd];
-        try {
-          if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
-            modelObj.contextWindowOptions.push(...toAdd);
-          } else {
-            modelObj.contextWindowOptions = nextArr;
+        if (!forceClone) {
+          try {
+            if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
+              modelObj.contextWindowOptions.push(...toAdd);
+              return modelObj;
+            }
+            if (Object.isExtensible(modelObj)) {
+              modelObj.contextWindowOptions = nextArr;
+              return modelObj;
+            }
+          } catch {}
+        }
+        const wantedKey = wanted.join('|');
+        if (frozenModelCloneCache) {
+          const byKey = frozenModelCloneCache.get(modelObj);
+          if (byKey && byKey.has(wantedKey)) {
+            return byKey.get(wantedKey);
           }
-        } catch {}
+        }
         try {
           const proto = Object.getPrototypeOf(modelObj);
-          if (proto && proto !== Object.prototype) {
-            const clone = Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr });
-            return clone;
+          const clone =
+            proto && proto !== Object.prototype
+              ? Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr })
+              : { ...modelObj, contextWindowOptions: nextArr };
+          if (frozenModelCloneCache) {
+            let byKey = frozenModelCloneCache.get(modelObj);
+            if (!byKey) {
+              byKey = new Map();
+              frozenModelCloneCache.set(modelObj, byKey);
+            }
+            byKey.set(wantedKey, clone);
           }
-          return { ...modelObj, contextWindowOptions: nextArr };
+          return clone;
         } catch {
           return modelObj;
         }
@@ -1684,12 +1874,20 @@
         if (cwin) ensureFetchHook(cwin);
         if (!document) return;
         const now = Date.now();
+        const effectiveExtraKey =
+          extraCw && !PRESET_CONTEXT_WINDOWS.includes(extraCw) ? String(extraCw) : '__presets__';
         const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
         for (const d of docs) {
           const views = d.querySelectorAll('[data-testid="conversation-view"]');
           for (const view of views) {
-            const cacheKey = String(extraCw || '');
-            if (view.__agyCwsPatchTs && now - view.__agyCwsPatchTs < 3000 && view.__agyCwsPatchExtraCw === cacheKey) {
+            const cacheKey = effectiveExtraKey;
+            const currentCid = view.getAttribute?.('data-cascade-id') || '';
+            if (
+              view.__agyCwsPatchTs &&
+              now - view.__agyCwsPatchTs < 3000 &&
+              view.__agyCwsPatchExtraCw === cacheKey &&
+              view.__agyCwsPatchCid === currentCid
+            ) {
               continue;
             }
             const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
@@ -1713,6 +1911,12 @@
                           return origGet.apply(this, arguments);
                         };
                         val.__cwsPatched = true;
+                        cleanupCallbacks.push(() => {
+                          try {
+                            val.get = origGet;
+                            delete val.__cwsPatched;
+                          } catch {}
+                        });
                       } catch {}
                     }
                   }
@@ -1722,7 +1926,7 @@
                   if (val.selectedModel && typeof val.selectedModel === 'object') {
                     patchedAny = true;
                     const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
-                    if (nextSm !== val.selectedModel) {
+                    if (nextSm !== val.selectedModel && Object.isExtensible(val)) {
                       try { val.selectedModel = nextSm; } catch {}
                     }
                   }
@@ -1735,10 +1939,16 @@
                           try { val.modelOptions[i] = nextOpt; } catch {}
                         }
                       }
-                    } else {
-                      try {
-                        val.modelOptions = val.modelOptions.map((opt) => ensureModelContextWindowOptions(opt, extraCw));
-                      } catch {}
+                    } else if (Object.isExtensible(val)) {
+                      let changedOpt = false;
+                      const mapped = val.modelOptions.map((opt) => {
+                        const nextOpt = ensureModelContextWindowOptions(opt, extraCw);
+                        if (nextOpt !== opt) changedOpt = true;
+                        return nextOpt;
+                      });
+                      if (changedOpt) {
+                        try { val.modelOptions = mapped; } catch {}
+                      }
                     }
                   }
                   if (val.store && typeof val.store.getState === 'function') {
@@ -1746,28 +1956,51 @@
                     const st = val.store.getState();
                     const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
                     if (Array.isArray(clientConfigs)) {
-                      let needsReduxUpdate = false;
-                      const updatedConfigs = [];
-                      for (const cfg of clientConfigs) {
-                        const nextCfg = ensureModelContextWindowOptions(cfg, extraCw);
-                        updatedConfigs.push(nextCfg);
-                        if (nextCfg !== cfg) {
-                          needsReduxUpdate = true;
+                      let storeRec = patchedStoreConfigsCache ? patchedStoreConfigsCache.get(val.store) : null;
+                      const alreadyHandledRef =
+                        storeRec &&
+                        storeRec.configsRefs.has(clientConfigs) &&
+                        storeRec.extraCwKeys.has(cacheKey);
+                      if (!alreadyHandledRef) {
+                        let needsReduxUpdate = false;
+                        const updatedConfigs = [];
+                        for (const cfg of clientConfigs) {
+                          const nextCfg = ensureModelContextWindowOptions(cfg, extraCw, true);
+                          updatedConfigs.push(nextCfg);
+                          if (nextCfg !== cfg) {
+                            needsReduxUpdate = true;
+                          }
                         }
-                      }
-                      if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
-                        try {
-                          val.store.dispatch({
-                            type: 'userStatus/setUserStatus',
-                            payload: {
-                              ...st.userStatus,
-                              cascadeModelConfigData: {
-                                ...st.userStatus.cascadeModelConfigData,
-                                clientModelConfigs: updatedConfigs,
+                        if (!storeRec && patchedStoreConfigsCache) {
+                          storeRec = {
+                            configsRefs: new WeakSet(),
+                            extraCwKeys: new Set(),
+                          };
+                          patchedStoreConfigsCache.set(val.store, storeRec);
+                        }
+                        if (storeRec) {
+                          storeRec.configsRefs.add(clientConfigs);
+                          storeRec.configsRefs.add(updatedConfigs);
+                          storeRec.extraCwKeys.add(cacheKey);
+                        }
+                        if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
+                          try {
+                            val.store.dispatch({
+                              type: 'userStatus/setUserStatus',
+                              payload: {
+                                ...st.userStatus,
+                                cascadeModelConfigData: {
+                                  ...st.userStatus.cascadeModelConfigData,
+                                  clientModelConfigs: updatedConfigs,
+                                },
                               },
-                            },
-                          });
-                        } catch {}
+                            });
+                            const afterConfigs = val.store.getState()?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+                            if (storeRec && Array.isArray(afterConfigs)) {
+                              storeRec.configsRefs.add(afterConfigs);
+                            }
+                          } catch {}
+                        }
                       }
                     }
                   }
@@ -1778,6 +2011,7 @@
             if (patchedAny) {
               view.__agyCwsPatchTs = now;
               view.__agyCwsPatchExtraCw = cacheKey;
+              view.__agyCwsPatchCid = currentCid;
             }
           }
         }
@@ -1852,9 +2086,11 @@
         const effView = resolveEffectiveView(view);
         if (!effView) return null;
         const now = Date.now();
+        const currentCid = effView.getAttribute?.('data-cascade-id') || view?.getAttribute?.('data-cascade-id') || '';
         const cachedCtx = effView.__agyMsCtxCache;
         if (
           cachedCtx &&
+          effView.__agyMsCtxCacheCid === currentCid &&
           now - (effView.__agyMsCtxCacheTs || 0) < 400 &&
           (!cachedCtx.triggerEl || cachedCtx.triggerEl.isConnected !== false) &&
           (cachedCtx.msCtx || cachedCtx.reduxStore || cachedCtx.legacyCtx)
@@ -1901,6 +2137,7 @@
         if (msCtx || reduxStore || legacyCtx) {
           effView.__agyMsCtxCache = res;
           effView.__agyMsCtxCacheTs = now;
+          effView.__agyMsCtxCacheCid = currentCid;
         }
         return res;
       }
@@ -2362,6 +2599,16 @@
           wrappedFetch.__agyCwHooked = true;
           wrappedFetch.__agyCwHookV2 = true;
           w.fetch = wrappedFetch;
+          cleanupCallbacks.push(() => {
+            try {
+              if (w.fetch === wrappedFetch && w.__agyOrigFetch) {
+                w.fetch = w.__agyOrigFetch;
+              }
+              delete w.__agyOrigFetch;
+              delete w.__agyInjectCheckpointLimit;
+              delete w.__agySniffCascadeFromRpc;
+            } catch {}
+          });
         } catch {}
       }
       function hookLsClient(lsClient) {
@@ -2373,15 +2620,26 @@
           if (typeof lsClient.sendUserCascadeMessage === 'function') {
             const origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
             lsClient.__agyOrigSendUserCascadeMessage = origSend;
-            lsClient.sendUserCascadeMessage = function (req, ...rest) {
+            const wrappedSend = function (req, ...rest) {
               const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-            const nextReq = injectFn(
-              resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
-              req,
-              null
-            );
+              const nextReq = injectFn(
+                resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
+                req,
+                null
+              );
               return origSend.call(this, nextReq, ...rest);
             };
+            lsClient.sendUserCascadeMessage = wrappedSend;
+            cleanupCallbacks.push(() => {
+              try {
+                if (lsClient.sendUserCascadeMessage === wrappedSend) {
+                  lsClient.sendUserCascadeMessage = origSend;
+                }
+                delete lsClient.__agyOrigSendUserCascadeMessage;
+                delete lsClient.__agyCwHooked;
+                delete lsClient.__agyCwHookV2;
+              } catch {}
+            });
           }
         } catch {}
         return lsClient;
@@ -2540,6 +2798,45 @@
             };
           }
         }
+        cleanupCallbacks.push(() => {
+          try {
+            if (proto.__agyOrigHandleIframeMessage) {
+              proto.handleIframeMessage = proto.__agyOrigHandleIframeMessage;
+              delete proto.__agyOrigHandleIframeMessage;
+            }
+            if (proto.__agyOrigHandlePortRequest) {
+              proto.handlePortRequest = proto.__agyOrigHandlePortRequest;
+              delete proto.__agyOrigHandlePortRequest;
+            }
+            for (const mName of [
+              'proxyCommand',
+              'streamProxyCommand',
+              'handleUrlChanged',
+              'managePolling',
+              'shouldPoll',
+              'loadInstances',
+              'isDisconnected',
+              'onIframeLoad',
+              'onWindowOnline',
+              'onWindowOffline',
+              'isOffline',
+              'isDirectIngressMode',
+              'isTabHidden',
+              'getSelectedInstance',
+              'instanceInfos',
+              'remoteConversationsInfos',
+            ]) {
+              const origKey = `__agyOrig_${mName}`;
+              if (proto[origKey]) {
+                proto[mName] = proto[origKey];
+                delete proto[origKey];
+              }
+            }
+            delete proto.__agyHooked;
+            delete proto.__agyHookV2;
+            delete proto.__agyTargetWin;
+          } catch {}
+        });
       }
       function getRemoteControlInstance(onCascadeChange) {
         if (typeof onCascadeChange === 'function') {
@@ -3356,7 +3653,9 @@
           reduxStore.__agyPoisonSanitizedV25 = true;
           const currentDefaultModel = ms.default?.model;
           const currentDefaultCustomLabel = ms.default?.customLabel;
-          const desiredDefaultCw = cwStore?.getDefaultCw?.() || ms.default?.contextWindow || '256K';
+          const desiredDefaultCw = cwStore?.hasExplicitDefaultCw?.()
+            ? cwStore.getDefaultCw()
+            : (ms.default?.contextWindow || '256K');
           const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
           for (const cid of poisonedCids) {
             const entry = syncMap[cid];
@@ -3394,6 +3693,14 @@
           }
         } catch {}
       }
+      function setTriggerCwAttribute(triggerEl, cwStr) {
+        if (!triggerEl || typeof triggerEl.setAttribute !== 'function') return;
+        const str = String(cwStr);
+        if (triggerEl.getAttribute('data-context-window') !== str) {
+          triggerEl.__agyInternalDomCw = str;
+          triggerEl.setAttribute('data-context-window', str);
+        }
+      }
       function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
         const targetCw = cwStore.normalize(rawTargetCw);
         if (!view || !cascadeId || !targetCw) return false;
@@ -3415,24 +3722,28 @@
         window.__agyLastAppliedContextWindowByCascade = window.__agyLastAppliedContextWindowByCascade || {};
         const lastAppliedForCascade = window.__agyLastAppliedContextWindowByCascade[cascadeId];
         const initialState = reduxStore ? reduxStore.getState() : null;
-        const initialReduxCw = initialState?.modelSelection?.byConversation?.[cascadeId]?.contextWindow;
-        const reduxAlreadyMatches = !reduxStore || initialReduxCw === targetCw;
+        const initialByConvo = initialState?.modelSelection?.byConversation?.[cascadeId];
+        const defaultReduxCw = cwStore.normalize(initialState?.modelSelection?.default?.contextWindow) || '256K';
+        const effectiveInitialReduxCw = cwStore.normalize(initialByConvo?.contextWindow) || defaultReduxCw;
+        const reduxAlreadyMatches = !reduxStore || effectiveInitialReduxCw === targetCw;
         if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
-          if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
-            triggerEl.setAttribute('data-context-window', String(targetCw));
-          }
+          window.__agyLastAppliedContextWindow = applyKey;
+          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
+          setTriggerCwAttribute(triggerEl, targetCw);
           return true;
         }
         if (msCtx || reduxStore) {
           const state = initialState;
-          const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
-          const currentInRedux = byConvo?.contextWindow || msCtx?.contextWindow?.selected || currentInDom || '256K';
+          const byConvo = initialByConvo;
+          const currentInRedux = reduxStore
+            ? effectiveInitialReduxCw
+            : (cwStore.normalize(msCtx?.contextWindow?.selected) || currentInDom || '256K');
           const selectedModelObj = msCtx?.selectedModel;
           if (selectedModelObj) {
             ensureModelContextWindowOptions(selectedModelObj, targetCw);
           }
           let dispatched = false;
-          if (currentInRedux !== targetCw || (reduxStore && byConvo?.contextWindow !== targetCw) || force) {
+          if (currentInRedux !== targetCw || force) {
             const prevDefault = state?.modelSelection?.default;
             const prevDefaultModel = prevDefault?.model;
             const prevDefaultCustomLabel = prevDefault?.customLabel;
@@ -3471,15 +3782,20 @@
             if (dispatched && reduxStore) {
               const nextState = reduxStore.getState();
               const defObj = nextState?.modelSelection?.default;
-              const desiredDefaultCw = cwStore.getDefaultCw() || prevDefaultCw || '256K';
+              const desiredDefaultCw =
+                prevDefaultCw !== undefined
+                  ? prevDefaultCw
+                  : (cwStore.hasExplicitDefaultCw?.() ? cwStore.getDefaultCw() : '256K');
               const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
               const desiredDefaultCustomLabel =
                 prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
+              const defCwNormalized = cwStore.normalize(defObj?.contextWindow) || '256K';
+              const desiredCwNormalized = cwStore.normalize(desiredDefaultCw) || '256K';
               if (
                 defObj &&
                 (defObj.model !== desiredDefaultModel ||
                   defObj.customLabel !== desiredDefaultCustomLabel ||
-                  defObj.contextWindow !== desiredDefaultCw)
+                  defCwNormalized !== desiredCwNormalized)
               ) {
                 reduxStore.dispatch({
                   type: 'modelSelection/modelPicked',
@@ -3496,9 +3812,7 @@
           if (dispatched || currentInRedux === targetCw) {
             window.__agyLastAppliedContextWindow = applyKey;
             setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-            if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
-              triggerEl.setAttribute('data-context-window', String(targetCw));
-            }
+            setTriggerCwAttribute(triggerEl, targetCw);
             return true;
           }
           return false;
@@ -3516,9 +3830,7 @@
           }
           window.__agyLastAppliedContextWindow = applyKey;
           setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-          if (triggerEl && triggerEl.getAttribute('data-context-window') !== String(targetCw)) {
-            triggerEl.setAttribute('data-context-window', String(targetCw));
-          }
+          setTriggerCwAttribute(triggerEl, targetCw);
           return true;
         }
         return false;
@@ -3619,6 +3931,18 @@
             clearTimeout(t);
           }
           pendingSniffTimers.clear();
+          while (cleanupCallbacks.length > 0) {
+            const fn = cleanupCallbacks.pop();
+            try { fn(); } catch {}
+          }
+          try {
+            if (window) {
+              delete window.__agyInjectCheckpointLimit;
+              delete window.__agySniffCascadeFromRpc;
+              delete window.__agyOnCascadeSniffed;
+              delete window.__agyProbingRcInstance;
+            }
+          } catch {}
         },
       };
     }
@@ -4061,16 +4385,41 @@
               quotaHtml = `<span class="agy-ctx-sep agy-ctx-sep-pipe">|</span><span class="agy-ctx-group agy-ctx-group-quota">${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
             }
           }
+          const sessionChanged = Boolean(containerEl.__lastCascadeId && containerEl.__lastCascadeId !== cascadeId);
+          containerEl.__lastCascadeId = cascadeId;
+          if (ctx.deferUncachedMetrics) {
+            const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
+            if (existingLimitBtn) {
+              const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
+              if (existingLimitBtn.className !== nextLimitClass) existingLimitBtn.className = nextLimitClass;
+              if (existingLimitBtn.getAttribute?.('title') !== limitTitle) {
+                existingLimitBtn.setAttribute?.('title', limitTitle);
+                existingLimitBtn.title = limitTitle;
+              }
+              const nextLimitText = `[ ${currentCw.toLowerCase()} ▾ ]`;
+              if (existingLimitBtn.textContent !== nextLimitText) existingLimitBtn.textContent = nextLimitText;
+              containerEl.__pendingCrossSessionNoTransition = true;
+              containerEl.__lastHtml = null;
+              return;
+            }
+            if (containerEl.__lastHtml) {
+              containerEl.__pendingCrossSessionNoTransition = true;
+              containerEl.__lastHtml = null;
+              return;
+            }
+          }
+          const suppressBarTransition = sessionChanged || Boolean(containerEl.__pendingCrossSessionNoTransition);
+          containerEl.__pendingCrossSessionNoTransition = false;
           const html = `
         <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
-          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
+          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}${suppressBarTransition ? ';transition:none' : ''}"></span></span>
           <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
           <span class="agy-ctx-sep">·</span>
           <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
         </span>
         <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
       `;
-          if (containerEl.__lastHtml !== html) {
+          if (containerEl.__lastHtml !== html || suppressBarTransition) {
             containerEl.__lastHtml = html;
             const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
             const pctValEl = containerEl.querySelector?.('.agy-ctx-pct-val');
@@ -4080,6 +4429,7 @@
             const quotaSlotEl = containerEl.querySelector?.('.agy-ctx-quota-slot');
             if (barFill && pctValEl && usedValEl && existingLimitBtn && cacheEl && quotaSlotEl) {
               if (barFill.style) {
+                barFill.style.transition = suppressBarTransition ? 'none' : '';
                 barFill.style.width = `${pct}%`;
                 barFill.style.background = barColor;
               }
@@ -4106,6 +4456,10 @@
             }
             containerEl.__lastQuotaHtml = quotaHtml;
             setHtml(containerEl, html);
+            const mountedFill = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-bar-fill') : null;
+            if (mountedFill && mountedFill.style && suppressBarTransition) {
+              mountedFill.style.transition = 'none';
+            }
             const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
             if (limitBtn) {
               limitBtn.onclick = (e) => {
@@ -4515,7 +4869,7 @@
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v31';
+    const STATUSBAR_VERSION = 'v32';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
@@ -4582,6 +4936,14 @@
         if (!m) continue;
         if (isIgnoredCustomOrTranslatedNode(m.target)) continue;
         if (m.type === 'attributes') {
+          if (
+            m.attributeName === 'data-context-window' &&
+            m.target?.__agyInternalDomCw &&
+            typeof m.target.getAttribute === 'function' &&
+            m.target.getAttribute('data-context-window') === m.target.__agyInternalDomCw
+          ) {
+            continue;
+          }
           if (!m.attributeName || m.attributeName === 'data-cascade-id' || m.attributeName === 'data-context-window') {
             return true;
           }
@@ -4616,12 +4978,7 @@
       }
       return false;
     }
-    function injectScriptText(win, doc, code) {
-      if (!code || !doc?.head) return false;
-      const s = doc.createElement('script');
-      const nonceEl = doc.querySelector?.('script[nonce]');
-      const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
-      if (nonce) s.nonce = nonce;
+    function resolveCompanionScriptPolicy(win) {
       let policy = win?.__agyTrustedTypesPolicy || null;
       if (!policy && win?.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
         const policyNames = [
@@ -4642,30 +4999,92 @@
           } catch {}
         }
       }
-      try {
-        s.text = policy && typeof policy.createScript === 'function' ? policy.createScript(code) : code;
-        doc.head.appendChild(s);
-        return true;
-      } catch {
+      return policy;
+    }
+    function getScriptNonce(doc) {
+      const nonceEl = doc?.querySelector?.('script[nonce]');
+      return nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '' : '';
+    }
+    function appendScriptSrcAsync(win, doc, rawUrl, policy, onDoneCleanup) {
+      return new Promise((resolve) => {
+        try {
+          const s = doc.createElement('script');
+          const nonce = getScriptNonce(doc);
+          if (nonce) s.nonce = nonce;
+          s.src = policy && typeof policy.createScriptURL === 'function' ? policy.createScriptURL(rawUrl) : rawUrl;
+          if (typeof s.addEventListener !== 'function') {
+            doc.head.appendChild(s);
+            if (typeof onDoneCleanup === 'function') onDoneCleanup();
+            resolve(true);
+            return;
+          }
+          let settled = false;
+          const setTimeoutFn = win?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+          const clearTimeoutFn = win?.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
+          let timer = null;
+          const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            if (timer && clearTimeoutFn) {
+              try { clearTimeoutFn(timer); } catch {}
+            }
+            if (typeof onDoneCleanup === 'function') {
+              try { onDoneCleanup(); } catch {}
+            }
+            resolve(ok);
+          };
+          s.addEventListener('load', () => finish(true), { once: true });
+          s.addEventListener('error', () => finish(false), { once: true });
+          if (setTimeoutFn) {
+            timer = setTimeoutFn(() => finish(false), 4000);
+            if (timer && typeof timer.unref === 'function') timer.unref();
+          }
+          doc.head.appendChild(s);
+        } catch {
+          if (typeof onDoneCleanup === 'function') {
+            try { onDoneCleanup(); } catch {}
+          }
+          resolve(false);
+        }
+      });
+    }
+    async function injectCompanionCodeOrUrl(win, doc, code, url, policy, checkLoaded) {
+      const isLoaded = typeof checkLoaded === 'function' ? checkLoaded : () => false;
+      if (code && doc?.head) {
+        try {
+          const s = doc.createElement('script');
+          const nonce = getScriptNonce(doc);
+          if (nonce) s.nonce = nonce;
+          s.text = policy && typeof policy.createScript === 'function' ? policy.createScript(code) : code;
+          doc.head.appendChild(s);
+          if (isLoaded() || typeof s.addEventListener !== 'function') {
+            return true;
+          }
+        } catch {}
         try {
           const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
           const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
           if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
             const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
-            s.src = policy && typeof policy.createScriptURL === 'function' ? policy.createScriptURL(blobUrl) : blobUrl;
             const revoke = () => {
               try { UrlApi.revokeObjectURL(blobUrl); } catch {}
             };
-            if (typeof s.addEventListener === 'function') {
-              s.addEventListener('load', revoke, { once: true });
-              s.addEventListener('error', revoke, { once: true });
+            const blobOk = await appendScriptSrcAsync(win, doc, blobUrl, policy, revoke);
+            if (blobOk && (isLoaded() || typeof doc.createElement('script')?.addEventListener !== 'function')) {
+              return true;
             }
-            doc.head.appendChild(s);
-            return true;
           }
         } catch {}
-        return false;
       }
+      if (url && doc?.head) {
+        const sep = url.includes('?') ? '&' : '?';
+        const remoteUrl = `${url}${sep}t=${Date.now()}`;
+        const remoteOk = await appendScriptSrcAsync(win, doc, remoteUrl, policy, null);
+        if (remoteOk) {
+          return true;
+        }
+      }
+      return false;
     }
     function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
       try {
@@ -4673,32 +5092,37 @@
         const isRemoteWeb = resolvedHostConfig.isRemoteHost(win?.location?.hostname);
         if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
         const effFetch = fetchFn || win?.fetch;
-        const loadScript = (flagKey, url, fallbackCode) => {
-          if (win[flagKey]) return Promise.resolve(false);
+        const loadScript = async (flagKey, url, fallbackCode, checkLoaded) => {
+          if (win[flagKey]) return false;
           win[flagKey] = true;
-          if (fallbackCode && injectScriptText(win, doc, fallbackCode)) {
-            return Promise.resolve(true);
-          }
-          if (typeof effFetch !== 'function' || !url) {
-            win[flagKey] = false;
-            return Promise.resolve(false);
-          }
-          const sep = url.includes('?') ? '&' : '?';
-          return Promise.resolve(
-            effFetch(`${url}${sep}t=${Date.now()}`)
-          )
-            .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
-            .then((code) => {
-              if (!code) {
-                win[flagKey] = false;
-                return false;
+          const policy = resolveCompanionScriptPolicy(win);
+          try {
+            if (fallbackCode) {
+              const ok = await injectCompanionCodeOrUrl(win, doc, fallbackCode, url, policy, checkLoaded);
+              if (!ok) win[flagKey] = false;
+              return ok;
+            }
+            if (typeof effFetch === 'function' && url) {
+              const sep = url.includes('?') ? '&' : '?';
+              const r = await Promise.resolve(effFetch(`${url}${sep}t=${Date.now()}`)).catch(() => null);
+              const code = r && r.ok !== false && typeof r.text === 'function' ? await r.text() : '';
+              if (code) {
+                const ok = await injectCompanionCodeOrUrl(win, doc, code, url, policy, checkLoaded);
+                if (!ok) win[flagKey] = false;
+                return ok;
               }
-              return injectScriptText(win, doc, code);
-            })
-            .catch(() => {
-              win[flagKey] = false;
-              return false;
-            });
+            }
+            if (url) {
+              const ok = await injectCompanionCodeOrUrl(win, doc, '', url, policy, checkLoaded);
+              if (!ok) win[flagKey] = false;
+              return ok;
+            }
+            win[flagKey] = false;
+            return false;
+          } catch {
+            win[flagKey] = false;
+            return false;
+          }
         };
         const resolveHostInfo = async () => {
           if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
@@ -4736,7 +5160,8 @@
               loadScript(
                 '__agyLoadingMcpManagerCompanion',
                 resolvedHostConfig.companionScripts.mcpManagerUrl,
-                info.mcpManagerCode
+                info.mcpManagerCode,
+                () => Boolean(win.agyMcpManager)
               )
             );
           }
@@ -4745,7 +5170,8 @@
               loadScript(
                 '__agyLoadingKoTranslatorCompanion',
                 resolvedHostConfig.companionScripts.koTranslatorUrl,
-                info.koTranslatorCode
+                info.koTranslatorCode,
+                () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
               )
             );
           }
@@ -4882,7 +5308,7 @@
         compactButtonAdapter,
         contextButtonAdapter,
       ]);
-      function renderBar(barEl, view, inputBox, stats, quota, precomputedCw) {
+      function renderBar(barEl, view, inputBox, stats, quota, precomputedCw, extraCtx) {
         const cascadeId = view.getAttribute('data-cascade-id');
         const { leftEl, rightEl } = registry.ensureBarStructure(barEl);
         const currentCw = precomputedCw || getConversationContextWindow(view, cascadeId);
@@ -4894,6 +5320,7 @@
           currentCw,
           stats,
           quota,
+          deferUncachedMetrics: Boolean(extraCtx && extraCtx.deferUncachedMetrics),
           updateAll,
           getConversationContextWindow: () => getConversationContextWindow(view, cascadeId),
           setConversationContextWindow: (cw) => setConversationContextWindow(view, cascadeId, cw),
@@ -4924,6 +5351,7 @@
             view.__lastAppliedTargetCw = null;
             view.__ignoreDomCwUntil = Date.now() + 500;
           }
+          inputBox.__lastCascadeId = cascadeId;
           const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
           const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
           const canAdoptFromDom = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
@@ -4939,6 +5367,7 @@
             view.__lastObservedDomCw = triggerEl.getAttribute('data-context-window') || targetCw;
           }
           let barEl = inputBox.querySelector('.agy-ctx-statusbar');
+          const isNewlyCreatedBar = !barEl;
           if (!barEl) {
             barEl = doc.createElement('div');
             barEl.className = 'agy-ctx-statusbar';
@@ -4950,14 +5379,15 @@
           const immediateData = rpcClient.getImmediateStats
             ? rpcClient.getImmediateStats(cascadeId, inputBox)
             : cachedData;
-          renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw);
+          const deferUncachedMetrics = Boolean(!isNewlyCreatedBar && !immediateData);
+          renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics });
           Promise.all([
             rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
             quotaPromise,
           ]).then(([data, freshQuota]) => {
             if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
             const finalData = data || cachedData || immediateData;
-            renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw);
+            renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
           });
         }
       }

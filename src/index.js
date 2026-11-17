@@ -10,7 +10,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v31';
+const STATUSBAR_VERSION = 'v32';
 
 function isIgnoredCustomOrTranslatedNode(node) {
   let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
@@ -80,6 +80,14 @@ function isRelevantStatusBarMutation(mutations) {
     if (!m) continue;
     if (isIgnoredCustomOrTranslatedNode(m.target)) continue;
     if (m.type === 'attributes') {
+      if (
+        m.attributeName === 'data-context-window' &&
+        m.target?.__agyInternalDomCw &&
+        typeof m.target.getAttribute === 'function' &&
+        m.target.getAttribute('data-context-window') === m.target.__agyInternalDomCw
+      ) {
+        continue;
+      }
       if (!m.attributeName || m.attributeName === 'data-cascade-id' || m.attributeName === 'data-context-window') {
         return true;
       }
@@ -115,12 +123,7 @@ function isRelevantStatusBarMutation(mutations) {
   return false;
 }
 
-function injectScriptText(win, doc, code) {
-  if (!code || !doc?.head) return false;
-  const s = doc.createElement('script');
-  const nonceEl = doc.querySelector?.('script[nonce]');
-  const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
-  if (nonce) s.nonce = nonce;
+function resolveCompanionScriptPolicy(win) {
   let policy = win?.__agyTrustedTypesPolicy || null;
   if (!policy && win?.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
     const policyNames = [
@@ -141,30 +144,97 @@ function injectScriptText(win, doc, code) {
       } catch {}
     }
   }
-  try {
-    s.text = policy && typeof policy.createScript === 'function' ? policy.createScript(code) : code;
-    doc.head.appendChild(s);
-    return true;
-  } catch {
+  return policy;
+}
+
+function getScriptNonce(doc) {
+  const nonceEl = doc?.querySelector?.('script[nonce]');
+  return nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '' : '';
+}
+
+function appendScriptSrcAsync(win, doc, rawUrl, policy, onDoneCleanup) {
+  return new Promise((resolve) => {
+    try {
+      const s = doc.createElement('script');
+      const nonce = getScriptNonce(doc);
+      if (nonce) s.nonce = nonce;
+      s.src = policy && typeof policy.createScriptURL === 'function' ? policy.createScriptURL(rawUrl) : rawUrl;
+      if (typeof s.addEventListener !== 'function') {
+        doc.head.appendChild(s);
+        if (typeof onDoneCleanup === 'function') onDoneCleanup();
+        resolve(true);
+        return;
+      }
+      let settled = false;
+      const setTimeoutFn = win?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+      const clearTimeoutFn = win?.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
+      let timer = null;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        if (timer && clearTimeoutFn) {
+          try { clearTimeoutFn(timer); } catch {}
+        }
+        if (typeof onDoneCleanup === 'function') {
+          try { onDoneCleanup(); } catch {}
+        }
+        resolve(ok);
+      };
+      s.addEventListener('load', () => finish(true), { once: true });
+      s.addEventListener('error', () => finish(false), { once: true });
+      if (setTimeoutFn) {
+        timer = setTimeoutFn(() => finish(false), 4000);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      }
+      doc.head.appendChild(s);
+    } catch {
+      if (typeof onDoneCleanup === 'function') {
+        try { onDoneCleanup(); } catch {}
+      }
+      resolve(false);
+    }
+  });
+}
+
+async function injectCompanionCodeOrUrl(win, doc, code, url, policy, checkLoaded) {
+  const isLoaded = typeof checkLoaded === 'function' ? checkLoaded : () => false;
+  if (code && doc?.head) {
+    try {
+      const s = doc.createElement('script');
+      const nonce = getScriptNonce(doc);
+      if (nonce) s.nonce = nonce;
+      s.text = policy && typeof policy.createScript === 'function' ? policy.createScript(code) : code;
+      doc.head.appendChild(s);
+      if (isLoaded() || typeof s.addEventListener !== 'function') {
+        return true;
+      }
+    } catch {}
+
     try {
       const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
       const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
       if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
         const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
-        s.src = policy && typeof policy.createScriptURL === 'function' ? policy.createScriptURL(blobUrl) : blobUrl;
         const revoke = () => {
           try { UrlApi.revokeObjectURL(blobUrl); } catch {}
         };
-        if (typeof s.addEventListener === 'function') {
-          s.addEventListener('load', revoke, { once: true });
-          s.addEventListener('error', revoke, { once: true });
+        const blobOk = await appendScriptSrcAsync(win, doc, blobUrl, policy, revoke);
+        if (blobOk && (isLoaded() || typeof doc.createElement('script')?.addEventListener !== 'function')) {
+          return true;
         }
-        doc.head.appendChild(s);
-        return true;
       }
     } catch {}
-    return false;
   }
+
+  if (url && doc?.head) {
+    const sep = url.includes('?') ? '&' : '?';
+    const remoteUrl = `${url}${sep}t=${Date.now()}`;
+    const remoteOk = await appendScriptSrcAsync(win, doc, remoteUrl, policy, null);
+    if (remoteOk) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
@@ -174,32 +244,37 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig)
     if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
     const effFetch = fetchFn || win?.fetch;
 
-    const loadScript = (flagKey, url, fallbackCode) => {
-      if (win[flagKey]) return Promise.resolve(false);
+    const loadScript = async (flagKey, url, fallbackCode, checkLoaded) => {
+      if (win[flagKey]) return false;
       win[flagKey] = true;
-      if (fallbackCode && injectScriptText(win, doc, fallbackCode)) {
-        return Promise.resolve(true);
-      }
-      if (typeof effFetch !== 'function' || !url) {
-        win[flagKey] = false;
-        return Promise.resolve(false);
-      }
-      const sep = url.includes('?') ? '&' : '?';
-      return Promise.resolve(
-        effFetch(`${url}${sep}t=${Date.now()}`)
-      )
-        .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
-        .then((code) => {
-          if (!code) {
-            win[flagKey] = false;
-            return false;
+      const policy = resolveCompanionScriptPolicy(win);
+      try {
+        if (fallbackCode) {
+          const ok = await injectCompanionCodeOrUrl(win, doc, fallbackCode, url, policy, checkLoaded);
+          if (!ok) win[flagKey] = false;
+          return ok;
+        }
+        if (typeof effFetch === 'function' && url) {
+          const sep = url.includes('?') ? '&' : '?';
+          const r = await Promise.resolve(effFetch(`${url}${sep}t=${Date.now()}`)).catch(() => null);
+          const code = r && r.ok !== false && typeof r.text === 'function' ? await r.text() : '';
+          if (code) {
+            const ok = await injectCompanionCodeOrUrl(win, doc, code, url, policy, checkLoaded);
+            if (!ok) win[flagKey] = false;
+            return ok;
           }
-          return injectScriptText(win, doc, code);
-        })
-        .catch(() => {
-          win[flagKey] = false;
-          return false;
-        });
+        }
+        if (url) {
+          const ok = await injectCompanionCodeOrUrl(win, doc, '', url, policy, checkLoaded);
+          if (!ok) win[flagKey] = false;
+          return ok;
+        }
+        win[flagKey] = false;
+        return false;
+      } catch {
+        win[flagKey] = false;
+        return false;
+      }
     };
 
     const resolveHostInfo = async () => {
@@ -240,7 +315,8 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig)
           loadScript(
             '__agyLoadingMcpManagerCompanion',
             resolvedHostConfig.companionScripts.mcpManagerUrl,
-            info.mcpManagerCode
+            info.mcpManagerCode,
+            () => Boolean(win.agyMcpManager)
           )
         );
       }
@@ -249,7 +325,8 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig)
           loadScript(
             '__agyLoadingKoTranslatorCompanion',
             resolvedHostConfig.companionScripts.koTranslatorUrl,
-            info.koTranslatorCode
+            info.koTranslatorCode,
+            () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
           )
         );
       }
@@ -404,7 +481,7 @@ function mountStatusBar(env = {}) {
     contextButtonAdapter,
   ]);
 
-  function renderBar(barEl, view, inputBox, stats, quota, precomputedCw) {
+  function renderBar(barEl, view, inputBox, stats, quota, precomputedCw, extraCtx) {
     const cascadeId = view.getAttribute('data-cascade-id');
     const { leftEl, rightEl } = registry.ensureBarStructure(barEl);
     const currentCw = precomputedCw || getConversationContextWindow(view, cascadeId);
@@ -416,6 +493,7 @@ function mountStatusBar(env = {}) {
       currentCw,
       stats,
       quota,
+      deferUncachedMetrics: Boolean(extraCtx && extraCtx.deferUncachedMetrics),
       updateAll,
       getConversationContextWindow: () => getConversationContextWindow(view, cascadeId),
       setConversationContextWindow: (cw) => setConversationContextWindow(view, cascadeId, cw),
@@ -450,6 +528,7 @@ function mountStatusBar(env = {}) {
         view.__lastAppliedTargetCw = null;
         view.__ignoreDomCwUntil = Date.now() + 500;
       }
+      inputBox.__lastCascadeId = cascadeId;
 
       const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
       const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
@@ -468,6 +547,7 @@ function mountStatusBar(env = {}) {
       }
 
       let barEl = inputBox.querySelector('.agy-ctx-statusbar');
+      const isNewlyCreatedBar = !barEl;
       if (!barEl) {
         barEl = doc.createElement('div');
         barEl.className = 'agy-ctx-statusbar';
@@ -480,8 +560,9 @@ function mountStatusBar(env = {}) {
       const immediateData = rpcClient.getImmediateStats
         ? rpcClient.getImmediateStats(cascadeId, inputBox)
         : cachedData;
+      const deferUncachedMetrics = Boolean(!isNewlyCreatedBar && !immediateData);
 
-      renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw);
+      renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics });
 
       Promise.all([
         rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
@@ -489,7 +570,7 @@ function mountStatusBar(env = {}) {
       ]).then(([data, freshQuota]) => {
         if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
         const finalData = data || cachedData || immediateData;
-        renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw);
+        renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
       });
     }
   }

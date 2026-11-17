@@ -37,6 +37,7 @@ const ASAR_PATH = path.join(LOCAL_APPDATA, 'Programs', 'antigravity', 'resources
 const AGY_DIR = path.join(HOME_DIR, '.gemini', 'antigravity');
 const AUTOINJECT_PATH = path.join(AGY_DIR, 'statusbar_autoinject.js');
 const LOCK_PATH = path.join(AGY_DIR, 'statusbar_patch.lock');
+const APP_STORAGE_LOCK_PATH = path.join(AGY_DIR, 'statusbar_app_storage.lock');
 const STATUS_PATH = path.join(AGY_DIR, 'statusbar_patch_status.json');
 const DEVTOOLS_PORT_FILE = path.join(APPDATA, 'Antigravity', 'DevToolsActivePort');
 const APP_STORAGE_PATH = path.join(APPDATA, 'Antigravity', 'app_storage.json');
@@ -50,6 +51,9 @@ const LEGACY_MARKERS = [
 ];
 const STORAGE_CODE_KEY = 'agy-statusbar-code';
 const LOCK_STALE_MS = 60000;
+const APP_STORAGE_LOCK_STALE_MS = 15000;
+const MAX_WS_BUFFER_BYTES = 16 * 1024 * 1024;
+const LOCK_TOKEN = `${process.pid}:${crypto.randomBytes(8).toString('hex')}`;
 const BLOCK_SIZE = 4 * 1024 * 1024;
 
 // Anchor 1: Unconditional loadURL in createWindow(url, storageManager) in dist/utils.js (works on v2.26+ and v2.27+)
@@ -129,19 +133,32 @@ function computeIntegrity(buf) {
  */
 function syncAppStorageCode() {
   let tmpPath = null;
+  let storageLockToken = null;
   try {
     if (!fs.existsSync(AUTOINJECT_PATH) || !fs.existsSync(APP_STORAGE_PATH)) {
       return false;
     }
     const code = fs.readFileSync(AUTOINJECT_PATH, 'utf8');
-    const raw = fs.readFileSync(APP_STORAGE_PATH, 'utf8');
-    const data = JSON.parse(raw);
-    if (data[STORAGE_CODE_KEY] === code) {
+    const fastRaw = fs.readFileSync(APP_STORAGE_PATH, 'utf8');
+    const fastData = JSON.parse(fastRaw);
+    if (fastData && typeof fastData === 'object' && fastData[STORAGE_CODE_KEY] === code) {
+      return false;
+    }
+
+    const candToken = `${LOCK_TOKEN}:storage:${crypto.randomBytes(4).toString('hex')}`;
+    if (!acquireFileLock(APP_STORAGE_LOCK_PATH, candToken, APP_STORAGE_LOCK_STALE_MS)) {
+      return false;
+    }
+    storageLockToken = candToken;
+
+    const latestRaw = fs.readFileSync(APP_STORAGE_PATH, 'utf8');
+    const data = JSON.parse(latestRaw);
+    if (!data || typeof data !== 'object' || data[STORAGE_CODE_KEY] === code) {
       return false;
     }
     data[STORAGE_CODE_KEY] = code;
     const serialized = JSON.stringify(data, null, 2);
-    tmpPath = `${APP_STORAGE_PATH}.tmp.${process.pid}`;
+    tmpPath = `${APP_STORAGE_PATH}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
     fs.writeFileSync(tmpPath, serialized, 'utf8');
     try {
       fs.renameSync(tmpPath, APP_STORAGE_PATH);
@@ -155,6 +172,9 @@ function syncAppStorageCode() {
   } finally {
     if (tmpPath && fs.existsSync(tmpPath)) {
       try { fs.unlinkSync(tmpPath); } catch {}
+    }
+    if (storageLockToken) {
+      releaseFileLock(APP_STORAGE_LOCK_PATH, storageLockToken);
     }
   }
 }
@@ -520,37 +540,87 @@ function isProcessAlive(pid) {
   }
 }
 
-function acquireLock() {
+function writeLockPayload(lockPath, token) {
+  const fd = fs.openSync(lockPath, 'wx');
   try {
-    fs.mkdirSync(AGY_DIR, { recursive: true });
-    if (fs.existsSync(LOCK_PATH)) {
-      const stat = fs.statSync(LOCK_PATH);
-      const ageMs = Date.now() - stat.mtimeMs;
-      let ownerPid = 0;
-      try {
-        const lockInfo = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
-        ownerPid = Number(lockInfo?.pid || 0);
-      } catch {}
-      const ownerAlive = ownerPid > 0 && isProcessAlive(ownerPid);
-      if ((ownerPid > 0 && !ownerAlive) || (!ownerAlive && ageMs > LOCK_STALE_MS) || ageMs > LOCK_STALE_MS * 10) {
-        try { fs.unlinkSync(LOCK_PATH); } catch {}
-      }
-    }
-    const fd = fs.openSync(LOCK_PATH, 'wx');
-    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), 'utf8');
+    fs.writeFileSync(
+      fd,
+      JSON.stringify({ pid: process.pid, token, startedAt: new Date().toISOString() }),
+      'utf8'
+    );
+  } finally {
     fs.closeSync(fd);
+  }
+}
+
+function acquireFileLock(lockPath, token, staleMs = LOCK_STALE_MS) {
+  try {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    try {
+      writeLockPayload(lockPath, token);
+      return true;
+    } catch (err) {
+      if (!err || err.code !== 'EEXIST') return false;
+    }
+
+    const stat = fs.statSync(lockPath);
+    const ageMs = Date.now() - stat.mtimeMs;
+    let ownerPid = 0;
+    try {
+      const lockInfo = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      ownerPid = Number(lockInfo?.pid || 0);
+    } catch {}
+    const ownerAlive = ownerPid > 0 && isProcessAlive(ownerPid);
+    const isStale =
+      (ownerPid > 0 && !ownerAlive) ||
+      (!ownerAlive && ageMs > staleMs) ||
+      ageMs > staleMs * 10;
+    if (!isStale) return false;
+
+    const staleTmp = `${lockPath}.stale.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
+    try {
+      fs.renameSync(lockPath, staleTmp);
+      try { fs.unlinkSync(staleTmp); } catch {}
+    } catch {
+      return false;
+    }
+    writeLockPayload(lockPath, token);
     return true;
   } catch {
     return false;
   }
 }
 
-function releaseLock() {
+function releaseFileLock(lockPath, token) {
   try {
-    if (fs.existsSync(LOCK_PATH)) {
-      fs.unlinkSync(LOCK_PATH);
+    if (!fs.existsSync(lockPath)) return false;
+    const raw = fs.readFileSync(lockPath, 'utf8');
+    const lockInfo = JSON.parse(raw);
+    if (!lockInfo || lockInfo.token !== token) {
+      return false;
     }
-  } catch {}
+    const relTmp = `${lockPath}.rel.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
+    try {
+      fs.renameSync(lockPath, relTmp);
+      fs.unlinkSync(relTmp);
+    } catch {
+      const verify = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      if (verify && verify.token === token) {
+        fs.unlinkSync(lockPath);
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireLock() {
+  return acquireFileLock(LOCK_PATH, LOCK_TOKEN, LOCK_STALE_MS);
+}
+
+function releaseLock() {
+  return releaseFileLock(LOCK_PATH, LOCK_TOKEN);
 }
 
 function writeStatus(statusObj) {
@@ -739,9 +809,13 @@ function createRfc6455WebSocketClient(wsUrl) {
     }
     sock = socket;
     let recvBuf = head && head.length > 0 ? Buffer.from(head) : Buffer.alloc(0);
+    let fragOpcode = 0;
+    let fragChunks = [];
+    let fragBytes = 0;
 
     const drainFrames = () => {
       while (!closed && recvBuf.length >= 2) {
+        const fin = (recvBuf[0] & 0x80) !== 0;
         const opcode = recvBuf[0] & 0x0f;
         const isMasked = (recvBuf[1] & 0x80) !== 0;
         let len = recvBuf[1] & 0x7f;
@@ -752,8 +826,17 @@ function createRfc6455WebSocketClient(wsUrl) {
           offset = 4;
         } else if (len === 127) {
           if (recvBuf.length < 10) return;
-          len = Number(recvBuf.readBigUInt64BE(2));
+          const bigLen = recvBuf.readBigUInt64BE(2);
+          if (bigLen > BigInt(MAX_WS_BUFFER_BYTES)) {
+            emitError(new Error('WebSocket frame payload exceeds maximum buffer size'));
+            return;
+          }
+          len = Number(bigLen);
           offset = 10;
+        }
+        if (len > MAX_WS_BUFFER_BYTES) {
+          emitError(new Error('WebSocket frame payload exceeds maximum buffer size'));
+          return;
         }
         const maskBytes = isMasked ? 4 : 0;
         if (recvBuf.length < offset + maskBytes + len) return;
@@ -769,18 +852,61 @@ function createRfc6455WebSocketClient(wsUrl) {
           return;
         }
         if (opcode === 0x09 && sock && !closed) {
+          const pongPayload = body.length <= 125 ? body : body.subarray(0, 125);
           const pongMask = crypto.randomBytes(4);
-          const pongHdr = Buffer.from([0x8a, 0x80 | (body.length < 126 ? body.length : 0)]);
-          if (body.length === 0) sock.write(Buffer.concat([pongHdr, pongMask]));
+          const pongHdr = Buffer.from([0x8a, 0x80 | pongPayload.length]);
+          const maskedPong = Buffer.allocUnsafe(pongPayload.length);
+          for (let i = 0; i < pongPayload.length; i++) {
+            maskedPong[i] = pongPayload[i] ^ pongMask[i & 3];
+          }
+          sock.write(Buffer.concat([pongHdr, pongMask, maskedPong]));
           continue;
         }
-        if (opcode === 0x01 && typeof client.onmessage === 'function') {
-          client.onmessage({ data: body.toString('utf8') });
+        if (opcode === 0x0a) {
+          continue;
+        }
+        if (opcode === 0x01 || opcode === 0x02) {
+          if (fin) {
+            if (opcode === 0x01 && typeof client.onmessage === 'function') {
+              client.onmessage({ data: body.toString('utf8') });
+            }
+          } else {
+            fragOpcode = opcode;
+            fragChunks = [body];
+            fragBytes = body.length;
+          }
+          continue;
+        }
+        if (opcode === 0x00) {
+          if (!fragOpcode) {
+            emitError(new Error('Unexpected WebSocket continuation frame'));
+            return;
+          }
+          fragBytes += body.length;
+          if (fragBytes > MAX_WS_BUFFER_BYTES) {
+            emitError(new Error('WebSocket fragmented message exceeds maximum buffer size'));
+            return;
+          }
+          fragChunks.push(body);
+          if (fin) {
+            const fullBuf = Buffer.concat(fragChunks, fragBytes);
+            const completedOp = fragOpcode;
+            fragOpcode = 0;
+            fragChunks = [];
+            fragBytes = 0;
+            if (completedOp === 0x01 && typeof client.onmessage === 'function') {
+              client.onmessage({ data: fullBuf.toString('utf8') });
+            }
+          }
         }
       }
     };
 
     socket.on('data', (chunk) => {
+      if (recvBuf.length + chunk.length > MAX_WS_BUFFER_BYTES) {
+        emitError(new Error('WebSocket receive buffer exceeded maximum size'));
+        return;
+      }
       recvBuf = Buffer.concat([recvBuf, chunk]);
       drainFrames();
     });
@@ -962,33 +1088,37 @@ function injectViaBrowserCdpWs(browserWsUrl, scriptCode, scriptHash, timeoutMs =
         let injectedCount = 0;
         let skippedAlreadyActive = 0;
 
-        for (const target of pageTargets) {
-          let sessionId = null;
-          try {
-            const attachRes = await sendCdp('Target.attachToTarget', {
-              targetId: target.targetId,
-              flatten: true,
-            });
-            sessionId = attachRes?.sessionId || null;
-            if (!sessionId) continue;
-            const evalRes = await sendCdp(
-              'Runtime.evaluate',
-              { expression: immediateExpr, returnByValue: true },
-              sessionId
-            );
-            if (evalRes?.exceptionDetails) {
-              const det = evalRes.exceptionDetails;
-              throw new Error(det?.exception?.description || det?.text || 'CDP Runtime.evaluate exception');
+        const results = await Promise.allSettled(
+          pageTargets.map(async (target) => {
+            let sessionId = null;
+            try {
+              const attachRes = await sendCdp('Target.attachToTarget', {
+                targetId: target.targetId,
+                flatten: true,
+              });
+              sessionId = attachRes?.sessionId || null;
+              if (!sessionId) return null;
+              const evalRes = await sendCdp(
+                'Runtime.evaluate',
+                { expression: immediateExpr, returnByValue: true },
+                sessionId
+              );
+              if (evalRes?.exceptionDetails) {
+                const det = evalRes.exceptionDetails;
+                throw new Error(det?.exception?.description || det?.text || 'CDP Runtime.evaluate exception');
+              }
+              return evalRes?.result?.value ?? null;
+            } finally {
+              if (sessionId) {
+                await sendCdp('Target.detachFromTarget', { sessionId }).catch(() => {});
+              }
             }
-            const val = evalRes?.result?.value ?? null;
-            if (val === 'INJECTED_OK') injectedCount++;
-            else if (val === 'ALREADY_ACTIVE') skippedAlreadyActive++;
-          } catch {
-            // Continue evaluating remaining page targets
-          } finally {
-            if (sessionId) {
-              await sendCdp('Target.detachFromTarget', { sessionId }).catch(() => {});
-            }
+          })
+        );
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            if (r.value === 'INJECTED_OK') injectedCount++;
+            else if (r.value === 'ALREADY_ACTIVE') skippedAlreadyActive++;
           }
         }
 
@@ -1032,13 +1162,15 @@ async function injectViaCdpLive() {
   let skippedAlreadyActive = 0;
 
   if (pageTargets.length > 0) {
-    for (const target of pageTargets) {
-      try {
-        const val = await configureTargetViaCdp(target.webSocketDebuggerUrl, scriptCode, scriptHash, 1500);
-        if (val === 'INJECTED_OK') injectedCount++;
-        else if (val === 'ALREADY_ACTIVE') skippedAlreadyActive++;
-      } catch {
-        // Ignore individual target failures
+    const settled = await Promise.allSettled(
+      pageTargets.map((target) =>
+        configureTargetViaCdp(target.webSocketDebuggerUrl, scriptCode, scriptHash, 1500)
+      )
+    );
+    for (const r of settled) {
+      if (r.status === 'fulfilled') {
+        if (r.value === 'INJECTED_OK') injectedCount++;
+        else if (r.value === 'ALREADY_ACTIVE') skippedAlreadyActive++;
       }
     }
     return {
@@ -1367,7 +1499,11 @@ module.exports = {
   computeIntegrity,
   transformExactSize,
   isAsarPatchedFast,
+  acquireLock,
+  releaseLock,
+  syncAppStorageCode,
   detectBundledPlugins,
+  createRfc6455WebSocketClient,
   configureTargetViaCdp,
   injectViaBrowserCdpWs,
   readDevToolsEndpoint,

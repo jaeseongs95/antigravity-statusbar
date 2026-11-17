@@ -316,10 +316,9 @@ describe('context window normalization, prototype bridge, and <=256K warning sup
     assert.equal(triggerEl.getAttribute('data-agy-cw-warn'), '0');
     assert.ok(styleEl.textContent.includes('[data-testid="model-selector-trigger"][data-context-window="200K"] div:has(> .text-warning)'));
 
-    const mockUgb = { '256K': 256000, '512K': 512000, '900K': 900000 };
-    const mockVgb = { '512K': '512K context window', '900K': '900K context window' };
-    assert.equal(mockUgb['200K'], 200000);
-    assert.ok(String(mockVgb['200K']).includes('200K custom context limit'));
+    assert.equal(getCwLimit('200K'), 200000);
+    assert.ok(String(getCwQuotaHint('200K')).includes('절약 모드'));
+    assert.equal(Object.getOwnPropertyDescriptor(Object.prototype, '200K'), undefined, 'Object.prototype must remain clean');
 
     sandbox.localStorage.setItem('agy-session-ctx-windows-v1', JSON.stringify({ 'test-session-1': '350K' }));
     delete sandbox.window.__agyStatusBarActiveVersion;
@@ -327,7 +326,8 @@ describe('context window normalization, prototype bridge, and <=256K warning sup
 
     assert.equal(triggerEl.getAttribute('data-context-window'), '350K');
     assert.equal(triggerEl.getAttribute('data-agy-cw-warn'), '1');
-    assert.equal(mockUgb['350K'], 350000);
+    assert.equal(getCwLimit('350K'), 350000);
+    assert.equal(Object.getOwnPropertyDescriptor(Object.prototype, '350K'), undefined, 'Object.prototype must remain clean');
   });
 });
 
@@ -2913,8 +2913,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.ok(readmeKo.startsWith(expectedHeader), `D-0021: README.ko.md title must start with ${expectedHeader}`);
     assert.equal(readmeEn.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.md');
     assert.equal(readmeKo.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.ko.md');
-    assert.ok(readmeEn.includes('31/31'), 'D-0021: README.md must state 31/31 tests');
-    assert.ok(readmeKo.includes('31/31'), 'D-0021: README.ko.md must state 31/31 tests');
+    assert.ok(readmeEn.includes('32/32'), 'D-0021: README.md must state 32/32 tests');
+    assert.ok(readmeKo.includes('32/32'), 'D-0021: README.ko.md must state 32/32 tests');
     assert.equal(readmeEn.includes('getContextEstimate()'), false, 'D-0021: README.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeKo.includes('getContextEstimate()'), false, 'D-0021: README.ko.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeEn.includes('agyCwLimit'), false, 'D-0021: README.md must not reference stale agyCwLimit key');
@@ -3404,8 +3404,23 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.equal(dottedCfg.isRemoteHost('fakeportal.example'), false);
 
     const forbiddenGlobalPolicies = new Set(['default', 'dompurify', 'angular', 'angular#unsafe-bypass', 'nextjs#bundler']);
+    const TRUSTED_HTML_BRAND = Symbol('TrustedHTML');
+    const TRUSTED_SCRIPT_BRAND = Symbol('TrustedScript');
+    const TRUSTED_SCRIPT_URL_BRAND = Symbol('TrustedScriptURL');
+
+    // W3C-accurate strict TrustedTypes environment where ALLpolicies are denied (policy === null)
+    // and innerHTML, outerHTML, insertAdjacentHTML, Range.createContextualFragment, AND DOMParser.parseFromString
+    // all throw TypeError unless branded as TrustedHTML!
     const attemptedHtmlPolicies = [];
     const htmlWin = {
+      DOMParser: class {
+        parseFromString(v) {
+          if (!v || v[TRUSTED_HTML_BRAND] !== true) {
+            throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': This document requires 'TrustedHTML' assignment.");
+          }
+          return {};
+        }
+      },
       trustedTypes: {
         createPolicy(name) {
           attemptedHtmlPolicies.push(name);
@@ -3413,51 +3428,123 @@ describe('D-0015..D-0021 full audit regressions', () => {
         },
       },
     };
-    let fragmentInserted = false;
+    function makeStrictNode(tag) {
+      const node = {
+        nodeType: 1,
+        tagName: String(tag || 'div').toUpperCase(),
+        attrs: {},
+        style: {},
+        className: '',
+        children: [],
+        childNodes: [],
+        firstChild: null,
+        set innerHTML(v) {
+          if (!v || v[TRUSTED_HTML_BRAND] !== true) {
+            throw new TypeError("Failed to set the 'innerHTML' property on 'Element': This document requires 'TrustedHTML' assignment.");
+          }
+        },
+        set outerHTML(_v) {
+          throw new TypeError("Failed to set the 'outerHTML' property on 'Element': This document requires 'TrustedHTML' assignment.");
+        },
+        insertAdjacentHTML() {
+          throw new TypeError("Failed to execute 'insertAdjacentHTML' on 'Element': This document requires 'TrustedHTML' assignment.");
+        },
+        setAttribute(k, val) {
+          this.attrs[k] = String(val);
+          if (k === 'class') this.className = String(val);
+          if (k === 'id') this.id = String(val);
+        },
+        getAttribute(k) {
+          return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null;
+        },
+        appendChild(ch) {
+          ch.parentNode = this;
+          this.childNodes.push(ch);
+          if (ch.nodeType === 1) this.children.push(ch);
+          this.firstChild = this.childNodes[0] || null;
+          return ch;
+        },
+        removeChild(ch) {
+          this.childNodes = this.childNodes.filter((x) => x !== ch);
+          this.children = this.children.filter((x) => x !== ch);
+          this.firstChild = this.childNodes[0] || null;
+          return ch;
+        },
+        get textContent() {
+          return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join('');
+        },
+        set textContent(val) {
+          this.childNodes = [];
+          this.children = [];
+          if (val) {
+            const tn = { nodeType: 3, nodeValue: String(val) };
+            this.childNodes.push(tn);
+          }
+          this.firstChild = this.childNodes[0] || null;
+        },
+        querySelectorAll(sel) {
+          const out = [];
+          const walk = (el) => {
+            for (const c of el.children || []) {
+              if (
+                (sel.startsWith('.') && String(c.className || '').split(/\s+/).includes(sel.slice(1))) ||
+                c.tagName.toLowerCase() === sel.toLowerCase()
+              ) {
+                out.push(c);
+              }
+              walk(c);
+            }
+          };
+          walk(this);
+          return out;
+        },
+        querySelector(sel) {
+          return this.querySelectorAll(sel)[0] || null;
+        },
+      };
+      return node;
+    }
     const htmlDoc = {
+      createElement: (t) => makeStrictNode(t),
+      createTextNode: (txt) => ({ nodeType: 3, nodeValue: String(txt) }),
+      createDocumentFragment: () => makeStrictNode('fragment'),
       createRange() {
         return {
           selectNodeContents() {},
           deleteContents() {},
-          createContextualFragment(h) {
-            return { fragmentHtml: h };
+          createContextualFragment(v) {
+            if (!v || v[TRUSTED_HTML_BRAND] !== true) {
+              throw new TypeError("Failed to execute 'createContextualFragment' on 'Range': This document requires 'TrustedHTML' assignment.");
+            }
+            return makeStrictNode('fragment');
           },
         };
       },
     };
     const setHtml = createTrustedHtmlSetter(htmlWin, htmlDoc);
-    const targetEl = {
-      set innerHTML(_v) {
-        throw new TypeError('TrustedHTML required');
-      },
-      appendChild(frag) {
-        if (frag && frag.fragmentHtml === '<span>ok</span>') fragmentInserted = true;
-      },
-    };
-    setHtml(targetEl, '<span>ok</span>');
-    assert.equal(fragmentInserted, true, 'D-0032: Range contextualFragment fallback must work when all policies are blocked');
+    const targetEl = makeStrictNode('span');
+    setHtml(
+      targetEl,
+      '<span class="agy-ctx-group" onclick="alert(1)" data-agy-no-translate="true"><span>ctx <strong class="agy-ctx-pct-val agy-ctx-ok">42%</strong> <button type="button" class="agy-ctx-btn-limit">[ 384k ▾ ]</button></span></span><script>evil()</script>'
+    );
+    assert.ok(targetEl.querySelector('.agy-ctx-pct-val'), 'D-0032: sink-free DOM builder must construct nested elements when TrustedTypes rejects all policies');
+    assert.equal(targetEl.querySelector('.agy-ctx-pct-val').textContent, '42%');
+    assert.equal(targetEl.querySelector('.agy-ctx-btn-limit').textContent, '[ 384k ▾ ]');
+    assert.equal(targetEl.querySelector('script'), null, 'D-0032: sink-free DOM builder must drop disallowed <script> tags');
+    assert.equal(targetEl.querySelector('.agy-ctx-group').getAttribute('onclick'), null, 'D-0032: sink-free DOM builder must strip inline event handler attributes');
     for (const p of attemptedHtmlPolicies) {
       assert.equal(forbiddenGlobalPolicies.has(p), false, `D-0032: createTrustedHtmlSetter must never attempt global policy '${p}'`);
       assert.ok(p.startsWith('agy-statusbar'), `D-0032: policy '${p}' must be namespaced under agy-statusbar`);
     }
 
+    // Strict TrustedTypes script sink: when all policies are denied, BOTH s.text AND s.src require branded objects!
     const attemptedScriptPolicies = [];
-    const appendedEls = [];
-    let revokedBlobUrl = '';
-    const scriptWin = {
+    const strictBlockedWin = {
       location: { hostname: 'antigravity.google.com' },
-      Blob: class {
-        constructor(parts) {
-          this.parts = parts;
-        }
-      },
+      Blob: class { constructor(parts) { this.parts = parts; } },
       URL: {
-        createObjectURL() {
-          return 'blob:https://antigravity.google.com/companion-1';
-        },
-        revokeObjectURL(u) {
-          revokedBlobUrl = u;
-        },
+        createObjectURL: () => 'blob:https://antigravity.google.com/blocked-1',
+        revokeObjectURL() {},
       },
       trustedTypes: {
         createPolicy(name) {
@@ -3470,37 +3557,511 @@ describe('D-0015..D-0021 full audit regressions', () => {
         hasStatusbar: true,
         hasMcpManager: true,
         hasKoTranslator: false,
-        mcpManagerCode: 'window.__mcpCompanionBlobFallback = 1;',
+        mcpManagerCode: 'window.agyMcpManager = { version: "1.4.18" };',
       },
     };
-    const scriptDoc = {
-      head: {
-        appendChild(el) {
-          appendedEls.push(el);
-          if (typeof el._onload === 'function') el._onload();
-        },
-      },
+    const makeStrictScriptDoc = (onAppend) => ({
+      head: { appendChild: onAppend },
       createElement(tag) {
+        let _src = '';
+        let _text = '';
+        const listeners = {};
         return {
           tagName: tag,
-          src: '',
-          set text(_v) {
-            throw new TypeError('TrustedScript required');
+          get src() { return _src; },
+          set src(v) {
+            if (!v || v[TRUSTED_SCRIPT_URL_BRAND] !== true) {
+              throw new TypeError("Failed to set the 'src' property on 'HTMLScriptElement': This document requires 'TrustedScriptURL' assignment.");
+            }
+            _src = v.url;
           },
-          addEventListener(ev, fn) {
-            if (ev === 'load') this._onload = fn;
+          get text() { return _text; },
+          set text(v) {
+            if (!v || v[TRUSTED_SCRIPT_BRAND] !== true) {
+              throw new TypeError("Failed to set the 'text' property on 'HTMLScriptElement': This document requires 'TrustedScript' assignment.");
+            }
+            _text = v.code;
           },
+          addEventListener(ev, fn) { listeners[ev] = fn; },
+          _fire(ev) { if (listeners[ev]) listeners[ev](); },
         };
       },
       querySelector: () => null,
-    };
-    await ensureRemoteCompanionScripts(scriptWin, scriptDoc, null, null);
-    assert.equal(appendedEls.length, 1, 'D-0032: Blob URL fallback must inject script when TrustedTypes policies are disallowed');
-    assert.equal(appendedEls[0].src, 'blob:https://antigravity.google.com/companion-1');
-    assert.equal(revokedBlobUrl, 'blob:https://antigravity.google.com/companion-1');
+    });
+    const blockedDoc = makeStrictScriptDoc(() => {
+      throw new Error('Should not append unbranded script');
+    });
+    await ensureRemoteCompanionScripts(strictBlockedWin, blockedDoc, async () => ({ ok: false }), null);
+    assert.equal(strictBlockedWin.__agyLoadingMcpManagerCompanion, false, 'D-0032: when TrustedTypes rejects all policies, loading flag must reset to false instead of faking success');
     for (const p of attemptedScriptPolicies) {
       assert.equal(forbiddenGlobalPolicies.has(p), false, `D-0032: injectScriptText must never attempt global policy '${p}'`);
       assert.ok(p.startsWith('agy-statusbar') || p.startsWith('agy-rc-'), `D-0032: policy '${p}' must be plugin-scoped`);
+    }
+
+    // Async CSP block on inline/blob must fall back to remote allowed URL with branded TrustedScriptURL!
+    const appendedUrls = [];
+    const cspFallbackWin = {
+      location: { hostname: 'antigravity.google.com' },
+      Blob: class { constructor(parts) { this.parts = parts; } },
+      URL: {
+        createObjectURL: () => 'blob:https://antigravity.google.com/csp-blocked-blob',
+        revokeObjectURL() {},
+      },
+      trustedTypes: {
+        createPolicy(name, rules) {
+          if (name === 'agy-statusbar') {
+            return {
+              createScript: (c) => ({ [TRUSTED_SCRIPT_BRAND]: true, code: rules.createScript(c) }),
+              createScriptURL: (u) => ({ [TRUSTED_SCRIPT_URL_BRAND]: true, url: rules.createScriptURL(u) }),
+            };
+          }
+          throw new TypeError(`Disallowed policy ${name}`);
+        },
+      },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: true,
+        hasKoTranslator: false,
+        mcpManagerCode: '/* inline blocked by CSP without throwing synchronously */',
+      },
+    };
+    const cspFallbackDoc = makeStrictScriptDoc((el) => {
+      if (el.src) {
+        appendedUrls.push(el.src);
+        if (el.src.startsWith('blob:')) {
+          Promise.resolve().then(() => el._fire('error'));
+        } else {
+          cspFallbackWin.agyMcpManager = { version: '1.4.18' };
+          Promise.resolve().then(() => el._fire('load'));
+        }
+      }
+    });
+    await ensureRemoteCompanionScripts(cspFallbackWin, cspFallbackDoc, null, null);
+    assert.ok(
+      appendedUrls.some((u) => u.startsWith('https://raw.githubusercontent.com/')),
+      'D-0032: when inline & blob scripts are blocked by CSP, loader must fall back to remote companion script URL'
+    );
+    assert.ok(cspFallbackWin.agyMcpManager, 'D-0032: remote companion URL fallback must complete mounting');
+  });
+
+  it('D-0012, D-0013, D-0020, D-0023, D-0030, D-0033: eliminates session-switch flicker, Object.prototype pollution, RFC6455 violations, and lock TOCTOU', async () => {
+    const net = require('node:net');
+    const crypto = require('node:crypto');
+    const os = require('node:os');
+    const { execFileSync } = require('node:child_process');
+    const { createRpcClient } = require('../src/rpc-client');
+    const { createHostBridge, registerCustomCwInPrototype } = require('../src/host-bridge');
+
+    // 1. D-0020: registerCustomCwInPrototype must NEVER define properties on Object.prototype
+    const underSet = new Set(['128K', '256K']);
+    registerCustomCwInPrototype('384K', underSet, () => {});
+    registerCustomCwInPrototype('200K', underSet, () => {});
+    assert.equal(
+      Object.getOwnPropertyDescriptor(Object.prototype, '384K'),
+      undefined,
+      'D-0020: Object.prototype must NEVER be polluted with 384K getter'
+    );
+    assert.equal(
+      Object.getOwnPropertyDescriptor(Object.prototype, '200K'),
+      undefined,
+      'D-0020: Object.prototype must NEVER be polluted with 200K getter'
+    );
+    assert.equal(underSet.has('200K'), true, 'underDefaultCwSet should still track <=256K custom values');
+
+    // 2. D-0033: Cross-session agentStateProvider state bleed on same-DOM session switch
+    let liveAspState = {
+      conversationId: 'session-a',
+      compactedAtStepIndices: [9400],
+      contextWindowUsage: {
+        estimatedTokensUsed: 331000,
+        estimatedAfterCompaction: 290000,
+        maxContextTokens: 384000,
+        lastStepIndex: 9500,
+      },
+      trajectorySlice: { totalGeneratorMetadataLength: 420, totalStepsLength: 9500 },
+    };
+    const rpc = createRpcClient({
+      window: {},
+      localStorage: { getItem: () => null, setItem() {} },
+      getAgentStateProviderForInputBox: () => ({ getState: () => liveAspState }),
+      fetchFn: async (_url, init) => {
+        const req = JSON.parse(init.body);
+        if (req.cascadeId === 'session-b') {
+          return {
+            ok: true,
+            json: async () => ({
+              generatorMetadata: [
+                {
+                  stepIndices: [120],
+                  chatModel: {
+                    chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 30000, maxContextTokens: 256000 } },
+                    usage: { cacheReadTokens: 25000, inputTokens: 5000 },
+                  },
+                },
+              ],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ generatorMetadata: [] }) };
+      },
+    });
+    // Switch DOM to session-b while liveAspState still points to session-a!
+    const immStale = rpc.getImmediateStats('session-b', {});
+    assert.equal(
+      immStale,
+      null,
+      'D-0033: getImmediateStats(session-b) must NOT bleed session-a 290k/331k tokens when fullState.conversationId === session-a'
+    );
+    const fetchedB = await rpc.fetchCascadeStats('session-b', 'csrf-1', {});
+    assert.equal(
+      fetchedB.used,
+      30000,
+      'D-0033: fetchCascadeStats(session-b) must NOT overwrite session-b 30k RPC result with stale session-a fullState'
+    );
+
+    // 3. D-0012 & D-0013: No repeated userStatus/setUserStatus on frozen clientModelConfigs AND zero redundant modelPicked on default 256K session switch
+    const reduxDispatches = [];
+    const frozenCfg = Object.freeze({
+      label: 'Gemini 4 Carbon (Medium)',
+      modelOrAlias: { choice: { case: 'model', value: 1437 } },
+    });
+    const liveReduxState = {
+      userStatus: {
+        cascadeModelConfigData: {
+          clientModelConfigs: Object.freeze([frozenCfg]),
+          defaultOverrideModelConfig: { modelOrAlias: { choice: { case: 'model', value: 1437 } } },
+        },
+      },
+      modelSelection: {
+        default: { model: 1437, contextWindow: '256K' },
+        byConversation: {
+          'convo-384': { model: 1437, contextWindow: '384K' },
+          // 'convo-default-256' is intentionally absent (native v2.32.1 default state)
+        },
+        trajectorySync: {},
+      },
+    };
+    const liveReduxStore = {
+      getState: () => liveReduxState,
+      dispatch(action) {
+        reduxDispatches.push(action);
+        if (action.type === 'modelSelection/modelPicked') {
+          const cid = action.payload.conversationId;
+          if (cid) {
+            liveReduxState.modelSelection.byConversation[cid] = {
+              model: action.payload.model,
+              customLabel: action.payload.customLabel,
+              contextWindow: action.payload.contextWindow,
+            };
+          }
+          liveReduxState.modelSelection.default = {
+            model: action.payload.model,
+            customLabel: action.payload.customLabel,
+            contextWindow: action.payload.contextWindow,
+          };
+        }
+      },
+    };
+    const sharedTrigger = {
+      isConnected: true,
+      attrs: { 'data-testid': 'model-selector-trigger' },
+      getAttribute(k) { return this.attrs[k] ?? null; },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      __reactFiber$1: {
+        memoizedProps: {
+          value: {
+            store: liveReduxStore,
+            selectedModel: { value: 1437, label: 'Gemini 4 Carbon (Medium)', contextWindowOptions: [] },
+            setSelectedModel() {},
+          },
+        },
+        return: null,
+      },
+    };
+    let activeCascadeAttr = 'convo-default-256';
+    const sharedView = {
+      getAttribute(k) { return k === 'data-cascade-id' ? activeCascadeAttr : null; },
+      querySelector(sel) { return sel === '[data-testid="model-selector-trigger"]' ? sharedTrigger : null; },
+    };
+    const cwLsMap = new Map([
+      ['agy-session-ctx-windows-v1', JSON.stringify({ 'convo-default-256': '256K', 'convo-384': '384K' })],
+    ]);
+    const cwStoreLive = createContextWindowStore({
+      document: { cookie: '' },
+      localStorage: {
+        getItem: (k) => cwLsMap.get(k) ?? null,
+        setItem: (k, v) => cwLsMap.set(k, String(v)),
+      },
+    });
+    const origWinFetch = async () => ({ ok: true, json: async () => ({}) });
+    const origRcMethod = function () { return 'orig-rc'; };
+    function FakeRcComponent() {}
+    FakeRcComponent.prototype.proxyCommand = origRcMethod;
+    FakeRcComponent.prototype.handleIframeMessage = origRcMethod;
+    const hbWin = {
+      fetch: origWinFetch,
+      __agyRemoteControlInstance: new FakeRcComponent(),
+    };
+    const hbLive = createHostBridge({
+      window: hbWin,
+      document: { querySelectorAll: () => [sharedView], querySelector: () => sharedView },
+      localStorage: { getItem: () => null, setItem() {} },
+      fetchFn: origWinFetch,
+      cwStore: cwStoreLive,
+    });
+    hbLive.getRemoteControlInstance();
+    // Repeated ensureContextWindowSelectorFlag calls with different extraCw across session switches:
+    hbLive.ensureContextWindowSelectorFlag();
+    hbLive.ensureContextWindowSelectorFlag('384K');
+    hbLive.ensureContextWindowSelectorFlag();
+    hbLive.ensureContextWindowSelectorFlag('384K');
+    const setUserStatusCount = reduxDispatches.filter((a) => a.type === 'userStatus/setUserStatus').length;
+    assert.ok(
+      setUserStatusCount <= 1,
+      `D-0012: ensureContextWindowSelectorFlag must NOT repeatedly dispatch userStatus/setUserStatus on frozen clientModelConfigs (got ${setUserStatusCount})`
+    );
+
+    reduxDispatches.length = 0;
+    // Switching to default 256K session where byConversation['convo-default-256'] is undefined:
+    hbLive.applyContextWindowToEngine(sharedView, 'convo-default-256', '256K');
+    assert.equal(
+      reduxDispatches.filter((a) => a.type === 'modelSelection/modelPicked').length,
+      0,
+      'D-0013: switching to a 256K session when Redux effective contextWindow is already 256K must dispatch 0 modelPicked actions'
+    );
+    // Switching to already-hydrated 384K session and back to 256K:
+    activeCascadeAttr = 'convo-384';
+    hbLive.applyContextWindowToEngine(sharedView, 'convo-384', '384K');
+    activeCascadeAttr = 'convo-default-256';
+    hbLive.applyContextWindowToEngine(sharedView, 'convo-default-256', '256K');
+    assert.equal(
+      reduxDispatches.filter((a) => a.type === 'modelSelection/modelPicked').length,
+      0,
+      'D-0013: switching between 384K and 256K sessions whose Redux state already matches must dispatch 0 modelPicked actions'
+    );
+    // Applying a new custom 384K session ('convo-new-384') must NOT corrupt global default.contextWindow to '512K'
+    activeCascadeAttr = 'convo-new-384';
+    hbLive.applyContextWindowToEngine(sharedView, 'convo-new-384', '384K');
+    assert.equal(
+      liveReduxState.modelSelection.default.contextWindow,
+      '256K',
+      'D-0013: applying 384K to a session when lsDef is unset must restore host prevDefault.contextWindow (256K) instead of polluting global default with 512K'
+    );
+
+    // D-0020: dispose() must restore window.fetch and RemoteControlComponent.prototype methods!
+    hbLive.dispose();
+    assert.equal(hbWin.fetch, origWinFetch, 'D-0020: hostBridge.dispose() must restore original window.fetch');
+    assert.equal(
+      FakeRcComponent.prototype.proxyCommand,
+      origRcMethod,
+      'D-0020: hostBridge.dispose() must restore RemoteControlComponent.prototype.proxyCommand'
+    );
+
+    // 4. D-0012 (uncached session switch 2-step 0% jump): switching mounted bar to uncached session must NOT flash 0% before async stats resolve
+    const { sandbox: sbSandbox, getMountedBar } = createDomSandbox();
+    sbSandbox.localStorage.setItem(
+      'agy-session-ctx-windows-v1',
+      JSON.stringify({ 'test-session-1': '256K', 'cid-uncached-b': '256K' })
+    );
+    let activeSbCid = 'test-session-1';
+    const sbView = sbSandbox.document.querySelector('[data-testid="conversation-view"]');
+    sbView.getAttribute = (k) => (k === 'data-cascade-id' ? activeSbCid : null);
+    let currentFetchDelayResolve = null;
+    mountStatusBar({
+      window: sbSandbox.window,
+      document: sbSandbox.document,
+      localStorage: sbSandbox.localStorage,
+      fetch: async (url, init) => {
+        if (String(url).includes('RetrieveUserQuotaSummary')) {
+          return { ok: true, json: async () => ({ groups: [] }) };
+        }
+        const body = JSON.parse(init.body || '{}');
+        if (body.cascadeId === 'cid-uncached-b') {
+          return new Promise((resolve) => {
+            currentFetchDelayResolve = () =>
+              resolve({
+                ok: true,
+                json: async () => ({
+                  generatorMetadata: [
+                    {
+                      chatModel: {
+                        chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 128000, maxContextTokens: 256000 } },
+                        usage: { cacheReadTokens: 64000, inputTokens: 64000 },
+                      },
+                    },
+                  ],
+                }),
+              });
+          });
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            generatorMetadata: [
+              {
+                chatModel: {
+                  chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 204800, maxContextTokens: 256000 } },
+                  usage: { cacheReadTokens: 100000, inputTokens: 104800 },
+                },
+              },
+            ],
+          }),
+        };
+      },
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    const mountedBar = getMountedBar();
+    const coreEl = mountedBar.querySelector('.agy-ctx-left').querySelector('[data-agy-adapter-id="core-metrics"]');
+    assert.ok(coreEl.innerHTML.includes('>80%<'), 'session A should initially render 80%');
+
+    // Switch same DOM view to uncached 'cid-uncached-b' while RPC is still in-flight:
+    activeSbCid = 'cid-uncached-b';
+    sbSandbox.window.agyStatusBar.updateAll();
+    assert.equal(
+      coreEl.innerHTML.includes('>0%<'),
+      false,
+      'D-0012: switching mounted statusbar to an uncached session must NOT flash intermediate ctx 0% before async RPC resolves'
+    );
+    assert.ok(currentFetchDelayResolve, 'in-flight RPC for cid-uncached-b should be pending');
+    currentFetchDelayResolve();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(coreEl.innerHTML.includes('>50%<'), 'once async RPC resolves, statusbar renders 50% in a single step');
+    assert.ok(
+      coreEl.innerHTML.includes('transition:none'),
+      'D-0012: cross-session render must suppress .agy-ctx-bar-fill width transition'
+    );
+    sbSandbox.window.__agyStatusBarCleanup();
+
+    // 5. D-0030: RFC 6455 payload Ping -> Pong echo, FIN/Continuation fragmentation, and >16MB frame cap
+    const { configureTargetViaCdp } = require('../scripts/ensure_statusbar_patch');
+    const savedWs = globalThis.WebSocket;
+    delete globalThis.WebSocket;
+    let receivedPongPayload = null;
+    const rawWsServer = net.createServer((socket) => {
+      let upgraded = false;
+      let buf = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        if (!upgraded) {
+          const txt = chunk.toString('utf8');
+          if (!txt.includes('\r\n\r\n')) return;
+          upgraded = true;
+          const keyMatch = txt.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i);
+          const accept = crypto
+            .createHash('sha1')
+            .update(keyMatch[1].trim() + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+            .digest('base64');
+          socket.write(
+            `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`
+          );
+          return;
+        }
+        buf = Buffer.concat([buf, chunk]);
+        while (buf.length >= 6) {
+          const opcode = buf[0] & 0x0f;
+          let len = buf[1] & 0x7f;
+          let off = 2;
+          if (len === 126) {
+            if (buf.length < 8) return;
+            len = buf.readUInt16BE(2);
+            off = 4;
+          }
+          if (buf.length < off + 4 + len) return;
+          const mask = buf.subarray(off, off + 4);
+          const payload = Buffer.from(buf.subarray(off + 4, off + 4 + len));
+          for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
+          buf = buf.subarray(off + 4 + len);
+
+          if (opcode === 0x0a) {
+            receivedPongPayload = payload.toString('utf8');
+            // Now send fragmented JSON response (3 fragments: FIN=0 op=1, FIN=0 op=0, FIN=1 op=0)
+            const fullJson = Buffer.from(
+              JSON.stringify({ id: 1, result: { result: { value: 'INJECTED_OK' } } }),
+              'utf8'
+            );
+            const p1 = fullJson.subarray(0, 12);
+            const p2 = fullJson.subarray(12, 28);
+            const p3 = fullJson.subarray(28);
+            socket.write(Buffer.concat([Buffer.from([0x01, p1.length]), p1]));
+            socket.write(Buffer.concat([Buffer.from([0x00, p2.length]), p2]));
+            socket.write(Buffer.concat([Buffer.from([0x80, p3.length]), p3]));
+          } else if (opcode === 0x01) {
+            // First send a Ping WITH payload 'agy-ping-payload' before replying!
+            const pingData = Buffer.from('agy-ping-payload', 'utf8');
+            socket.write(Buffer.concat([Buffer.from([0x89, pingData.length]), pingData]));
+          }
+        }
+      });
+    });
+    await new Promise((r) => rawWsServer.listen(0, '127.0.0.1', r));
+    try {
+      const port = rawWsServer.address().port;
+      const evalResult = await configureTargetViaCdp(`ws://127.0.0.1:${port}/devtools/page/1`, 'void 0;', 'hash1', 1500);
+      assert.equal(
+        receivedPongPayload,
+        'agy-ping-payload',
+        'D-0030: RFC 6455 client must echo non-empty Ping payload verbatim in Pong frame'
+      );
+      assert.equal(
+        evalResult,
+        'INJECTED_OK',
+        'D-0030: RFC 6455 client must reassemble multi-fragment (FIN=0 + Continuation) CDP JSON frames'
+      );
+    } finally {
+      if (savedWs !== undefined) globalThis.WebSocket = savedWs;
+      rawWsServer.close();
+    }
+
+    // 6. D-0023: Isolated child-process check for foreign-owner releaseLock protection and locked syncAppStorageCode preservation
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sb-lock-test-'));
+    try {
+      const agyDir = path.join(tmpHome, '.gemini', 'antigravity');
+      const appDataDir = path.join(tmpHome, 'AppData', 'Roaming');
+      const agyAppData = path.join(appDataDir, 'Antigravity');
+      fs.mkdirSync(agyDir, { recursive: true });
+      fs.mkdirSync(agyAppData, { recursive: true });
+      fs.writeFileSync(path.join(agyDir, 'statusbar_autoinject.js'), '// v32 test code\n', 'utf8');
+      fs.writeFileSync(
+        path.join(agyAppData, 'app_storage.json'),
+        JSON.stringify({ existingHostSetting: { windowZoom: 1.25 }, 'agy-statusbar-code': 'old' }),
+        'utf8'
+      );
+      const lockFile = path.join(agyDir, 'statusbar_patch.lock');
+      fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, token: 'foreign-owner-token', startedAt: new Date().toISOString() }), 'utf8');
+
+      const out = execFileSync(
+        process.execPath,
+        [
+          '-e',
+          `const p = require(${JSON.stringify(SRC_PATCHER_PATH)});
+           if (typeof p.releaseLock === 'function') p.releaseLock();
+           const lockSurvived = require('fs').existsSync(${JSON.stringify(lockFile)});
+           const synced1 = typeof p.syncAppStorageCode === 'function' ? p.syncAppStorageCode() : false;
+           const synced2 = typeof p.syncAppStorageCode === 'function' ? p.syncAppStorageCode() : true;
+           console.log(JSON.stringify({ lockSurvived, synced1, synced2 }));`,
+        ],
+        {
+          env: {
+            ...process.env,
+            USERPROFILE: tmpHome,
+            HOME: tmpHome,
+            APPDATA: appDataDir,
+            LOCALAPPDATA: path.join(tmpHome, 'AppData', 'Local'),
+          },
+          encoding: 'utf8',
+        }
+      );
+      const parsedOut = JSON.parse(out.trim());
+      assert.equal(parsedOut.lockSurvived, true, 'D-0023: releaseLock() must NOT delete a lock owned by another live process/token');
+      assert.equal(parsedOut.synced1, true, 'D-0023: syncAppStorageCode() must update when code differs');
+      assert.equal(parsedOut.synced2, false, 'D-0023: syncAppStorageCode() must no-op when code already matches');
+      const updatedStorage = JSON.parse(fs.readFileSync(path.join(agyAppData, 'app_storage.json'), 'utf8'));
+      assert.deepEqual(updatedStorage.existingHostSetting, { windowZoom: 1.25 }, 'D-0023: syncAppStorageCode() must preserve concurrent host keys');
+      assert.equal(updatedStorage['agy-statusbar-code'], '// v32 test code\n');
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
     }
   });
 });
