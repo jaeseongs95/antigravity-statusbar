@@ -1,6 +1,7 @@
 'use strict';
 
 const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
+const { resolveHostAdapterConfig } = require('./host-adapter-config');
 const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
 const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
 const { createRpcClient } = require('./rpc-client');
@@ -9,7 +10,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v28';
+const STATUSBAR_VERSION = 'v30';
 
 function isIgnoredCustomOrTranslatedNode(node) {
   let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
@@ -120,25 +121,59 @@ function injectScriptText(win, doc, code) {
   const nonceEl = doc.querySelector?.('script[nonce]');
   const nonce = nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') : '';
   if (nonce) s.nonce = nonce;
-  let policy = win.__agyTrustedTypesPolicy || null;
-  if (!policy && win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-    try {
-      policy = win.trustedTypes.createPolicy('agy-rc-' + Date.now(), {
-        createScript: (x) => x,
-      });
-      win.__agyTrustedTypesPolicy = policy;
-    } catch {}
+  let policy = win?.__agyTrustedTypesPolicy || null;
+  if (!policy && win?.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
+    const policyNames = [
+      'agy-rc-' + Date.now(),
+      'agy-statusbar',
+      'angular#unsafe-bypass',
+      'angular',
+      'default',
+      'dompurify',
+    ];
+    for (const name of policyNames) {
+      try {
+        policy = win.trustedTypes.createPolicy(name, {
+          createScript: (x) => x,
+          createScriptURL: (u) => u,
+        });
+        if (policy) {
+          try { win.__agyTrustedTypesPolicy = policy; } catch {}
+          break;
+        }
+      } catch {}
+    }
   }
-  s.text = policy ? policy.createScript(code) : code;
-  doc.head.appendChild(s);
-  return true;
+  try {
+    s.text = policy && typeof policy.createScript === 'function' ? policy.createScript(code) : code;
+    doc.head.appendChild(s);
+    return true;
+  } catch {
+    try {
+      const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
+      const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
+      if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
+        const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
+        s.src = policy && typeof policy.createScriptURL === 'function' ? policy.createScriptURL(blobUrl) : blobUrl;
+        const revoke = () => {
+          try { UrlApi.revokeObjectURL(blobUrl); } catch {}
+        };
+        if (typeof s.addEventListener === 'function') {
+          s.addEventListener('load', revoke, { once: true });
+          s.addEventListener('error', revoke, { once: true });
+        }
+        doc.head.appendChild(s);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
 }
 
-function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
+function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
   try {
-    const isRemoteWeb = Boolean(
-      win?.location?.hostname && String(win.location.hostname).includes('antigravity.google.com')
-    );
+    const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
+    const isRemoteWeb = resolvedHostConfig.isRemoteHost(win?.location?.hostname);
     if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
     const effFetch = fetchFn || win?.fetch;
 
@@ -148,12 +183,13 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
       if (fallbackCode && injectScriptText(win, doc, fallbackCode)) {
         return Promise.resolve(true);
       }
-      if (typeof effFetch !== 'function') {
+      if (typeof effFetch !== 'function' || !url) {
         win[flagKey] = false;
         return Promise.resolve(false);
       }
+      const sep = url.includes('?') ? '&' : '?';
       return Promise.resolve(
-        effFetch(`${url}?t=${Date.now()}`)
+        effFetch(`${url}${sep}t=${Date.now()}`)
       )
         .then((r) => (r && r.ok !== false && typeof r.text === 'function' ? r.text() : ''))
         .then((code) => {
@@ -206,7 +242,7 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
         tasks.push(
           loadScript(
             '__agyLoadingMcpManagerCompanion',
-            'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+            resolvedHostConfig.companionScripts.mcpManagerUrl,
             info.mcpManagerCode
           )
         );
@@ -215,7 +251,7 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge) {
         tasks.push(
           loadScript(
             '__agyLoadingKoTranslatorCompanion',
-            'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
+            resolvedHostConfig.companionScripts.koTranslatorUrl,
             info.koTranslatorCode
           )
         );
@@ -283,14 +319,16 @@ function mountStatusBar(env = {}) {
   refreshStyles();
 
   const setHtml = createTrustedHtmlSetter(win, doc);
+  const resolvedHostConfig = resolveHostAdapterConfig(env.hostConfig, win);
   hostBridge = createHostBridge({
     window: win,
     document: doc,
     localStorage: ls,
     fetchFn,
     cwStore,
+    hostConfig: resolvedHostConfig,
   });
-  ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge);
+  ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, resolvedHostConfig);
 
   const rpcClient = createRpcClient({
     window: win,
@@ -298,6 +336,7 @@ function mountStatusBar(env = {}) {
     localStorage: ls,
     getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,
     getRemoteRpcServiceForElement: hostBridge.getRemoteRpcServiceForElement,
+    hostConfig: resolvedHostConfig,
   });
 
   function getConversationContextWindow(view, cascadeId) {
@@ -359,6 +398,7 @@ function mountStatusBar(env = {}) {
     setHtml,
     cwStore,
     hostBridge,
+    hostConfig: resolvedHostConfig,
   });
 
   registry.registerBuiltinAdapters([
@@ -387,7 +427,9 @@ function mountStatusBar(env = {}) {
     registry.renderSlotAdapters(rightEl, 'right', ctx);
   }
 
+  let disposed = false;
   function updateAll() {
+    if (disposed) return;
     refreshStyles();
     hostBridge.ensureContextWindowSelectorFlag();
     hostBridge.ensureCustomizationsStoreLoaded();
@@ -466,6 +508,7 @@ function mountStatusBar(env = {}) {
   };
 
   cwStore.loadPersistentContextSettings().then(() => {
+    if (disposed) return;
     hostBridge.syncDesktopAnnotations(
       win.__APP_CONFIG__?.csrfToken,
       doc.querySelector?.('[data-testid="conversation-view"]'),
@@ -539,7 +582,8 @@ function mountStatusBar(env = {}) {
   }
   attachBodyObserver();
 
-  win.__agyStatusBarCleanup = () => {
+  const cleanupStatusBar = () => {
+    disposed = true;
     delete win.__agyStatusBarActiveVersion;
     clearIntervalFn(timer);
     win.removeEventListener?.('DOMContentLoaded', attachBodyObserver);
@@ -555,34 +599,45 @@ function mountStatusBar(env = {}) {
     if (typeof hostBridge?.dispose === 'function') {
       try { hostBridge.dispose(); } catch {}
     }
-    const m = doc.getElementById('agy-ctx-debug-modal');
-    if (m) {
-      if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
-      else m.remove();
-    }
-    const menus = doc.querySelectorAll('.agy-ctx-menu');
-    for (const menu of menus) {
-      if (typeof menu.__agyCleanup === 'function') menu.__agyCleanup();
-      else menu.remove();
-    }
-    const bars = doc.querySelectorAll('.agy-ctx-statusbar');
-    for (const b of bars) b.remove();
-    const hostViews = doc.querySelectorAll('.agy-rc-host-view');
-    for (const hv of hostViews) hv.remove();
-    const styleEl = doc.getElementById?.('agy-ctx-statusbar-style');
-    if (styleEl && typeof styleEl.remove === 'function') {
-      styleEl.remove();
-    }
+    const targetDocs = [doc];
     try {
-      const iframeStyle = doc.querySelector?.('ga-remote-control iframe')?.contentDocument?.getElementById?.('agy-ctx-statusbar-style');
-      if (iframeStyle && typeof iframeStyle.remove === 'function') iframeStyle.remove();
+      const iframeDoc = doc.querySelector?.('ga-remote-control iframe')?.contentDocument;
+      if (iframeDoc && iframeDoc !== doc) targetDocs.push(iframeDoc);
     } catch {}
+    for (const targetDoc of targetDocs) {
+      const m = targetDoc.getElementById?.('agy-ctx-debug-modal');
+      if (m) {
+        if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
+        else m.remove?.();
+      }
+      const menus = targetDoc.querySelectorAll?.('.agy-ctx-menu') || [];
+      for (const menu of menus) {
+        if (typeof menu.__agyCleanup === 'function') menu.__agyCleanup();
+        else menu.remove?.();
+      }
+      const bars = targetDoc.querySelectorAll?.('.agy-ctx-statusbar') || [];
+      for (const b of bars) b.remove?.();
+      const hostViews = targetDoc.querySelectorAll?.('.agy-rc-host-view') || [];
+      for (const hv of hostViews) hv.remove?.();
+      const styleEl = targetDoc.getElementById?.('agy-ctx-statusbar-style');
+      if (styleEl && typeof styleEl.remove === 'function') {
+        styleEl.remove();
+      }
+    }
     try {
       delete win.agyStatusBar;
     } catch {
       win.agyStatusBar = undefined;
     }
+    if (win.__agyStatusBarCleanup === cleanupStatusBar) {
+      try {
+        delete win.__agyStatusBarCleanup;
+      } catch {
+        win.__agyStatusBarCleanup = undefined;
+      }
+    }
   };
+  win.__agyStatusBarCleanup = cleanupStatusBar;
   win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
 
   return win.agyStatusBar;

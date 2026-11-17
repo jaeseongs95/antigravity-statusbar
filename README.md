@@ -1,8 +1,8 @@
-# antigravity-statusbar (`v1.3.22` / `v28`)
+# antigravity-statusbar (`v1.3.24` / `v30`)
 
 **Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)**
 
-Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary token limit selector (`32K`–`980K`) with real-time backend checkpointer synchronization, pluggable **`StatusBarAdapter`** extension API, zero-offset `app.asar` + live CDP auto-patcher, and **Remote Control Web (`https://antigravity.google.com/r/...`)** bookmarklet & userscript support for **Google Antigravity IDE (`v2.26.x` – `v2.29.x+`)**.
+Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary token limit selector (`32K`–`980K`) with real-time backend checkpointer synchronization, pluggable **`StatusBarAdapter`** extension API, zero-offset `app.asar` + live CDP auto-patcher, and **Remote Control Web (`https://antigravity.google.com/r/...`)** bookmarklet & userscript support for **Google Antigravity IDE (`v2.26.x` – `v2.32.x+`)**.
 
 ---
 
@@ -26,11 +26,11 @@ Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary to
   - Immediately reflects post-compacting token reductions (`agentStateProvider.getState().contextWindowUsage.estimatedAfterCompaction`) in both the statusbar and the `[ context ]` trajectory debug modal right after `Compacting` completes.
 - **Per-Session Arbitrary Context Limit (`32K` – `980K`) & Backend Checkpointer Sync**:
   - Click `[ 256k ▾ ]` to select from presets (`128K`, `256K`, `384K`, `512K`, `750K`, `900K`) or enter any custom value between `32` and `980` (`K` tokens).
-  - Intercepts both `fetch` (including `Request` objects) and `Transport.send` / `sendUnary` (`SendUserCascadeMessage`) across JSON, Connect-framed JSON, and Protobuf binary payloads to inject `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`), ensuring `language_server.exe` honors your chosen limit instead of triggering premature compaction at `256K`.
-  - Persists limits per `cascadeId` across `localStorage`, cookies, `nativeStorage`, and server trajectory annotations (`annotations.activeProfile`) for seamless Desktop ↔ Mobile sync while isolating Redux's global default so changing one conversation never pollutes other sessions.
-  - Automatically hides the yellow warning icon (`⚠️`) in the native model selector pill when the session limit is `<= 256K` while keeping the `· {cw}` badge visible.
+  - Intercepts both `fetch` (including `Request` objects) and `Transport.send` / `sendUnary` (`SendUserCascadeMessage`) across JSON, Connect-framed JSON, and Protobuf binary payloads to inject `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`), while automatically skipping `continue_after_injection` (`field 20`) continuations and merging pre-existing `cascade_config` fields without duplicate tags so `language_server.exe` honors the selected limit.
+  - Persists limits per `cascadeId` across `localStorage`, cookies, `nativeStorage`, and server trajectory annotations (`annotations.activeProfile`) for seamless Desktop ↔ Mobile sync while isolating Redux's global default so changing one conversation does not alter other sessions.
+  - Suppresses the warning icon (`⚠️`) in the native model selector pill when the session limit is `<= 256K` while retaining the `· {cw}` badge.
 - **Zero-Offset `app.asar` & Live CDP Auto-Patcher**:
-  - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` with **0 byte-offset drift** and recalculates `ElectronAsarIntegrity` SHA-256 block hashes.
+  - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` with **0 byte-offset drift** using a lexical-aware comment stripper, NUL-padded header support, atomic `app_storage.json` replacement, and frame/session isolation (`isScriptJailSession` and `http(s):` guards), recalculating `ElectronAsarIntegrity` SHA-256 block hashes.
   - Injects into already-running Antigravity windows via Chrome DevTools Protocol (CDP) without requiring an app restart.
 - **Remote Control Web (`https://antigravity.google.com/r/...`) & Host-Aware Companion Loading**:
   - Bridges the top-level `<ga-remote-control>` Angular host shell (`RemoteControlComponent.prototype.proxyCommand`) and internal React Fiber WebRTC/WebChannel RPC services (`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`).
@@ -46,7 +46,7 @@ Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary to
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
 
-# 1. Run unit & bundle integration tests (17/17 tests)
+# 1. Run unit & bundle integration tests (30/30 tests)
 npm test
 
 # 2. Build dist/statusbar_autoinject.js, install to ~/.gemini/antigravity, patch app.asar & live-inject via CDP
@@ -149,6 +149,7 @@ dispose(); // or window.agyStatusBar.unregisterAdapter('my-custom-btn');
 antigravity-statusbar/
 ├── src/
 │   ├── index.js                   # Composition root, Remote companion loader & lifecycle observer
+│   ├── host-adapter-config.js     # Configurable host RPC prefix, CSRF header, remote domains & companion URLs
 │   ├── context-window-policy.js   # Context limit normalization (32K-980K) & per-session persistence store
 │   ├── host-bridge.js             # React Fiber / Redux / Remote proxyCommand / Connect-frame & Protobuf hook
 │   ├── rpc-client.js              # LanguageServer RPC client, singleflight deduplication & LRU cache
@@ -160,12 +161,15 @@ antigravity-statusbar/
 │       └── context-button.js      # Right slot `[ context ]` button adapter + Trajectory Debug Modal
 ├── dist/
 │   └── statusbar_autoinject.js    # Built single-file runtime bundle (with ==UserScript== header)
+├── docs/
+│   ├── TEST_CASES.md              # Pre-test specification & defect traceability matrix
+│   └── templates/                 # Standard README & bilingual Release Notes templates
 ├── scripts/
 │   ├── build.js                   # Zero-dependency CommonJS bundler (src/ -> dist/statusbar_autoinject.js)
 │   ├── ensure_statusbar_patch.js  # Zero-offset ASAR patcher + app_storage sync + live CDP injector
 │   └── install.js                 # Builds bundle, installs to ~/.gemini/antigravity & runs patcher
 ├── test/
-│   └── statusbar.test.js          # Module unit tests + runtime bundle integration & regression tests
+│   └── statusbar.test.js          # Module unit tests + runtime bundle integration & regression tests (30/30)
 ├── README.md                      # English documentation
 ├── README.ko.md                   # Korean documentation
 └── package.json
@@ -176,7 +180,7 @@ antigravity-statusbar/
 ## Verification & Testing
 
 ```bash
-# Build dist/statusbar_autoinject.js and run all 17 unit + integration test suites
+# Build dist/statusbar_autoinject.js and run all 30 unit + integration test suites (30/30)
 npm test
 ```
 

@@ -1,8 +1,10 @@
 'use strict';
 
 const { fmtResetTime } = require('./dom-styles');
+const { resolveHostAdapterConfig } = require('./host-adapter-config');
 
 const MAX_CACHE_ENTRIES = 60;
+const MAX_CASCADE_LEN_ENTRIES = 200;
 const STATS_CACHE_KEY = 'agy-stats-cache-v1';
 
 function getChatModelFromMeta(m) {
@@ -54,10 +56,35 @@ function extractStatsFromMetas(metas) {
   return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, lastMetaStepIndex, foundCtx, foundUsage };
 }
 
-function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement }) {
+function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement, hostConfig }) {
+  const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
   const stateCache = new Map();
   const inFlightStats = new Map();
   const knownGenLenMap = new Map();
+
+  function setBoundedGenLen(cascadeId, len) {
+    if (!cascadeId || !(len > 0)) return;
+    if (knownGenLenMap.has(cascadeId)) knownGenLenMap.delete(cascadeId);
+    knownGenLenMap.set(cascadeId, len);
+    while (knownGenLenMap.size > MAX_CASCADE_LEN_ENTRIES) {
+      const oldest = knownGenLenMap.keys().next().value;
+      if (oldest === undefined) break;
+      knownGenLenMap.delete(oldest);
+    }
+    if (window && typeof window === 'object') {
+      window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
+      if (Object.prototype.hasOwnProperty.call(window.__agyRcGenLenByCascade, cascadeId)) {
+        delete window.__agyRcGenLenByCascade[cascadeId];
+      }
+      window.__agyRcGenLenByCascade[cascadeId] = len;
+      const keys = Object.keys(window.__agyRcGenLenByCascade);
+      if (keys.length > MAX_CASCADE_LEN_ENTRIES) {
+        for (let i = 0; i < keys.length - MAX_CASCADE_LEN_ENTRIES; i++) {
+          delete window.__agyRcGenLenByCascade[keys[i]];
+        }
+      }
+    }
+  }
   let inFlightQuota = null;
   let quotaData = null;
   let lastQuotaFetch = 0;
@@ -137,9 +164,9 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
         let j = null;
         if (canUseLocalHttp(csrf)) {
           try {
-            const r = await fetchFn('/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {
+            const r = await fetchFn(resolvedHostConfig.buildRpcPath('RetrieveUserQuotaSummary'), {
               method: 'POST',
-              headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+              headers: resolvedHostConfig.buildRpcHeaders(csrf),
               body: '{}',
             });
             if (r && r.ok !== false) {
@@ -169,7 +196,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
       const metas = await callGenMeta(off);
       if (metas.length > 0) {
         const nextLen = off + metas.length;
-        knownGenLenMap.set(cascadeId, nextLen);
+        setBoundedGenLen(cascadeId, nextLen);
         return { metas, knownGenLen: nextLen };
       }
     }
@@ -178,7 +205,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     if (sc <= 60) {
       const metas = await callGenMeta(0);
       if (metas.length > 0) {
-        knownGenLenMap.set(cascadeId, metas.length);
+        setBoundedGenLen(cascadeId, metas.length);
       }
       return { metas, knownGenLen: metas.length };
     }
@@ -188,7 +215,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
       const metas = await callGenMeta(cur);
       if (metas.length > 0) {
         const nextLen = cur + metas.length;
-        knownGenLenMap.set(cascadeId, nextLen);
+        setBoundedGenLen(cascadeId, nextLen);
         return { metas, knownGenLen: nextLen };
       }
       const stepDown = Math.max(35, Math.floor(cur * 0.22));
@@ -197,7 +224,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
 
     const metas0 = await callGenMeta(0);
     if (metas0.length > 0) {
-      knownGenLenMap.set(cascadeId, metas0.length);
+      setBoundedGenLen(cascadeId, metas0.length);
     }
     return { metas: metas0, knownGenLen: metas0.length };
   }
@@ -286,9 +313,9 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
         if (canUseLocalHttp(csrf)) {
           try {
             const callLocal = async (offset) => {
-              const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+              const r = await fetchFn(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
                 method: 'POST',
-                headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+                headers: resolvedHostConfig.buildRpcHeaders(csrf),
                 body: JSON.stringify({ cascadeId, generatorMetadataOffset: offset }),
               });
               if (r && r.ok !== false) {
@@ -351,9 +378,8 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           return cached || null;
         }
 
-        if (discoveredGenLen > 0 && typeof window !== 'undefined') {
-          window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
-          window.__agyRcGenLenByCascade[cascadeId] = discoveredGenLen;
+        if (discoveredGenLen > 0) {
+          setBoundedGenLen(cascadeId, discoveredGenLen);
         }
 
         const finalVersionKey = `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`;

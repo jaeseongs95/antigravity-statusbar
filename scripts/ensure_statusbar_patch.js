@@ -60,34 +60,28 @@ const UTILS_ANCHOR_REPLACEMENT =
   "    // AGY_STATUSBAR_AUTOINJECT_V5\n" +
   "    const _injectAgyStatusBar = () => {\n" +
   "        try {\n" +
-  "            const _fs = require('fs');\n" +
-  "            const _path = require('path');\n" +
-  "            const _p = _path.join(process.env.USERPROFILE || process.env.HOME || '', '.gemini', 'antigravity', 'statusbar_autoinject.js');\n" +
-  "            if (_fs.existsSync(_p) && !win.isDestroyed() && !win.webContents.isDestroyed()) {\n" +
-  "                void win.webContents.executeJavaScript(_fs.readFileSync(_p, 'utf8')).catch(() => {});\n" +
-  "            }\n" +
+  "            if (win.isDestroyed() || win.webContents.isDestroyed() || !/^https?:/i.test(win.webContents.getURL())) return;\n" +
+  "            const _p = require('path').join(process.env.USERPROFILE || process.env.HOME || '', '.gemini', 'antigravity', 'statusbar_autoinject.js');\n" +
+  "            if (require('fs').existsSync(_p)) void win.webContents.executeJavaScript(require('fs').readFileSync(_p, 'utf8')).catch(() => {});\n" +
   "        } catch (_e) {}\n" +
   "    };\n" +
   "    win.webContents.on('dom-ready', _injectAgyStatusBar);\n" +
   "    win.webContents.on('did-finish-load', _injectAgyStatusBar);\n" +
   "    void win.loadURL(url);";
 
-// Anchor 2: Global web-contents-created listener in dist/main.js (works on v2.26+ and v2.27+)
+// Anchor 2: Global web-contents-created listener in dist/main.js (works on v2.26+ through v2.32+)
 const MAIN_ANCHOR_TARGET =
   "electron_1.app.on('web-contents-created', (_event, contents) => {";
 
 const MAIN_ANCHOR_REPLACEMENT =
   "electron_1.app.on('web-contents-created', (_event, contents) => {\n" +
   "    // AGY_STATUSBAR_AUTOINJECT_V5\n" +
-  "    if (contents.getType() === 'window') {\n" +
+  "    if (contents.getType() === 'window' && !(typeof scriptJail_1 !== 'undefined' && scriptJail_1.isScriptJailSession && scriptJail_1.isScriptJailSession(contents.session))) {\n" +
   "        const _injectAgyMain = () => {\n" +
   "            try {\n" +
-  "                const _fs = require('fs');\n" +
-  "                const _path = require('path');\n" +
-  "                const _p = _path.join(process.env.USERPROFILE || process.env.HOME || '', '.gemini', 'antigravity', 'statusbar_autoinject.js');\n" +
-  "                if (_fs.existsSync(_p) && !contents.isDestroyed()) {\n" +
-  "                    void contents.executeJavaScript(_fs.readFileSync(_p, 'utf8')).catch(() => {});\n" +
-  "                }\n" +
+  "                if (contents.isDestroyed() || !/^https?:/i.test(contents.getURL())) return;\n" +
+  "                const _p = require('path').join(process.env.USERPROFILE || process.env.HOME || '', '.gemini', 'antigravity', 'statusbar_autoinject.js');\n" +
+  "                if (require('fs').existsSync(_p)) void contents.executeJavaScript(require('fs').readFileSync(_p, 'utf8')).catch(() => {});\n" +
   "            } catch (_e) {}\n" +
   "        };\n" +
   "        contents.on('dom-ready', _injectAgyMain);\n" +
@@ -101,11 +95,13 @@ const PRELOAD_ANCHOR_TARGET =
 const PRELOAD_ANCHOR_REPLACEMENT =
   "electron_1.contextBridge.exposeInMainWorld('wsl', wslAPI);\n" +
   "// AGY_STATUSBAR_AUTOINJECT_V5\n" +
-  "electron_1.ipcRenderer.invoke('storage:get-items').then((r) => {\n" +
-  "    if (r && r['agy-statusbar-code']) {\n" +
-  "        void electron_1.webFrame.executeJavaScript(r['agy-statusbar-code']).catch(() => {});\n" +
-  "    }\n" +
-  "}).catch(() => {});";
+  "if (/^https?:$/i.test(globalThis.location?.protocol || '')) {\n" +
+  "    electron_1.ipcRenderer.invoke('storage:get-items').then((r) => {\n" +
+  "        if (r && r['agy-statusbar-code']) {\n" +
+  "            void electron_1.webFrame.executeJavaScript(r['agy-statusbar-code']).catch(() => {});\n" +
+  "        }\n" +
+  "    }).catch(() => {});\n" +
+  "}";
 
 function sha256Hex(bufferOrString) {
   return crypto.createHash('sha256').update(bufferOrString).digest('hex');
@@ -132,6 +128,7 @@ function computeIntegrity(buf) {
  * under `agy-statusbar-code` so `preload.js` can read it via `ipcRenderer.invoke('storage:get-items')`.
  */
 function syncAppStorageCode() {
+  let tmpPath = null;
   try {
     if (!fs.existsSync(AUTOINJECT_PATH) || !fs.existsSync(APP_STORAGE_PATH)) {
       return false;
@@ -143,17 +140,277 @@ function syncAppStorageCode() {
       return false;
     }
     data[STORAGE_CODE_KEY] = code;
-    fs.writeFileSync(APP_STORAGE_PATH, JSON.stringify(data, null, 2), 'utf8');
+    const serialized = JSON.stringify(data, null, 2);
+    tmpPath = `${APP_STORAGE_PATH}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, serialized, 'utf8');
+    try {
+      fs.renameSync(tmpPath, APP_STORAGE_PATH);
+    } catch {
+      fs.copyFileSync(tmpPath, APP_STORAGE_PATH);
+      try { fs.unlinkSync(tmpPath); } catch {}
+    }
     return true;
   } catch {
     return false;
+  } finally {
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      try { fs.unlinkSync(tmpPath); } catch {}
+    }
   }
+}
+
+const REGEX_KEYWORDS = new Set([
+  'return', 'throw', 'case', 'delete', 'void', 'typeof',
+  'instanceof', 'in', 'of', 'new', 'yield', 'await', 'else', 'do',
+]);
+
+function countTrailingBackslashes(str) {
+  let count = 0;
+  for (let i = str.length - 1; i >= 0 && str[i] === '\\'; i--) {
+    count += 1;
+  }
+  return count;
+}
+
+function stripPureCommentLinesLexical(lines) {
+  const out = [];
+  const stack = [
+    { mode: 'CODE', braceDepth: 0, regexAllowed: true, prevWasDot: false, lastControlKw: false, parenStack: [] },
+  ];
+  let inBlockComment = false;
+  let inSingle = false;
+  let inDouble = false;
+
+  for (const line of lines) {
+    const startsInTemplate = stack[stack.length - 1].mode === 'TEMPLATE';
+    const startsInString = inSingle || inDouble;
+    const startsInBlockComment = inBlockComment;
+    const trimmed = line.trim();
+
+    if (!startsInTemplate && !startsInString && !startsInBlockComment && trimmed.includes(PATCH_MARKER)) {
+      out.push(line);
+      continue;
+    }
+
+    let i = 0;
+    let inRegex = false;
+    let inRegexCharClass = false;
+    let hasCodeTokenOnLine = false;
+
+    while (i < line.length) {
+      const ch = line[i];
+      const next = line[i + 1] || '';
+      const top = stack[stack.length - 1];
+
+      if (top.mode === 'TEMPLATE') {
+        hasCodeTokenOnLine = true;
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === '`') {
+          stack.pop();
+          const outer = stack[stack.length - 1];
+          outer.regexAllowed = false;
+          outer.prevWasDot = false;
+          outer.lastControlKw = false;
+          i += 1;
+          continue;
+        }
+        if (ch === '$' && next === '{') {
+          stack.push({ mode: 'TEMPLATE_EXPR', braceDepth: 1, regexAllowed: true, prevWasDot: false, lastControlKw: false, parenStack: [] });
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (inBlockComment) {
+        if (ch === '*' && next === '/') {
+          inBlockComment = false;
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (inSingle) {
+        hasCodeTokenOnLine = true;
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === "'") {
+          inSingle = false;
+          top.regexAllowed = false;
+          top.prevWasDot = false;
+          top.lastControlKw = false;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (inDouble) {
+        hasCodeTokenOnLine = true;
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === '"') {
+          inDouble = false;
+          top.regexAllowed = false;
+          top.prevWasDot = false;
+          top.lastControlKw = false;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (inRegex) {
+        hasCodeTokenOnLine = true;
+        if (ch === '\\') { i += 2; continue; }
+        if (inRegexCharClass) {
+          if (ch === ']') inRegexCharClass = false;
+          i += 1;
+          continue;
+        }
+        if (ch === '[') { inRegexCharClass = true; i += 1; continue; }
+        if (ch === '/') {
+          inRegex = false;
+          i += 1;
+          while (i < line.length && /[A-Za-z]/.test(line[i])) i += 1;
+          top.regexAllowed = false;
+          top.prevWasDot = false;
+          top.lastControlKw = false;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\f' || ch === '\v') {
+        i += 1;
+        continue;
+      }
+      if (ch === '/' && next === '/') {
+        break;
+      }
+      if (ch === '/' && next === '*') {
+        inBlockComment = true;
+        i += 2;
+        continue;
+      }
+
+      hasCodeTokenOnLine = true;
+      if (ch === '/' && top.regexAllowed) {
+        inRegex = true;
+        inRegexCharClass = false;
+        i += 1;
+        continue;
+      }
+      if (ch === "'") { inSingle = true; i += 1; continue; }
+      if (ch === '"') { inDouble = true; i += 1; continue; }
+      if (ch === '`') { stack.push({ mode: 'TEMPLATE' }); i += 1; continue; }
+
+      if (/[A-Za-z_$]/.test(ch)) {
+        let end = i + 1;
+        while (end < line.length && /[A-Za-z0-9_$]/.test(line[end])) end += 1;
+        const word = line.slice(i, end);
+        const wasDot = top.prevWasDot;
+        top.regexAllowed = !wasDot && REGEX_KEYWORDS.has(word);
+        top.lastControlKw = !wasDot && (word === 'if' || word === 'while' || word === 'for' || word === 'with');
+        top.prevWasDot = false;
+        i = end;
+        continue;
+      }
+      if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(next))) {
+        let end = i + 1;
+        while (end < line.length && /[0-9A-Za-z_.]/.test(line[end])) end += 1;
+        top.regexAllowed = false;
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i = end;
+        continue;
+      }
+      if (ch === '(') {
+        top.parenStack.push(top.lastControlKw);
+        top.regexAllowed = true;
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i += 1;
+        continue;
+      }
+      if (ch === ')') {
+        top.regexAllowed = Boolean(top.parenStack.pop());
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i += 1;
+        continue;
+      }
+      if (ch === '[') { top.regexAllowed = true; top.prevWasDot = false; top.lastControlKw = false; i += 1; continue; }
+      if (ch === ']') { top.regexAllowed = false; top.prevWasDot = false; top.lastControlKw = false; i += 1; continue; }
+      if (ch === '{') {
+        if (top.mode === 'TEMPLATE_EXPR') top.braceDepth += 1;
+        top.regexAllowed = true;
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i += 1;
+        continue;
+      }
+      if (ch === '}') {
+        if (top.mode === 'TEMPLATE_EXPR') {
+          top.braceDepth -= 1;
+          if (top.braceDepth === 0) {
+            stack.pop();
+            i += 1;
+            continue;
+          }
+        }
+        top.regexAllowed = true;
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i += 1;
+        continue;
+      }
+      if ((ch === '+' && next === '+') || (ch === '-' && next === '-')) {
+        top.regexAllowed = false;
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i += 2;
+        continue;
+      }
+      if (ch === '.' && next === '.' && line[i + 2] === '.') {
+        top.regexAllowed = true;
+        top.prevWasDot = false;
+        top.lastControlKw = false;
+        i += 3;
+        continue;
+      }
+      if (ch === '.') {
+        top.regexAllowed = false;
+        top.prevWasDot = true;
+        top.lastControlKw = false;
+        i += 1;
+        continue;
+      }
+      top.regexAllowed = true;
+      top.prevWasDot = false;
+      top.lastControlKw = false;
+      i += 1;
+    }
+
+    if (inSingle && countTrailingBackslashes(line) % 2 === 0) inSingle = false;
+    if (inDouble && countTrailingBackslashes(line) % 2 === 0) inDouble = false;
+
+    if (startsInTemplate || startsInString) {
+      out.push(line);
+      continue;
+    }
+    if (!hasCodeTokenOnLine && (startsInBlockComment || trimmed.startsWith('//') || trimmed.startsWith('/*'))) {
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
 }
 
 /**
  * Transforms `origBuf` by replacing `anchorTarget` with `anchorReplacement` while
- * preserving the EXACT byte length of `origBuf` (by stripping comment lines and padding
- * trailing comment spaces). Validates syntax via `vm.Script`.
+ * preserving the EXACT byte length of `origBuf` (by stripping pure comment lines outside
+ * strings/templates and padding trailing comment spaces). Validates syntax via `vm.Script`.
  */
 function transformExactSize(origBuf, anchorTarget, anchorReplacement) {
   const origSize = origBuf.length;
@@ -167,33 +424,7 @@ function transformExactSize(origBuf, anchorTarget, anchorReplacement) {
   }
 
   const modified = normalized.replace(anchorTarget, anchorReplacement);
-  const lines = modified.split('\n');
-  const strippedLines = [];
-  let inBlockComment = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.includes(PATCH_MARKER)) {
-      strippedLines.push(line);
-      continue;
-    }
-    if (inBlockComment) {
-      if (trimmed.includes('*/')) {
-        inBlockComment = false;
-      }
-      continue;
-    }
-    if (trimmed.startsWith('/*')) {
-      if (!trimmed.includes('*/')) {
-        inBlockComment = true;
-      }
-      continue;
-    }
-    if (trimmed.startsWith('//')) {
-      continue;
-    }
-    strippedLines.push(line);
-  }
+  const strippedLines = stripPureCommentLinesLexical(modified.split('\n'));
 
   let candidate = strippedLines.join(hasCrlf ? '\r\n' : '\n');
   const candBytes = Buffer.byteLength(candidate, 'utf8');
@@ -239,7 +470,7 @@ function isAsarPatchedFast(asarPath = ASAR_PATH) {
 
     const headerBuf = Buffer.alloc(strSize);
     fs.readSync(fd, headerBuf, 0, strSize, 16);
-    const header = JSON.parse(headerBuf.toString('utf8'));
+    const header = JSON.parse(headerBuf.toString('utf8').replace(/\0+$/, ''));
     const dataOffset = 8 + u4;
 
     const distFiles = header?.files?.dist?.files;
@@ -278,12 +509,30 @@ function isAsarPatchedFast(asarPath = ASAR_PATH) {
   }
 }
 
+function isProcessAlive(pid) {
+  const num = Number(pid);
+  if (!Number.isInteger(num) || num <= 0) return false;
+  try {
+    process.kill(num, 0);
+    return true;
+  } catch (err) {
+    return Boolean(err && err.code === 'EPERM');
+  }
+}
+
 function acquireLock() {
   try {
     fs.mkdirSync(AGY_DIR, { recursive: true });
     if (fs.existsSync(LOCK_PATH)) {
       const stat = fs.statSync(LOCK_PATH);
-      if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+      const ageMs = Date.now() - stat.mtimeMs;
+      let ownerPid = 0;
+      try {
+        const lockInfo = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+        ownerPid = Number(lockInfo?.pid || 0);
+      } catch {}
+      const ownerAlive = ownerPid > 0 && isProcessAlive(ownerPid);
+      if ((ownerPid > 0 && !ownerAlive) || (!ownerAlive && ageMs > LOCK_STALE_MS) || ageMs > LOCK_STALE_MS * 10) {
         try { fs.unlinkSync(LOCK_PATH); } catch {}
       }
     }
@@ -311,15 +560,27 @@ function writeStatus(statusObj) {
   } catch {}
 }
 
-function readDevToolsPort() {
+function readDevToolsEndpoint() {
   try {
     if (!fs.existsSync(DEVTOOLS_PORT_FILE)) return null;
     const lines = fs.readFileSync(DEVTOOLS_PORT_FILE, 'utf8').trim().split(/\r?\n/);
     const port = parseInt(lines[0], 10);
-    return port && !Number.isNaN(port) ? port : null;
+    if (!port || Number.isNaN(port)) return null;
+    const rawWsLine = (lines[1] || '').trim();
+    const browserWsUrl = rawWsLine
+      ? (rawWsLine.startsWith('ws://') || rawWsLine.startsWith('wss://')
+        ? rawWsLine
+        : `ws://127.0.0.1:${port}${rawWsLine.startsWith('/') ? rawWsLine : `/${rawWsLine}`}`)
+      : null;
+    return { port, browserWsUrl };
   } catch {
     return null;
   }
+}
+
+function readDevToolsPort() {
+  const ep = readDevToolsEndpoint();
+  return ep ? ep.port : null;
 }
 
 function httpGetJson(port, reqPath, timeoutMs = 1500) {
@@ -343,6 +604,52 @@ function httpGetJson(port, reqPath, timeoutMs = 1500) {
   });
 }
 
+function detectBundledPlugins(scriptCode) {
+  const text = typeof scriptCode === 'string' ? scriptCode : '';
+  const expectsStatusbar =
+    /^(?:\/\/ @name[ \t]+Antigravity Custom Statusbar\b|\/\/ === BEGIN_AGY_STATUSBAR(?:_V\d+)? ===|\/\* === BEGIN_AGY_STATUSBAR(?:_V\d+)? === \*\/|[ \t]*function\s+mountStatusBar\s*\()/m.test(text);
+  const expectsMcp =
+    /^(?:\/\/ @name[ \t]+Antigravity Custom MCP Server Manager\b|\/\/ === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? === \*\/|[ \t]*function\s+mountMcpManager\s*\()/m.test(text);
+  const expectsKo =
+    /^(?:\/\/ @name[ \t]+Antigravity Korean Thought & UI Translator\b|\/\/ === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/|[ \t]*window\.__agyKoThoughtCleanup\s*=)/m.test(text);
+  return { expectsStatusbar, expectsMcp, expectsKo };
+}
+
+function buildImmediateEvalExpression(scriptCode, scriptHash) {
+  const { expectsStatusbar, expectsMcp, expectsKo } = detectBundledPlugins(scriptCode);
+  const activeChecks = [];
+  if (expectsStatusbar) {
+    activeChecks.push('Boolean(window.agyStatusBar && typeof window.__agyStatusBarCleanup === "function")');
+  }
+  if (expectsMcp) {
+    activeChecks.push('Boolean(window.agyMcpManager && typeof window.agyMcpManager.destroy === "function")');
+  }
+  if (expectsKo) {
+    activeChecks.push('Boolean(typeof window.__agyKoThoughtCleanup === "function" || window.__agyKoLocalizerActive)');
+  }
+  const activeGuardExpr = activeChecks.length > 0 ? activeChecks.join(' && ') : 'false';
+  return `(() => {
+      const hasActivePlugin = ${activeGuardExpr};
+      if (hasActivePlugin && window.__agyStatusBarHash === ${JSON.stringify(scriptHash)}) {
+        return 'ALREADY_ACTIVE';
+      }
+      ${scriptCode}
+      window.__agyStatusBarHash = ${JSON.stringify(scriptHash)};
+      return 'INJECTED_OK';
+    })()`;
+}
+
+function isInjectablePageTarget(t) {
+  if (!t || t.type !== 'page') return false;
+  const u = String(t.url || '');
+  return (
+    !u.startsWith('devtools://') &&
+    !u.startsWith('chrome-devtools://') &&
+    !u.startsWith('data:') &&
+    !u.startsWith('about:')
+  );
+}
+
 function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) {
   return new Promise((resolve, reject) => {
     if (typeof WebSocket !== 'function') {
@@ -358,30 +665,7 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
       reject(new Error('WebSocket evaluation timeout'));
     }, timeoutMs);
 
-    const expectsStatusbar = /(?:^|[^\w$])mountStatusBar\s*\(|__agyStatusBarCleanup/.test(scriptCode);
-    const expectsMcp = /(?:^|[^\w$])mountMcpManager\s*\(|BEGIN_AGY_MCP_MANAGER/.test(scriptCode);
-    const expectsKo = /KO_THOUGHT_LOCALIZER|__agyKoThoughtCleanup/.test(scriptCode);
-    const activeChecks = [];
-    if (expectsStatusbar) {
-      activeChecks.push('Boolean(window.agyStatusBar && typeof window.__agyStatusBarCleanup === "function")');
-    }
-    if (expectsMcp) {
-      activeChecks.push('Boolean(window.agyMcpManager && typeof window.agyMcpManager.destroy === "function")');
-    }
-    if (expectsKo) {
-      activeChecks.push('Boolean(typeof window.__agyKoThoughtCleanup === "function" || window.__agyKoLocalizerActive)');
-    }
-    const activeGuardExpr = activeChecks.length > 0 ? activeChecks.join(' && ') : 'false';
-
-    const immediateExpr = `(() => {
-      const hasActivePlugin = ${activeGuardExpr};
-      if (hasActivePlugin && window.__agyStatusBarHash === ${JSON.stringify(scriptHash)}) {
-        return 'ALREADY_ACTIVE';
-      }
-      ${scriptCode}
-      window.__agyStatusBarHash = ${JSON.stringify(scriptHash)};
-      return 'INJECTED_OK';
-    })()`;
+    const immediateExpr = buildImmediateEvalExpression(scriptCode, scriptHash);
 
     ws.onopen = () => {
       try {
@@ -441,47 +725,197 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
   });
 }
 
+function injectViaBrowserCdpWs(browserWsUrl, scriptCode, scriptHash, timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    if (typeof WebSocket !== 'function') {
+      reject(new Error('Global WebSocket unavailable'));
+      return;
+    }
+    let closed = false;
+    let nextId = 1;
+    const pending = new Map();
+    const ws = new WebSocket(browserWsUrl);
+    const immediateExpr = buildImmediateEvalExpression(scriptCode, scriptHash);
+
+    const finish = (err, val) => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(timer);
+      for (const [, p] of pending) {
+        p.reject(err || new Error('Browser CDP socket closed'));
+      }
+      pending.clear();
+      try { ws.close(); } catch {}
+      if (err) reject(err);
+      else resolve(val);
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error('Browser CDP WebSocket timeout'));
+    }, timeoutMs);
+
+    const sendCdp = (method, params = {}, sessionId = undefined) =>
+      new Promise((res, rej) => {
+        if (closed) {
+          rej(new Error('Browser CDP socket closed'));
+          return;
+        }
+        const id = nextId++;
+        pending.set(id, { resolve: res, reject: rej });
+        const payload = sessionId ? { id, method, params, sessionId } : { id, method, params };
+        try {
+          ws.send(JSON.stringify(payload));
+        } catch (err) {
+          pending.delete(id);
+          rej(err);
+        }
+      });
+
+    ws.onmessage = (event) => {
+      if (closed) return;
+      try {
+        const msg = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data));
+        if (msg && typeof msg.id === 'number' && pending.has(msg.id)) {
+          const entry = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) {
+            entry.reject(new Error(msg.error.message || `CDP ${msg.error.code || ''} error`));
+          } else {
+            entry.resolve(msg.result);
+          }
+        }
+      } catch {}
+    };
+
+    ws.onerror = (err) => {
+      finish(err instanceof Error ? err : new Error('Browser CDP WebSocket error'));
+    };
+
+    ws.onopen = async () => {
+      try {
+        const targetsRes = await sendCdp('Target.getTargets', {});
+        const targetInfos = Array.isArray(targetsRes?.targetInfos) ? targetsRes.targetInfos : [];
+        const pageTargets = targetInfos.filter((t) => t && t.targetId && isInjectablePageTarget(t));
+        let injectedCount = 0;
+        let skippedAlreadyActive = 0;
+
+        for (const target of pageTargets) {
+          let sessionId = null;
+          try {
+            const attachRes = await sendCdp('Target.attachToTarget', {
+              targetId: target.targetId,
+              flatten: true,
+            });
+            sessionId = attachRes?.sessionId || null;
+            if (!sessionId) continue;
+            const evalRes = await sendCdp(
+              'Runtime.evaluate',
+              { expression: immediateExpr, returnByValue: true },
+              sessionId
+            );
+            if (evalRes?.exceptionDetails) {
+              const det = evalRes.exceptionDetails;
+              throw new Error(det?.exception?.description || det?.text || 'CDP Runtime.evaluate exception');
+            }
+            const val = evalRes?.result?.value ?? null;
+            if (val === 'INJECTED_OK') injectedCount++;
+            else if (val === 'ALREADY_ACTIVE') skippedAlreadyActive++;
+          } catch {
+            // Continue evaluating remaining page targets
+          } finally {
+            if (sessionId) {
+              await sendCdp('Target.detachFromTarget', { sessionId }).catch(() => {});
+            }
+          }
+        }
+
+        finish(null, {
+          pageTargetCount: pageTargets.length,
+          injectedCount,
+          skippedAlreadyActive,
+        });
+      } catch (err) {
+        finish(err);
+      }
+    };
+  });
+}
+
 async function injectViaCdpLive() {
   if (!fs.existsSync(AUTOINJECT_PATH)) {
     return { attempted: false, reason: 'autoinject_script_missing', injectedCount: 0 };
   }
-  const port = readDevToolsPort();
-  if (!port) {
+  const endpoint = readDevToolsEndpoint();
+  if (!endpoint || !endpoint.port) {
     return { attempted: false, reason: 'devtools_port_missing', injectedCount: 0 };
   }
+  const { port } = endpoint;
+  let { browserWsUrl } = endpoint;
 
   const scriptCode = fs.readFileSync(AUTOINJECT_PATH, 'utf8');
   const scriptHash = sha256Hex(scriptCode).slice(0, 16);
-  const targets = await httpGetJson(port, '/json/list', 1500);
-  const pageTargets = (Array.isArray(targets) ? targets : []).filter(
-    (t) =>
-      t &&
-      t.type === 'page' &&
-      t.webSocketDebuggerUrl &&
-      !String(t.url || '').startsWith('devtools://') &&
-      !String(t.url || '').startsWith('data:') &&
-      !String(t.url || '').startsWith('about:')
-  );
+
+  let pageTargets = [];
+  try {
+    const targets = await httpGetJson(port, '/json/list', 1500);
+    pageTargets = (Array.isArray(targets) ? targets : []).filter(
+      (t) => t && t.webSocketDebuggerUrl && isInjectablePageTarget(t)
+    );
+  } catch {
+    pageTargets = [];
+  }
 
   let injectedCount = 0;
   let skippedAlreadyActive = 0;
 
-  for (const target of pageTargets) {
-    try {
-      const val = await configureTargetViaCdp(target.webSocketDebuggerUrl, scriptCode, scriptHash, 1500);
-      if (val === 'INJECTED_OK') injectedCount++;
-      else if (val === 'ALREADY_ACTIVE') skippedAlreadyActive++;
-    } catch {
-      // Ignore individual target failures
+  if (pageTargets.length > 0) {
+    for (const target of pageTargets) {
+      try {
+        const val = await configureTargetViaCdp(target.webSocketDebuggerUrl, scriptCode, scriptHash, 1500);
+        if (val === 'INJECTED_OK') injectedCount++;
+        else if (val === 'ALREADY_ACTIVE') skippedAlreadyActive++;
+      } catch {
+        // Ignore individual target failures
+      }
     }
+    return {
+      attempted: true,
+      port,
+      mode: 'http_json_list',
+      pageTargetCount: pageTargets.length,
+      injectedCount,
+      skippedAlreadyActive,
+    };
+  }
+
+  if (!browserWsUrl) {
+    try {
+      const ver = await httpGetJson(port, '/json/version', 1000);
+      if (ver && typeof ver.webSocketDebuggerUrl === 'string' && ver.webSocketDebuggerUrl) {
+        browserWsUrl = ver.webSocketDebuggerUrl;
+      }
+    } catch {}
+  }
+
+  if (browserWsUrl) {
+    const browserRes = await injectViaBrowserCdpWs(browserWsUrl, scriptCode, scriptHash, 4000);
+    return {
+      attempted: true,
+      port,
+      mode: 'browser_ws',
+      pageTargetCount: browserRes.pageTargetCount,
+      injectedCount: browserRes.injectedCount,
+      skippedAlreadyActive: browserRes.skippedAlreadyActive,
+    };
   }
 
   return {
     attempted: true,
     port,
-    pageTargetCount: pageTargets.length,
-    injectedCount,
-    skippedAlreadyActive,
+    mode: 'none',
+    pageTargetCount: 0,
+    injectedCount: 0,
+    skippedAlreadyActive: 0,
   };
 }
 
@@ -491,7 +925,7 @@ function readAsarArchive(filePath) {
   const u4 = buf.readUInt32LE(4);
   const strSize = buf.readUInt32LE(12);
   const dataOffset = 8 + u4;
-  const header = JSON.parse(buf.toString('utf8', 16, 16 + strSize));
+  const header = JSON.parse(buf.toString('utf8', 16, 16 + strSize).replace(/\0+$/, ''));
 
   const fileMap = new Map();
   function extractNode(node, relPath) {
@@ -770,6 +1204,10 @@ module.exports = {
   computeIntegrity,
   transformExactSize,
   isAsarPatchedFast,
+  detectBundledPlugins,
+  configureTargetViaCdp,
+  injectViaBrowserCdpWs,
+  readDevToolsEndpoint,
 };
 
 if (require.main === module) {

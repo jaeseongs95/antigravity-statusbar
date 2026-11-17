@@ -303,10 +303,10 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
     let mapUpdated = false;
     let defUpdated = false;
     for (const [cid, sum] of Object.entries(summariesMap)) {
+      hasSessionOverride(cid);
       const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
       if (!parsed) continue;
       if (parsed.sessionCw) {
-        hasSessionOverride(cid);
         const localCw = sessionCwMap.get(cid);
         const localTs = sessionCwTsMap.get(cid) || 0;
         if (!localCw || parsed.ts > localTs) {
@@ -369,6 +369,7 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
       if (cSession.ts > prevTs) {
         sessionCwTsMap.set(cascadeId, cSession.ts);
       }
+      trimSessionMaps(200);
       return true;
     }
     return false;
@@ -382,11 +383,14 @@ function createContextWindowStore({ document, localStorage, nativeStorage, onCus
       if (!sessionCwTsMap.has(cascadeId)) {
         sessionCwTsMap.set(cascadeId, Date.now());
       }
+      trimSessionMaps(200);
     }
   }
 
   function migrateSessionOverride(fromCascadeId, toCascadeId) {
     if (!fromCascadeId || !toCascadeId || fromCascadeId === toCascadeId) return null;
+    hasSessionOverride(fromCascadeId);
+    hasSessionOverride(toCascadeId);
     const ts = sessionCwTsMap.get(fromCascadeId) || 1;
     const cw = sessionCwMap.get(fromCascadeId);
     if (!cw || ts < 1) return null;

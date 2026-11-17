@@ -2,6 +2,7 @@
 
 const { fmtNum, escHtml } = require('../dom-styles');
 const { getChatModelFromMeta, extractStatsFromMetas } = require('../rpc-client');
+const { resolveHostAdapterConfig } = require('../host-adapter-config');
 
 function createContextButtonAdapter({
   window,
@@ -10,7 +11,9 @@ function createContextButtonAdapter({
   setHtml,
   cwStore,
   hostBridge,
+  hostConfig,
 }) {
+  const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
   async function openOrToggleDebugModal(view, inputBox) {
     const existingModal = document.getElementById('agy-ctx-debug-modal');
     if (existingModal) {
@@ -115,9 +118,9 @@ function createContextButtonAdapter({
       let metas = [];
       if (csrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function') {
         try {
-          const r = await fetchFn('/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata', {
+          const r = await fetchFn(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
             method: 'POST',
-            headers: { 'content-type': 'application/json', 'x-codeium-csrf-token': csrf },
+            headers: resolvedHostConfig.buildRpcHeaders(csrf),
             body: JSON.stringify({ cascadeId, generatorMetadataOffset: fetchOffset }),
           });
           if (r && r.ok !== false) {
@@ -146,7 +149,16 @@ function createContextButtonAdapter({
           totalGenLen = fetchOffset + allMetas.length;
           if (window && cascadeId) {
             window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
+            if (Object.prototype.hasOwnProperty.call(window.__agyRcGenLenByCascade, cascadeId)) {
+              delete window.__agyRcGenLenByCascade[cascadeId];
+            }
             window.__agyRcGenLenByCascade[cascadeId] = totalGenLen;
+            const keys = Object.keys(window.__agyRcGenLenByCascade);
+            if (keys.length > 200) {
+              for (let k = 0; k < keys.length - 200; k++) {
+                delete window.__agyRcGenLenByCascade[keys[k]];
+              }
+            }
           }
         }
         metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;

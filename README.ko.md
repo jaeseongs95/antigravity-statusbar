@@ -1,8 +1,8 @@
-# antigravity-statusbar (`v1.3.22` / `v28`)
+# antigravity-statusbar (`v1.3.24` / `v30`)
 
 **언어 (Languages):** **[English (README.md)](./README.md)** | **한국어 ([README.ko.md](./README.ko.md))**
 
-**Google Antigravity IDE (`v2.26.x` – `v2.29.x+`)** 채팅 입력창 하단에 장착되는 커스텀 컨텍스트 상태바(`.agy-ctx-statusbar`), 세션별 자유 토큰 한도 설정기(`32K`–`980K`) 및 백엔드 체크포인터(`max_token_limit`) 실시간 동기화, 플러그형 **`StatusBarAdapter`** 확장 API, 무결성 보존(`0` 오프셋) `app.asar` + 실시간 CDP 자동 패처, 그리고 **원격 제어 웹(`https://antigravity.google.com/r/...`) 북마클릿·유저스크립트**를 지원하는 통합 확장 도구입니다.
+**Google Antigravity IDE (`v2.26.x` – `v2.32.x+`)** 채팅 입력창 하단에 장착되는 커스텀 컨텍스트 상태바(`.agy-ctx-statusbar`), 세션별 자유 토큰 한도 설정기(`32K`–`980K`) 및 백엔드 체크포인터(`max_token_limit`) 실시간 동기화, 플러그형 **`StatusBarAdapter`** 확장 API, 무결성 보존(`0` 오프셋) `app.asar` + 실시간 CDP 자동 패처, 그리고 **원격 제어 웹(`https://antigravity.google.com/r/...`) 북마클릿·유저스크립트**를 제공하는 통합 확장 도구입니다.
 
 ---
 
@@ -26,11 +26,11 @@
   - 대화 압축(`Compacting`)이 완료된 직후 새 메시지를 보내기 전에도 `agentStateProvider.getState().contextWindowUsage.estimatedAfterCompaction` 수치를 상태바와 `[ context ]` 디버그 모달 양쪽에 즉시 반영합니다.
 - **세션별 컨텍스트 한도 자유 입력(`32K` – `980K`) 및 백엔드 체크포인터(`max_token_limit`) 동기화**:
   - 하단바의 `[ 256k ▾ ]` 버튼을 클릭해 프리셋(`128K`, `256K`, `384K`, `512K`, `750K`, `900K`)을 선택하거나 `32`~`980` (`K` 토큰) 사이의 원하는 값을 직접 입력할 수 있습니다.
-  - `SendUserCascadeMessage` 요청(`fetch` `Request` 객체, 일반 JSON, 5바이트 Connect 프레임 JSON, Protobuf 바이너리 모두 포함) 전송 시 `cascadeConfig.checkpointConfig.maxTokenLimit`(`field 5`)에 선택된 토큰 한도(예: `384000`)를 주입하여 백엔드 `language_server.exe`가 기본값 `256K`에서 조기 압축하지 않고 사용자가 지정한 한도를 그대로 따르도록 동기화합니다.
-  - 세션 식별자(`cascadeId`)별로 `localStorage`, 쿠키, `nativeStorage` 및 서버 트래젝토리 어노테이션(`annotations.activeProfile`)에 저장되어 데스크톱과 모바일·원격 웹 간에 자동 동기화되며, Redux 전역 기본값을 격리해 다른 대화방을 오염시키지 않습니다.
-  - 세션 한도가 `256K` 이하(`<= 256K`)일 때는 네이티브 모델 선택기의 `· {cw}` 배지는 유지하면서 노란색 주의 아이콘(`⚠️`)만 깔끔하게 숨깁니다.
+  - `SendUserCascadeMessage` 요청(`fetch` `Request` 객체, 일반 JSON, 5바이트 Connect 프레임 JSON, Protobuf 바이너리 모두 포함) 전송 시 `cascadeConfig.checkpointConfig.maxTokenLimit`(`field 5`)에 선택된 토큰 한도를 주입하고, `continue_after_injection`(`field 20`) 연속 턴에서는 주입을 생략하며 기존 `cascade_config` 필드가 있을 때는 하위 필드를 보존하여 단일 태그로 병합합니다.
+  - 세션 식별자(`cascadeId`)별로 `localStorage`, 쿠키, `nativeStorage` 및 서버 트래젝토리 어노테이션(`annotations.activeProfile`)에 저장하여 데스크톱과 모바일·원격 웹 간에 자동 동기화하며, Redux 전역 기본값을 격리해 다른 대화 세션에 영향을 주지 않습니다.
+  - 세션 한도가 `256K` 이하(`<= 256K`)일 때는 네이티브 모델 선택기의 `· {cw}` 배지는 유지하면서 주의 아이콘(`⚠️`)만 숨깁니다.
 - **오프셋 보존(`0` drift) `app.asar` 패처 및 무재시작 실시간 CDP 주입**:
-  - `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 바이트 길이를 100% 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
+  - 어휘 문맥 인식 주석 제거, NUL 패딩 헤더 파싱, `app_storage.json` 원자적 교체, 격리 세션(`isScriptJailSession`) 및 `http(s):` 프레임 필터를 통해 `app.asar` 내부 `dist/preload.js`, `dist/utils.js`, `dist/main.js`의 바이트 길이를 동일하게 유지하며 패치하고 `ElectronAsarIntegrity` 블록 해시를 갱신합니다.
   - 이미 실행 중인 Antigravity 창에도 Chrome DevTools Protocol(CDP)로 즉시 주입되어 앱을 재시작할 필요가 없습니다.
 - **원격 제어 웹(`https://antigravity.google.com/r/...`) 및 호스트 설치 맞춤형 동반 로드**:
   - 최상위 `<ga-remote-control>` Angular 호스트 셸(`RemoteControlComponent.prototype.proxyCommand`)과 내부 React Fiber WebRTC/WebChannel RPC 서비스(`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`)를 자동으로 연결합니다.
@@ -46,7 +46,7 @@
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
 
-# 1. 단위 테스트 및 번들 통합 회귀 테스트 실행 (17/17 통과)
+# 1. 단위 테스트 및 번들 통합 회귀 테스트 실행 (30/30 통과)
 npm test
 
 # 2. dist/statusbar_autoinject.js 빌드, ~/.gemini/antigravity 설치, app.asar 패치 및 CDP 즉시 주입
@@ -149,6 +149,7 @@ dispose(); // 또는 window.agyStatusBar.unregisterAdapter('my-custom-btn');
 antigravity-statusbar/
 ├── src/
 │   ├── index.js                   # 모듈 조립 루트, 원격 동반 플러그인 로더 및 수명주기 관찰자
+│   ├── host-adapter-config.js     # 호스트 RPC 경로·CSRF 헤더·원격 도메인·동반 스크립트 URL 어댑터 설정
 │   ├── context-window-policy.js   # 컨텍스트 한도 정규화(32K-980K) 및 세션별 영속 저장소
 │   ├── host-bridge.js             # React Fiber / Redux / 원격 proxyCommand / Connect 프레임 & Protobuf 훅
 │   ├── rpc-client.js              # LanguageServer RPC 클라이언트, singleflight 중복 방지 및 LRU 캐시
@@ -160,12 +161,15 @@ antigravity-statusbar/
 │       └── context-button.js      # 우측 슬롯 `[ context ]` 버튼 어댑터 + Trajectory 디버그 모달
 ├── dist/
 │   └── statusbar_autoinject.js    # Electron / CDP / UserScript 겸용 단일 파일 런타임 번들 산출물
+├── docs/
+│   ├── TEST_CASES.md              # 사전 테스트케이스 명세 및 결함 추적 매트릭스
+│   └── templates/                 # 공개 문서(README·릴리즈노트) 표준 템플릿
 ├── scripts/
 │   ├── build.js                   # 무의존성 CommonJS 번들러 (src/ -> dist/statusbar_autoinject.js)
 │   ├── ensure_statusbar_patch.js  # 오프셋 보존 ASAR 패처 + app_storage 동기화 + 실시간 CDP 주입기
 │   └── install.js                 # 번들 빌드 후 ~/.gemini/antigravity 설치 및 패처 실행
 ├── test/
-│   └── statusbar.test.js          # 개별 모듈 단위 테스트 + 런타임 번들 통합·회귀 테스트
+│   └── statusbar.test.js          # 개별 모듈 단위 테스트 + 런타임 번들 통합·회귀 테스트 (30/30)
 ├── README.md                      # 영문 안내 문서 (English)
 ├── README.ko.md                   # 국문 안내 문서 (Korean)
 └── package.json
@@ -176,7 +180,7 @@ antigravity-statusbar/
 ## 검증 및 테스트
 
 ```bash
-# dist/statusbar_autoinject.js 빌드 및 17개 단위·통합 회귀 테스트 실행
+# dist/statusbar_autoinject.js 빌드 및 30개 단위·통합 회귀 테스트 실행 (30/30)
 npm test
 ```
 

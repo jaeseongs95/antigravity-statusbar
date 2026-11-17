@@ -185,9 +185,14 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
           itemEl.textContent = resolvedLabel;
         }
         const resolvedTitle = typeof adapter.title === 'function' ? adapter.title(ctx) : String(adapter.title ?? '');
-        if (resolvedTitle && itemEl.getAttribute('title') !== resolvedTitle) {
-          itemEl.setAttribute('title', resolvedTitle);
-          itemEl.title = resolvedTitle;
+        if (resolvedTitle) {
+          if (itemEl.getAttribute('title') !== resolvedTitle) {
+            itemEl.setAttribute('title', resolvedTitle);
+            itemEl.title = resolvedTitle;
+          }
+        } else if (itemEl.getAttribute?.('title') !== null || itemEl.title) {
+          itemEl.removeAttribute?.('title');
+          itemEl.title = '';
         }
       }
       if (itemEl) orderedEls.push(itemEl);

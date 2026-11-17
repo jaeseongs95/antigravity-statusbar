@@ -197,11 +197,11 @@ function createCoreMetricsAdapter({
       let quotaHtml = '';
       if (quota) {
         const qParts = [];
-        if (quota.pct5h !== null) {
-          qParts.push(`5h <strong class="agy-ctx-quota">${quota.pct5h}%</strong><span class="agy-ctx-quota-left"> left</span>${quota.rst5h ? ' ' + quota.rst5h : ''}`);
+        if (quota.pct5h !== null && quota.pct5h !== undefined) {
+          qParts.push(`5h <strong class="agy-ctx-quota">${escHtml(quota.pct5h)}%</strong><span class="agy-ctx-quota-left"> left</span>${quota.rst5h ? ' ' + escHtml(quota.rst5h) : ''}`);
         }
-        if (quota.pct7d !== null) {
-          qParts.push(`7d <strong class="agy-ctx-quota">${quota.pct7d}%</strong><span class="agy-ctx-quota-left"> left</span>`);
+        if (quota.pct7d !== null && quota.pct7d !== undefined) {
+          qParts.push(`7d <strong class="agy-ctx-quota">${escHtml(quota.pct7d)}%</strong><span class="agy-ctx-quota-left"> left</span>`);
         }
         if (qParts.length) {
           quotaHtml = `<span class="agy-ctx-sep agy-ctx-sep-pipe">|</span><span class="agy-ctx-group agy-ctx-group-quota">${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;

@@ -2350,9 +2350,35 @@ describe('D-0015..D-0021 full audit regressions', () => {
       hostInfo.koTranslatorCode.endsWith('// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ==='),
       'D-0015: double-wrapped KO block must include the final outer end marker line'
     );
+
+    // Also verify future/versionless (?:_V\d+)? markers in hostBridge.fetchHostInstalledPluginInfo
+    const v3Bundle = [
+      'function mountStatusBar() {}',
+      '// === BEGIN_AGY_MCP_MANAGER_V2 ===',
+      'window.agyMcpManager = {};',
+      '// === END_AGY_MCP_MANAGER_V2 ===',
+      '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V3 ===',
+      'window.__agyKoThoughtCleanup = () => {};',
+      '// === END_AGY_KO_THOUGHT_LOCALIZER_V3 ===',
+    ].join('\n');
+    const v3Bytes = new TextEncoder().encode(v3Bundle);
+    fakeRc.proxyCommand = async (method) => {
+      if (String(method).includes('GetCustomizationStates')) {
+        return { payload: new TextEncoder().encode(JSON.stringify({ states: [] })) };
+      }
+      if (String(method).includes('ReadFile')) {
+        return { payload: new TextEncoder().encode(JSON.stringify({ contents: Buffer.from(v3Bytes).toString('base64') })) };
+      }
+      return { payload: new Uint8Array(0) };
+    };
+    const hostInfoV3 = await bridge.fetchHostInstalledPluginInfo({});
+    assert.equal(hostInfoV3.hasMcpManager, true, 'D-0015: host-bridge must support MCP_MANAGER_V2+ via (?:_V\\d+)?');
+    assert.equal(hostInfoV3.hasKoTranslator, true, 'D-0015: host-bridge must support KO_THOUGHT_LOCALIZER_V3+ via (?:_V\\d+)?');
   });
 
-  it('D-0016: ensure_statusbar_patch configureTargetViaCdp rejects on Runtime.evaluate exceptionDetails and requires all bundled plugins active', async () => {
+  it('D-0016: ensure_statusbar_patch rejects on exceptionDetails, avoids expectsKo/expectsMcp false positives, and falls back to Electron 35+ Browser CDP WS', async () => {
+    const http = require('node:http');
+    const crypto = require('node:crypto');
     const patcherSrc = fs.readFileSync(SRC_PATCHER_PATH, 'utf8').replace(/^#!.*\n/, '');
     let nextWsBehavior = null;
     let lastSentPayload = null;
@@ -2451,17 +2477,227 @@ describe('D-0015..D-0021 full audit regressions', () => {
       'D-0016: when one bundled companion plugin is inactive, CDP guard must re-inject instead of returning ALREADY_ACTIVE'
     );
     assert.equal(partialWin.__injectedRuns, 1);
+
+    // Case C: Real standalone dist/statusbar_autoinject.js contains win.__agyKoThoughtCleanup reference;
+    // in a 1-plugin solo installation (no KO installed), guard MUST return ALREADY_ACTIVE (must NOT set expectsKo=true)!
+    const { bundle: soloSbBundle } = buildBundle({ write: false });
+    await ctx.__testConfigureCdp('ws://127.0.0.1:9222/devtools/page/1', soloSbBundle, 'hash-solo-sb', 1000);
+    const soloGuardOnly = lastSentPayload.params.expression.replace(soloSbBundle, 'window.__soloReinjected = true;');
+    const soloActiveWin = {
+      agyStatusBar: {},
+      __agyStatusBarCleanup: () => {},
+      __agyStatusBarHash: 'hash-solo-sb',
+      document: { querySelector: () => null },
+    };
+    soloActiveWin.window = soloActiveWin;
+    assert.equal(
+      vm.runInNewContext(soloGuardOnly, soloActiveWin),
+      'ALREADY_ACTIVE',
+      'D-0016: standalone statusbar bundle must NOT falsely set expectsKo=true from win.__agyKoThoughtCleanup reference'
+    );
+
+    // Case D: 2-plugin (SB + KO) bundle where KO contains indented BEGIN_AGY_MCP_MANAGER_V1 string literal -> must NOT set expectsMcp=true
+    const sbPlusKoBundle = [
+      soloSbBundle,
+      '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+      "  const m = '// === BEGIN_AGY_MCP_MANAGER_V1 ===';",
+      '  window.__agyKoThoughtCleanup = () => {};',
+      '// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+    ].join('\n');
+    await ctx.__testConfigureCdp('ws://127.0.0.1:9222/devtools/page/1', sbPlusKoBundle, 'hash-sb-ko', 1000);
+    const sbKoGuardOnly = lastSentPayload.params.expression.replace(sbPlusKoBundle, 'window.__sbKoReinjected = true;');
+    const sbKoActiveWin = {
+      agyStatusBar: {},
+      __agyStatusBarCleanup: () => {},
+      __agyKoThoughtCleanup: () => {},
+      __agyStatusBarHash: 'hash-sb-ko',
+      document: { querySelector: () => null },
+    };
+    sbKoActiveWin.window = sbKoActiveWin;
+    assert.equal(
+      vm.runInNewContext(sbKoGuardOnly, sbKoActiveWin),
+      'ALREADY_ACTIVE',
+      'D-0016: SB+KO bundle with indented MCP marker literal must NOT falsely set expectsMcp=true'
+    );
+
+    // Case E: Electron 35+ (Antigravity v2.31.0) where /json/list returns [] -> must fall back to DevToolsActivePort line 2 Browser CDP WS
+    const cdpMethodsSeen = [];
+    const sendWsFrame = (socket, obj) => {
+      const payload = Buffer.from(JSON.stringify(obj), 'utf8');
+      let hdr;
+      if (payload.length < 126) {
+        hdr = Buffer.from([0x81, payload.length]);
+      } else {
+        hdr = Buffer.alloc(4);
+        hdr[0] = 0x81;
+        hdr[1] = 126;
+        hdr.writeUInt16BE(payload.length, 2);
+      }
+      socket.write(Buffer.concat([hdr, payload]));
+    };
+    const server = http.createServer((req, res) => {
+      if (req.url === '/json/list') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('[]');
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    server.on('upgrade', (req, socket) => {
+      if (req.url !== '/devtools/browser/test-browser-id') {
+        socket.destroy();
+        return;
+      }
+      const key = req.headers['sec-websocket-key'];
+      const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+      );
+      let recvBuf = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        recvBuf = Buffer.concat([recvBuf, chunk]);
+        while (recvBuf.length >= 2) {
+          const opcode = recvBuf[0] & 0x0f;
+          if (opcode === 0x08) {
+            socket.end();
+            return;
+          }
+          const masked = (recvBuf[1] & 0x80) !== 0;
+          let len = recvBuf[1] & 0x7f;
+          let offset = 2;
+          if (len === 126) {
+            if (recvBuf.length < 4) return;
+            len = recvBuf.readUInt16BE(2);
+            offset = 4;
+          } else if (len === 127) {
+            if (recvBuf.length < 10) return;
+            len = Number(recvBuf.readBigUInt64BE(2));
+            offset = 10;
+          }
+          const maskLen = masked ? 4 : 0;
+          if (recvBuf.length < offset + maskLen + len) return;
+          const body = Buffer.from(recvBuf.subarray(offset + maskLen, offset + maskLen + len));
+          if (masked) {
+            const mask = recvBuf.subarray(offset, offset + 4);
+            for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+          }
+          recvBuf = recvBuf.subarray(offset + maskLen + len);
+          const msg = JSON.parse(body.toString('utf8'));
+          cdpMethodsSeen.push(msg.method);
+          if (msg.method === 'Target.getTargets') {
+            sendWsFrame(socket, {
+              id: msg.id,
+              result: {
+                targetInfos: [
+                  { targetId: 'page-1', type: 'page', url: 'https://127.0.0.1:51234/workbench.html' },
+                  { targetId: 'dev-1', type: 'page', url: 'devtools://devtools/bundled/inspector.html' },
+                ],
+              },
+            });
+          } else if (msg.method === 'Target.attachToTarget') {
+            sendWsFrame(socket, { id: msg.id, result: { sessionId: 'flat-sess-1' } });
+          } else if (msg.method === 'Runtime.evaluate' && msg.sessionId === 'flat-sess-1') {
+            sendWsFrame(socket, {
+              id: msg.id,
+              sessionId: 'flat-sess-1',
+              result: { result: { type: 'string', value: 'INJECTED_OK' } },
+            });
+          } else if (msg.method === 'Target.detachFromTarget') {
+            sendWsFrame(socket, { id: msg.id, result: {} });
+          }
+        }
+      });
+    });
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    try {
+      const fakeHome = '/virtual-cdp-home';
+      const fakeAppData = '/virtual-cdp-appdata';
+      const autoPath = path.join(fakeHome, '.gemini', 'antigravity', 'statusbar_autoinject.js');
+      const portFilePath = path.join(fakeAppData, 'Antigravity', 'DevToolsActivePort');
+      const customReq = (spec) => {
+        if (spec === 'fs') {
+          return {
+            existsSync: (p) => p === autoPath || p === portFilePath,
+            readFileSync: (p) => {
+              if (p === autoPath) return 'function mountStatusBar() {}\nwindow.__ok = 1;\n';
+              if (p === portFilePath) return `${port}\n/devtools/browser/test-browser-id\n`;
+              return '';
+            },
+          };
+        }
+        return require(spec);
+      };
+      const liveCtx = vm.createContext({
+        require: customReq,
+        module: { exports: {} },
+        exports: {},
+        __dirname: path.dirname(SRC_PATCHER_PATH),
+        __filename: SRC_PATCHER_PATH,
+        process: {
+          ...process,
+          env: { USERPROFILE: fakeHome, HOME: fakeHome, APPDATA: fakeAppData },
+          argv: [process.execPath, SRC_PATCHER_PATH],
+          exit() {},
+        },
+        WebSocket,
+        Buffer,
+        setTimeout,
+        clearTimeout,
+        console,
+      });
+      new vm.Script(
+        patcherSrc + '\n;globalThis.__testInjectLive = injectViaCdpLive;',
+        { filename: 'ensure_statusbar_patch.js' }
+      ).runInContext(liveCtx);
+
+      const liveRes = await liveCtx.__testInjectLive();
+      assert.equal(liveRes.pageTargetCount, 1, 'D-0016: Browser CDP WS fallback must discover 1 injectable page target when /json/list is []');
+      assert.equal(liveRes.injectedCount, 1, 'D-0016: Browser CDP WS fallback must inject via Target.attachToTarget + Runtime.evaluate');
+      assert.ok(cdpMethodsSeen.includes('Target.getTargets'));
+      assert.ok(cdpMethodsSeen.includes('Target.attachToTarget'));
+      assert.ok(cdpMethodsSeen.includes('Target.detachFromTarget'));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
-  it('D-0017: scripts/build.js preserves blank lines, // lines, and zero-indentation inside multiline template literals', () => {
+  it('D-0017: scripts/build.js preserves multiline template literals across regex literals (/\\/*/, /`/, /^file:\\/\\//i, /"/g, [/])', () => {
     const buildSrc = fs.readFileSync(SRC_BUILD_PATH, 'utf8').replace(/^#!.*\n/, '');
     const sampleTemplate = [
       'const tpl = `first line',
       '',
       '// comment-like line inside template literal',
       'no-indent line`;',
+      'const rBlockLookalike = /\\/*/;',
+      'const tplAfterBlockRegex = `a1',
+      '',
+      '// keep-after-block-regex',
+      'b1`;',
+      'const rBacktick = /`/;',
+      'const tplAfterBacktickRegex = `a2',
+      '',
+      '// keep-after-backtick-regex',
+      'b2`;',
+      "const rFileScheme = 'file:///tmp'.replace(/^file:\\/\\//i, `a3",
+      '',
+      '// keep-after-file-regex',
+      'b3`);',
+      'const rQuote = \'"\'.replace(/"/g, `a4',
+      '',
+      '// keep-after-quote-regex',
+      'b4`);',
+      "const rCharClass = '/web/2.31/x'.match(/\\/web\\/([^/]+)/)[1] + `a5",
+      '',
+      '// keep-after-charclass-regex',
+      'b5`;',
       '// real comment to strip',
-      'module.exports = { tpl };',
+      'module.exports = { tpl, rBlockLookalike: Boolean(rBlockLookalike), tplAfterBlockRegex, tplAfterBacktickRegex, rFileScheme, rQuote, rCharClass };',
     ].join('\n');
 
     const customRequire = (spec) => {
@@ -2492,9 +2728,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
     });
     new vm.Script(buildSrc, { filename: 'build.js' }).runInContext(ctx);
     const { bundle } = mod.exports.buildBundle({ write: false });
-    const evalMod = { exports: {} };
     const evalBox = vm.createContext({});
-    // Capture exported value by replacing final `__require('.', './index');` with global assignment
     const runnable = bundle.replace("__require('.', './index');", "globalThis.__out = __require('.', './index');");
     evalBox.globalThis = evalBox;
     new vm.Script(runnable).runInContext(evalBox);
@@ -2503,9 +2737,14 @@ describe('D-0015..D-0021 full audit regressions', () => {
       'first line\n\n// comment-like line inside template literal\nno-indent line',
       'D-0017: bundler must preserve blank lines, // prefixes, and indentation inside multiline template literals'
     );
+    assert.equal(evalBox.__out.tplAfterBlockRegex, 'a1\n\n// keep-after-block-regex\nb1', 'D-0017: /\\/*/ regex must not trigger block comment state');
+    assert.equal(evalBox.__out.tplAfterBacktickRegex, 'a2\n\n// keep-after-backtick-regex\nb2', 'D-0017: /`/ regex must not corrupt template stack');
+    assert.equal(evalBox.__out.rFileScheme, 'a3\n\n// keep-after-file-regex\nb3/tmp', 'D-0017: /^file:\\/\\//i regex must not prematurely break line scan');
+    assert.equal(evalBox.__out.rQuote, 'a4\n\n// keep-after-quote-regex\nb4', 'D-0017: /"/g regex must not corrupt double-quote state');
+    assert.equal(evalBox.__out.rCharClass, '2.31a5\n\n// keep-after-charclass-regex\nb5', 'D-0017: [/] inside regex character class must not terminate regex early');
   });
 
-  it('D-0018: context-window-policy encodes cookie-only session overrides for server sync and enforces 200-entry cap on bulk maps', () => {
+  it('D-0018: context-window-policy syncs cookie-only session overrides even when remote activeProfile is absent and enforces 200-entry cap', () => {
     const lsMap = new Map();
     const fakeLs = {
       getItem: (k) => (lsMap.has(k) ? lsMap.get(k) : null),
@@ -2513,9 +2752,19 @@ describe('D-0015..D-0021 full audit regressions', () => {
       removeItem: (k) => lsMap.delete(k),
     };
     const cookieOnlyStore = createContextWindowStore({
-      document: { cookie: 'agy_cw_cookie-push-cid=900K%7C1793900000000; agy_default_cw=512K' },
+      document: { cookie: 'agy_cw_cookie-push-cid=900K%7C1793900000000; agy_cw_cookie-no-remote-profile=750K; agy_default_cw=512K' },
       localStorage: fakeLs,
     });
+    // Before calling getSavedContextWindow or encodeRemoteAnnotationProfile, syncFromRemoteAnnotations runs
+    // with a trajectory summary that has NO annotations.activeProfile yet (`parsed === null`):
+    const syncNoProfile = cookieOnlyStore.syncFromRemoteAnnotations({
+      'cookie-no-remote-profile': { stepCount: 5, annotations: {} },
+    });
+    assert.ok(
+      syncNoProfile.unsyncedLocalIds.includes('cookie-no-remote-profile'),
+      'D-0018: cookie-only override must be hydrated before !parsed continue so unsyncedLocalIds queues pushSessionCwToServer'
+    );
+
     const encoded = cookieOnlyStore.encodeRemoteAnnotationProfile('cookie-push-cid');
     assert.ok(
       typeof encoded === 'string' && encoded.includes('900K'),
@@ -2578,7 +2827,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.deepEqual(Array.from(with900k.subarray(baseMsg.length)), Array.from(suffix900k));
   });
 
-  it('D-0020: __agyStatusBarCleanup unmounts registered adapters, removes injected style tag, and clears window.agyStatusBar', () => {
+  it('D-0020: STATUSBAR_VERSION upgrades from v28 via cleanup and __agyStatusBarCleanup unmounts adapters, removes style tag, and clears globals', () => {
+    assert.notEqual(STATUSBAR_VERSION, 'v28', 'D-0020: STATUSBAR_VERSION must be bumped past v28 so v1.3.22 windows run cleanup on upgrade');
     const styleEl = { id: 'agy-ctx-statusbar-style', removed: false, remove() { this.removed = true; } };
     const headChildren = [];
     const fakeDoc = {
@@ -2619,7 +2869,13 @@ describe('D-0015..D-0021 full audit regressions', () => {
       querySelector: () => null,
       querySelectorAll: () => [],
     };
+    let v28CleanedUp = 0;
     const fakeWin = {
+      __agyStatusBarActiveVersion: 'v28',
+      agyStatusBar: { version: 'v28', legacy: true },
+      __agyStatusBarCleanup() {
+        v28CleanedUp += 1;
+      },
       document: fakeDoc,
       localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
       setInterval: () => 1,
@@ -2628,6 +2884,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
     };
 
     const api = mountStatusBar({ window: fakeWin, document: fakeDoc });
+    assert.equal(v28CleanedUp, 1, 'D-0020: mounting over an active v28 instance must invoke prior __agyStatusBarCleanup()');
+    assert.equal(api.version, STATUSBAR_VERSION);
     let customUnmounted = 0;
     api.registerAdapter({
       id: 'cleanup-probe-adapter',
@@ -2644,10 +2902,18 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.equal(fakeWin.agyStatusBar, undefined, 'D-0020: __agyStatusBarCleanup must clear window.agyStatusBar');
   });
 
-  it('D-0021: README.md and README.ko.md match actual runtime API paths and remote annotation key', () => {
+  it('D-0021: README.md and README.ko.md match package version, STATUSBAR_VERSION, test count (24/24), and runtime API paths', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
     const readmeEn = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
     const readmeKo = fs.readFileSync(path.join(__dirname, '..', 'README.ko.md'), 'utf8');
 
+    const expectedHeader = `# antigravity-statusbar (\`v${pkg.version}\` / \`${STATUSBAR_VERSION}\`)`;
+    assert.ok(readmeEn.startsWith(expectedHeader), `D-0021: README.md title must start with ${expectedHeader}`);
+    assert.ok(readmeKo.startsWith(expectedHeader), `D-0021: README.ko.md title must start with ${expectedHeader}`);
+    assert.equal(readmeEn.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.md');
+    assert.equal(readmeKo.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.ko.md');
+    assert.ok(readmeEn.includes('30/30'), 'D-0021: README.md must state 30/30 tests');
+    assert.ok(readmeKo.includes('30/30'), 'D-0021: README.ko.md must state 30/30 tests');
     assert.equal(readmeEn.includes('getContextEstimate()'), false, 'D-0021: README.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeKo.includes('getContextEstimate()'), false, 'D-0021: README.ko.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeEn.includes('agyCwLimit'), false, 'D-0021: README.md must not reference stale agyCwLimit key');
@@ -2656,5 +2922,459 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.ok(readmeKo.includes('contextWindowUsage.estimatedAfterCompaction'), 'D-0021: README.ko.md must document contextWindowUsage.estimatedAfterCompaction');
     assert.ok(readmeEn.includes('activeProfile'), 'D-0021: README.md must document annotations.activeProfile');
     assert.ok(readmeKo.includes('activeProfile'), 'D-0021: README.ko.md must document annotations.activeProfile');
+  });
+
+  it('D-0022: injectCheckpointLimitIntoSendRequest skips cascade_config when continue_after_injection is true and merges existing binary field 5 without duplicate tags', () => {
+    const { createHostBridge } = require('../src/host-bridge');
+    const sendPath = '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage';
+    const bridge = createHostBridge({
+      window: {},
+      document: { cookie: '' },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      cwStore: {
+        getSavedContextWindow: () => '384K',
+        getLimit: () => 393216,
+      },
+    });
+
+    // 1. JSON requests with continueAfterInjection / continue_after_injection = true MUST NOT get cascadeConfig injected
+    const jsonContCamel = JSON.stringify({ cascadeId: 'cid-1', continueAfterInjection: true });
+    const outJsonCamel = JSON.parse(bridge.injectCheckpointLimitIntoSendRequest(sendPath, jsonContCamel));
+    assert.equal(outJsonCamel.cascadeConfig, undefined, 'D-0022: JSON continueAfterInjection=true must not inject cascadeConfig');
+    assert.equal(outJsonCamel.cascade_config, undefined, 'D-0022: JSON continueAfterInjection=true must not inject cascade_config');
+
+    const jsonContSnake = JSON.stringify({ cascade_id: 'cid-1', continue_after_injection: true });
+    const outJsonSnake = JSON.parse(bridge.injectCheckpointLimitIntoSendRequest(sendPath, jsonContSnake));
+    assert.equal(outJsonSnake.cascadeConfig, undefined, 'D-0022: JSON continue_after_injection=true must not inject cascadeConfig');
+    assert.equal(outJsonSnake.cascade_config, undefined, 'D-0022: JSON continue_after_injection=true must not inject cascade_config');
+
+    // 2. Protobuf binary request with field 20 (tag = (20 << 3) | 0 = 160 = 0xa0 0x01, val = 1) MUST NOT get field 5 (0x2a) appended
+    const pbContinueTrue = Uint8Array.from([
+      0x0a, 0x05, 0x63, 0x69, 0x64, 0x2d, 0x31, // field 1: cascade_id = "cid-1"
+      0xa0, 0x01, 0x01, // field 20: continue_after_injection = true
+    ]);
+    const outPbCont = bridge.injectCheckpointLimitIntoSendRequest(sendPath, pbContinueTrue);
+    assert.deepEqual(
+      Array.from(outPbCont),
+      Array.from(pbContinueTrue),
+      'D-0022: Protobuf request with field 20 continue_after_injection=1 must be passed through untouched'
+    );
+
+    // Connect-framed Protobuf with field 20 = 1 must also be untouched
+    const framedCont = new Uint8Array(5 + pbContinueTrue.length);
+    framedCont[0] = 0;
+    framedCont[4] = pbContinueTrue.length;
+    framedCont.set(pbContinueTrue, 5);
+    const outFramedCont = bridge.injectCheckpointLimitIntoSendRequest(sendPath, framedCont);
+    assert.deepEqual(
+      Array.from(outFramedCont),
+      Array.from(framedCont),
+      'D-0022: Connect-framed Protobuf with continue_after_injection=1 must be passed through untouched'
+    );
+
+    // 3. Binary Protobuf request that ALREADY has field 5 (cascade_config) containing field 1 (planner_config = {0x08, 0x01})
+    //    must merge field 2 (checkpoint_config) inside the existing field 5 instead of emitting two top-level 0x2a fields!
+    const validExistingCascadeCfg = Uint8Array.from([
+      0x0a, 0x02, 0x08, 0x01, // field 1: planner_config
+      0x12, 0x05, 0x30, 0x01, 0x28, 0x80, 0x10, // field 2: checkpoint_config { enabled(6)=1, max_token_limit(5)=2048 }
+    ]);
+    const pbWithExistingField5 = Uint8Array.from([
+      0x0a, 0x05, 0x63, 0x69, 0x64, 0x2d, 0x32, // field 1: "cid-2"
+      0x2a, validExistingCascadeCfg.length, ...validExistingCascadeCfg, // field 5: cascade_config
+    ]);
+    const mergedPb = bridge.injectCheckpointLimitIntoSendRequest(sendPath, pbWithExistingField5);
+    // Count top-level field 5 (0x2a) occurrences by walking top-level wire tags
+    let pos = 0;
+    let field5Count = 0;
+    let field5Bytes = null;
+    const readVarint = (b, o) => {
+      let val = 0, shift = 0, i = o;
+      while (i < b.length) {
+        const byte = b[i++];
+        val += (byte & 0x7f) * (2 ** shift);
+        if ((byte & 0x80) === 0) return { val, next: i };
+        shift += 7;
+      }
+      throw new Error('truncated varint');
+    };
+    while (pos < mergedPb.length) {
+      const tag = readVarint(mergedPb, pos);
+      pos = tag.next;
+      const wireType = tag.val & 0x07;
+      const fieldNo = tag.val >>> 3;
+      if (wireType === 0) {
+        pos = readVarint(mergedPb, pos).next;
+      } else if (wireType === 2) {
+        const len = readVarint(mergedPb, pos);
+        const start = len.next;
+        const end = start + len.val;
+        if (fieldNo === 5) {
+          field5Count += 1;
+          field5Bytes = mergedPb.subarray(start, end);
+        }
+        pos = end;
+      } else {
+        assert.fail(`Unexpected wireType ${wireType}`);
+      }
+    }
+    assert.equal(field5Count, 1, 'D-0022: merged Protobuf message must contain exactly ONE top-level field 5 (cascade_config)');
+    assert.ok(field5Bytes && field5Bytes[0] === 0x0a && field5Bytes[1] === 0x02, 'D-0022: sibling CascadeConfig field 1 (planner_config) must be preserved');
+  });
+
+  it('D-0023: ensure_statusbar_patch preserves // and /* inside strings/templates, parses NUL-padded ASAR headers, and skips non-http(s) / scriptJail frames', () => {
+    const patcher = require('../scripts/ensure_statusbar_patch');
+    const srcWithUrlAndStringComments = [
+      '"use strict";',
+      '// removable header comment line 1 about padding budget for statusbar injection code',
+      '// removable header comment line 2 with extra space so patched replacement fits easily',
+      '// removable header comment line 3 with extra space so patched replacement fits easily',
+      '// removable header comment line 4 with extra space so patched replacement fits easily',
+      '// removable header comment line 5 with extra space so patched replacement fits easily',
+      '// removable header comment line 6 with extra space so patched replacement fits easily',
+      '// removable header comment line 7 with extra space so patched replacement fits easily',
+      '// removable header comment line 8 with extra space so patched replacement fits easily',
+      'const tpl = `first line',
+      '// MUST_KEEP_TEMPLATE_SLASH_LINE',
+      '/* MUST_KEEP_TEMPLATE_BLOCK_COMMENT_LINE */',
+      'last line`;',
+      "    void win.loadURL(url);",
+      'module.exports = { tpl };',
+      '',
+    ].join('\n');
+
+    const origBuf = Buffer.from(srcWithUrlAndStringComments, 'utf8');
+    const outBuf = patcher.transformExactSize(
+      origBuf,
+      patcher.UTILS_ANCHOR_TARGET,
+      patcher.UTILS_ANCHOR_REPLACEMENT
+    );
+    assert.equal(outBuf.length, origBuf.length, 'D-0023: exact byte length must be preserved');
+    const outStr = outBuf.toString('utf8');
+    assert.ok(
+      outStr.includes('// MUST_KEEP_TEMPLATE_SLASH_LINE'),
+      'D-0023: transformExactSize must NOT delete // lines inside multiline template literals'
+    );
+    assert.ok(
+      outStr.includes('/* MUST_KEEP_TEMPLATE_BLOCK_COMMENT_LINE */'),
+      'D-0023: transformExactSize must NOT delete /* */ lines inside multiline template literals'
+    );
+    assert.ok(
+      patcher.MAIN_ANCHOR_REPLACEMENT.includes('isScriptJailSession') || patcher.MAIN_ANCHOR_REPLACEMENT.includes('getURL'),
+      'D-0023: MAIN_ANCHOR_REPLACEMENT must guard against scriptJail / non-http(s) frames'
+    );
+
+    // NUL-padded ASAR header test using temporary in-memory/tmpdir archive check
+    const os = require('node:os');
+    const tmpAsar = path.join(os.tmpdir(), `agy-sb-nul-asar-${process.pid}-${Date.now()}.asar`);
+    try {
+      const uBody = Buffer.from(`"use strict"; // ${patcher.PATCH_MARKER}\n`, 'utf8');
+      const mBody = Buffer.from(`"use strict"; // ${patcher.PATCH_MARKER}\n`, 'utf8');
+      const pBody = Buffer.from(`"use strict"; // ${patcher.PATCH_MARKER}\n`, 'utf8');
+      const hdrJson = JSON.stringify({
+        files: {
+          dist: {
+            files: {
+              'utils.js': { size: uBody.length, offset: '0' },
+              'main.js': { size: mBody.length, offset: String(uBody.length) },
+              'preload.js': { size: pBody.length, offset: String(uBody.length + mBody.length) },
+            },
+          },
+        },
+      });
+      const rawHdr = Buffer.from(hdrJson, 'utf8');
+      const paddedLen = rawHdr.length + 3; // deliberate trailing \0\0\0 included in strSize
+      const aligned = Math.ceil(paddedLen / 4) * 4;
+      const u8Size = 4 + aligned;
+      const u4Size = 4 + u8Size;
+      const prefix = Buffer.alloc(8 + u4Size, 0);
+      prefix.writeUInt32LE(4, 0);
+      prefix.writeUInt32LE(u4Size, 4);
+      prefix.writeUInt32LE(u8Size, 8);
+      prefix.writeUInt32LE(paddedLen, 12);
+      rawHdr.copy(prefix, 16);
+      fs.writeFileSync(tmpAsar, Buffer.concat([prefix, uBody, mBody, pBody]));
+      assert.equal(
+        patcher.isAsarPatchedFast(tmpAsar),
+        true,
+        'D-0023: isAsarPatchedFast must parse NUL-padded ASAR JSON header without SyntaxError'
+      );
+    } finally {
+      try { fs.unlinkSync(tmpAsar); } catch {}
+    }
+  });
+
+  it('D-0024: scripts/build.js handles string literals ending with even vs odd backslashes and validates src/ MODULE_ORDER completeness', () => {
+    const { stripCommentsAndEmptyLines } = require('../scripts/build');
+    const evenBackslashSource = "'unclosed\\\\\n// comment-after-even-backslash-must-strip\nconst x = 1;";
+    const strippedEven = stripCommentsAndEmptyLines(evenBackslashSource);
+    assert.equal(
+      strippedEven.includes('comment-after-even-backslash-must-strip'),
+      false,
+      'D-0024: line ending with even backslashes (\\\\) is NOT a line continuation and must not keep inSingle=true'
+    );
+
+    const oddBackslashSource = "'continued\\\n// keep-inside-continued-string\n';";
+    const strippedOdd = stripCommentsAndEmptyLines(oddBackslashSource);
+    assert.equal(
+      strippedOdd.includes('// keep-inside-continued-string'),
+      true,
+      'D-0024: line ending with odd backslashes (\\) IS a line continuation and must preserve next line inside string'
+    );
+
+    const vm = require('node:vm');
+    const buildPath = path.join(__dirname, '..', 'scripts', 'build.js');
+    const buildSrc = fs.readFileSync(buildPath, 'utf8').replace(/^#!.*\n/, '');
+    const customReq = (spec) => {
+      if (spec === 'fs') {
+        return {
+          ...fs,
+          readdirSync: (dir, opts) => {
+            const entries = fs.readdirSync(dir, opts);
+            if (path.resolve(String(dir)) === path.resolve(path.join(__dirname, '..', 'src'))) {
+              return [
+                ...entries,
+                opts && opts.withFileTypes
+                  ? { name: 'orphan-unlisted-module.js', isDirectory: () => false, isFile: () => true }
+                  : 'orphan-unlisted-module.js',
+              ];
+            }
+            return entries;
+          },
+          mkdirSync() {},
+          writeFileSync() {},
+        };
+      }
+      return require(spec);
+    };
+    const mod = { exports: {} };
+    new vm.Script(buildSrc).runInContext(vm.createContext({
+      require: customReq,
+      module: mod,
+      exports: mod.exports,
+      __dirname: path.dirname(buildPath),
+      __filename: buildPath,
+      process,
+      Buffer,
+      console,
+    }));
+    assert.throws(
+      () => mod.exports.buildBundle({ write: false }),
+      /orphan-unlisted-module\.js|MODULE_ORDER/,
+      'D-0024: buildBundle must fail fast when a src/*.js file is missing from MODULE_ORDER'
+    );
+  });
+
+  it('D-0025 & D-0026: multi-policy TrustedTypes + Blob fallback in companion loader, quota HTML escaping, empty title removal, bounded cascade maps, and iframe DOM cleanup', async () => {
+    // 1. Strict TrustedTypes that blocks agy-rc-* but allows 'default' policy
+    const appendedScripts = [];
+    const strictWin = {
+      location: { hostname: 'antigravity.google.com' },
+      trustedTypes: {
+        createPolicy(name, rules) {
+          if (name !== 'default') throw new TypeError(`Policy ${name} disallowed by CSP`);
+          return {
+            createScript: (s) => `TT_DEFAULT:${rules.createScript(s)}`,
+            createScriptURL: (u) => u,
+          };
+        },
+      },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: true,
+        hasKoTranslator: false,
+        mcpManagerCode: 'window.__mcpLoadedViaDefaultTT = true;',
+      },
+    };
+    const strictDoc = {
+      head: { appendChild(el) { appendedScripts.push(el); } },
+      createElement(tag) { return { tagName: tag, text: '', src: '' }; },
+      querySelector: () => null,
+    };
+    await ensureRemoteCompanionScripts(strictWin, strictDoc, null, null);
+    assert.equal(appendedScripts.length, 1, 'D-0025: companion script must be injected using fallback default TrustedTypes policy');
+    assert.ok(String(appendedScripts[0].text).startsWith('TT_DEFAULT:'), 'D-0025: default policy createScript must be used');
+
+    // 2. Adapter registry clears title attribute when dynamic title becomes empty string
+    const { createAdapterRegistry } = require('../src/adapter-registry');
+    let dynamicTitle = 'Initial Tooltip';
+    const slotChildren = [];
+    const fakeBtn = {
+      type: '',
+      className: '',
+      textContent: '',
+      title: '',
+      attrs: new Map(),
+      setAttribute(k, v) { this.attrs.set(k, String(v)); },
+      getAttribute(k) { return this.attrs.get(k) ?? null; },
+      removeAttribute(k) { this.attrs.delete(k); },
+      remove() {},
+    };
+    const reg = createAdapterRegistry({
+      window: {},
+      document: {
+        createElement: () => fakeBtn,
+        querySelectorAll: () => [],
+      },
+      setHtml() {},
+    });
+    reg.registerAdapter({
+      id: 'dyn-title-btn',
+      slot: 'right',
+      label: 'Btn',
+      title: () => dynamicTitle,
+      onClick() {},
+    });
+    const slotEl = {
+      children: slotChildren,
+      appendChild(c) { if (!slotChildren.includes(c)) slotChildren.push(c); return c; },
+      querySelector(sel) { return sel.includes('dyn-title-btn') && slotChildren.length ? fakeBtn : null; },
+      querySelectorAll: () => [],
+    };
+    reg.renderSlotAdapters(slotEl, 'right', {});
+    assert.equal(fakeBtn.getAttribute('title'), 'Initial Tooltip');
+    dynamicTitle = '';
+    reg.renderSlotAdapters(slotEl, 'right', {});
+    assert.equal(fakeBtn.getAttribute('title'), null, 'D-0026: empty dynamic title must remove stale title attribute');
+
+    // 3. core-metrics escapes quota strings against XSS
+    const { createCoreMetricsAdapter } = require('../src/adapters/core-metrics');
+    let capturedHtml = '';
+    const metricsAdapter = createCoreMetricsAdapter({
+      document: { createElement: () => ({ querySelector: () => null, querySelectorAll: () => [] }) },
+      setHtml(_el, html) { capturedHtml = html; },
+      cwStore: { getLimit: () => 262144, getQuotaHint: () => '256K' },
+      getConversationContextWindow: () => '256K',
+      setConversationContextWindow() {},
+      cycleConversationContextWindow() {},
+      updateAll() {},
+    });
+    const hostSpan = {
+      children: [],
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    };
+    metricsAdapter.render(hostSpan, {
+      cascadeId: 'c1',
+      currentCw: '256K',
+      stats: { used: 1000, cachePct: 50, cacheRead: 500 },
+      quota: { pct5h: 80, pct7d: 90, rst5h: '<img src=x onerror=alert(1)>' },
+    });
+    assert.equal(capturedHtml.includes('<img'), false, 'D-0025: core-metrics must HTML-escape quota.rst5h');
+
+    // 4. cleanupStatusBar cleans up .agy-ctx-statusbar and .agy-ctx-menu inside same-origin remote iframe too
+    let iframeBarRemoved = false;
+    let iframeMenuCleaned = false;
+    const iframeDoc = {
+      getElementById: () => null,
+      querySelectorAll(sel) {
+        if (sel === '.agy-ctx-statusbar') return [{ remove() { iframeBarRemoved = true; } }];
+        if (sel === '.agy-ctx-menu') return [{ __agyCleanup() { iframeMenuCleaned = true; } }];
+        return [];
+      },
+    };
+    const parentDoc = {
+      head: { appendChild() {} },
+      body: {},
+      createElement: () => ({ setAttribute() {}, remove() {} }),
+      getElementById: () => null,
+      querySelector(sel) {
+        if (sel === 'ga-remote-control iframe') return { contentDocument: iframeDoc };
+        return null;
+      },
+      querySelectorAll: () => [],
+    };
+    const parentWin = {
+      document: parentDoc,
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      setInterval: () => 1,
+      clearInterval() {},
+      MutationObserver: class { observe() {} disconnect() {} },
+    };
+    mountStatusBar({ window: parentWin, document: parentDoc });
+    parentWin.__agyStatusBarCleanup();
+    assert.equal(iframeBarRemoved, true, 'D-0026: cleanupStatusBar must remove .agy-ctx-statusbar inside same-origin remote iframe');
+    assert.equal(iframeMenuCleaned, true, 'D-0026: cleanupStatusBar must invoke __agyCleanup on .agy-ctx-menu inside same-origin remote iframe');
+  });
+
+  it('D-0027: host-adapter-config decouples RPC service prefix, CSRF header, remote host domain, and companion URLs from core modules', async () => {
+    const { resolveHostAdapterConfig, DEFAULT_HOST_ADAPTER_CONFIG } = require('../src/host-adapter-config');
+    const { createRpcClient } = require('../src/rpc-client');
+    assert.ok(DEFAULT_HOST_ADAPTER_CONFIG.rpcServicePrefix);
+    const customCfg = resolveHostAdapterConfig({
+      rpcServicePrefix: '/custom.vendor.v1.AgentService',
+      csrfHeaderName: 'x-custom-csrf',
+      remoteHostDomains: ['portal.custom-ide.example'],
+      companionScripts: {
+        mcpManagerUrl: 'https://cdn.custom-ide.example/mcp.js',
+        koTranslatorUrl: 'https://cdn.custom-ide.example/ko.js',
+      },
+    });
+    assert.equal(customCfg.buildRpcPath('RetrieveUserQuotaSummary'), '/custom.vendor.v1.AgentService/RetrieveUserQuotaSummary');
+
+    const seenRequests = [];
+    const rpc = createRpcClient({
+      window: { location: { protocol: 'https:', hostname: '127.0.0.1' } },
+      hostConfig: customCfg,
+      fetchFn: async (url, opts) => {
+        seenRequests.push({ url, headers: opts?.headers || {} });
+        return {
+          ok: true,
+          async json() {
+            return { groups: [] };
+          },
+        };
+      },
+      localStorage: { getItem: () => null, setItem() {} },
+    });
+    await rpc.fetchQuota('tok-custom-123');
+    assert.equal(seenRequests.length, 1);
+    assert.equal(seenRequests[0].url, '/custom.vendor.v1.AgentService/RetrieveUserQuotaSummary');
+    assert.equal(seenRequests[0].headers['x-custom-csrf'], 'tok-custom-123');
+    assert.equal(seenRequests[0].headers['x-codeium-csrf-token'], undefined);
+
+    const fetchedCompanionUrls = [];
+    const customRemoteWin = {
+      location: { hostname: 'portal.custom-ide.example' },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: true,
+        hasKoTranslator: false,
+      },
+    };
+    const customRemoteDoc = {
+      head: { appendChild() {} },
+      createElement: () => ({ text: '' }),
+      querySelector: () => null,
+    };
+    await ensureRemoteCompanionScripts(
+      customRemoteWin,
+      customRemoteDoc,
+      async (u) => {
+        fetchedCompanionUrls.push(u);
+        return { ok: true, async text() { return '// custom mcp'; } };
+      },
+      null,
+      customCfg
+    );
+    assert.equal(fetchedCompanionUrls.length, 1);
+    assert.ok(fetchedCompanionUrls[0].startsWith('https://cdn.custom-ide.example/mcp.js'));
+  });
+
+  it('D-0028 & D-0029: GitFlow CI workflow triggers, documentation templates, and pre-test specification exist and are consistent', () => {
+    const rootDir = path.join(__dirname, '..');
+    const ciYml = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'ci.yml'), 'utf8');
+    assert.ok(ciYml.includes('develop'), 'D-0028: ci.yml must trigger on develop branch');
+    assert.ok(ciYml.includes('fix/**'), 'D-0028: ci.yml must trigger on fix/** branches');
+    assert.ok(ciYml.includes('feature/**'), 'D-0028: ci.yml must trigger on feature/** branches');
+    assert.ok(ciYml.includes('workflow_dispatch'), 'D-0028: ci.yml must support workflow_dispatch');
+
+    assert.equal(fs.existsSync(path.join(rootDir, 'docs', 'templates', 'README_TEMPLATE.md')), true, 'D-0029: README_TEMPLATE.md must exist');
+    assert.equal(fs.existsSync(path.join(rootDir, 'docs', 'templates', 'RELEASE_NOTES_TEMPLATE.md')), true, 'D-0029: RELEASE_NOTES_TEMPLATE.md must exist');
+    assert.equal(fs.existsSync(path.join(rootDir, 'docs', 'TEST_CASES.md')), true, 'D-0029: docs/TEST_CASES.md must exist');
+
+    const relTpl = fs.readFileSync(path.join(rootDir, 'docs', 'templates', 'RELEASE_NOTES_TEMPLATE.md'), 'utf8');
+    assert.ok(relTpl.includes('[English]') && relTpl.includes('[한국어]'), 'D-0029: RELEASE_NOTES_TEMPLATE.md must contain both English and Korean inline sections');
   });
 });
