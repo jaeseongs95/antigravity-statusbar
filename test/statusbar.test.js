@@ -148,50 +148,159 @@ function createDomSandbox() {
     return: null,
   };
 
+  function serializeDomNode(n) {
+    if (!n) return '';
+    if (n.nodeType === 3) {
+      return String(n.nodeValue ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+    const tag = String(n.tagName || 'div').toLowerCase();
+    const attrMap = { ...(n.attrs || {}) };
+    if (n.id && attrMap.id === undefined) attrMap.id = n.id;
+    if (n.className && attrMap.class === undefined) attrMap.class = n.className;
+    if (n.type && attrMap.type === undefined) attrMap.type = n.type;
+    if (n.title && attrMap.title === undefined) attrMap.title = n.title;
+    if (n.style && typeof n.style === 'object') {
+      const styleParts = [];
+      for (const [k, v] of Object.entries(n.style)) {
+        if (k === 'cssText' || v === '' || v === null || v === undefined) continue;
+        const prop = k.replace(/([A-Z])/g, '-$1').toLowerCase();
+        styleParts.push(`${prop}:${v}`);
+      }
+      if (styleParts.length > 0) {
+        attrMap.style = styleParts.join(';');
+      }
+    }
+    const attrStr = Object.entries(attrMap)
+      .map(([k, v]) => ` ${k}="${String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`)
+      .join('');
+    if (tag === 'input' || tag === 'br' || tag === 'hr' || tag === 'img') {
+      return `<${tag}${attrStr}>`;
+    }
+    const inner =
+      Array.isArray(n.childNodes) && n.childNodes.length > 0
+        ? n.childNodes.map(serializeDomNode).join('')
+        : String(n._rawHtml || '');
+    return `<${tag}${attrStr}>${inner}</${tag}>`;
+  }
+
+  function matchesSimpleSelector(el, sel) {
+    if (!el || el.nodeType === 3 || el.isConnected === false) return false;
+    if (sel.startsWith('.')) {
+      const targetCls = sel.slice(1);
+      return String(el.className || '').split(/\s+/).includes(targetCls);
+    }
+    const m = sel.match(/^\[data-agy-adapter-id="([^"]+)"\]$/);
+    if (m) {
+      return el.getAttribute?.('data-agy-adapter-id') === m[1];
+    }
+    if (sel === '[data-agy-adapter-id]') {
+      return Boolean(el.getAttribute?.('data-agy-adapter-id'));
+    }
+    return String(el.tagName || '').toLowerCase() === sel.toLowerCase();
+  }
+
   function makeEl(tagName = 'div') {
-    return {
+    const el = {
+      nodeType: 1,
       tagName: String(tagName).toUpperCase(),
       id: '',
       className: '',
-      textContent: '',
+      _text: '',
+      _rawHtml: '',
       title: '',
       type: '',
-      innerHTML: '',
+      value: '',
+      placeholder: '',
+      style: {},
       isConnected: true,
       attrs: {},
       children: [],
+      childNodes: [],
+      firstChild: null,
       onclick: null,
       oncontextmenu: null,
+      get textContent() {
+        if (this.childNodes.length > 0) {
+          return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join('');
+        }
+        return this._text;
+      },
+      set textContent(v) {
+        this._rawHtml = '';
+        this.children = [];
+        this.childNodes = [];
+        const str = String(v ?? '');
+        this._text = str;
+        if (str) {
+          const tn = { nodeType: 3, nodeValue: str };
+          this.childNodes.push(tn);
+        }
+        this.firstChild = this.childNodes[0] || null;
+      },
+      get innerHTML() {
+        if (this.childNodes.length > 0) {
+          return this.childNodes.map(serializeDomNode).join('');
+        }
+        if (this._rawHtml) return this._rawHtml;
+        if (this._text) {
+          return String(this._text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        return '';
+      },
+      set innerHTML(v) {
+        this._rawHtml = String(v ?? '');
+        this._text = '';
+        this.children = [];
+        this.childNodes = [];
+        this.firstChild = null;
+      },
       getAttribute(k) { return this.attrs[k] ?? null; },
       setAttribute(k, v) { this.attrs[k] = String(v); },
+      removeAttribute(k) { delete this.attrs[k]; },
       appendChild(child) {
-        child.isConnected = true;
-        if (!this.children.includes(child)) this.children.push(child);
+        if (!child) return child;
+        if (child.nodeType !== 3) {
+          child.isConnected = true;
+          child.parentNode = this;
+          if (!this.children.includes(child)) this.children.push(child);
+        }
+        if (!this.childNodes.includes(child)) this.childNodes.push(child);
+        this.firstChild = this.childNodes[0] || null;
+        return child;
+      },
+      removeChild(child) {
+        this.children = this.children.filter((c) => c !== child);
+        this.childNodes = this.childNodes.filter((c) => c !== child);
+        this.firstChild = this.childNodes[0] || null;
         return child;
       },
       remove() {
         this.isConnected = false;
+        if (this.parentNode && typeof this.parentNode.removeChild === 'function') {
+          this.parentNode.removeChild(this);
+        }
       },
       querySelector(sel) {
-        if (sel === '.agy-ctx-left') return this.children.find((c) => c.className === 'agy-ctx-left') || null;
-        if (sel === '.agy-ctx-right') return this.children.find((c) => c.className === 'agy-ctx-right') || null;
-        const m = sel.match(/^\[data-agy-adapter-id="([^"]+)"\]$/);
-        if (m) {
-          return this.children.find((c) => c.isConnected !== false && c.getAttribute('data-agy-adapter-id') === m[1]) || null;
-        }
-        return null;
+        return this.querySelectorAll(sel)[0] || null;
       },
       querySelectorAll(sel) {
-        if (sel === '[data-agy-adapter-id]') {
-          return this.children.filter((c) => c.isConnected !== false && c.getAttribute('data-agy-adapter-id'));
-        }
-        const m = sel.match(/^\[data-agy-adapter-id="([^"]+)"\]$/);
-        if (m) {
-          return this.children.filter((c) => c.isConnected !== false && c.getAttribute('data-agy-adapter-id') === m[1]);
-        }
-        return [];
+        const results = [];
+        const walk = (parent) => {
+          for (const c of parent.children || []) {
+            if (matchesSimpleSelector(c, sel)) {
+              results.push(c);
+            }
+            walk(c);
+          }
+        };
+        walk(this);
+        return results;
       },
     };
+    return el;
   }
 
   const triggerEl = makeEl('button');
@@ -211,6 +320,8 @@ function createDomSandbox() {
         const rightSlot = makeEl('div');
         rightSlot.className = 'agy-ctx-right';
         el.children = [leftSlot, rightSlot];
+        el.childNodes = [leftSlot, rightSlot];
+        el.firstChild = leftSlot;
         mountedBarEl = el;
       }
       return el;
@@ -254,6 +365,7 @@ function createDomSandbox() {
       },
       querySelector() { return fakeView; },
       createElement(tag) { return makeEl(tag); },
+      createTextNode(txt) { return { nodeType: 3, nodeValue: String(txt ?? '') }; },
       addEventListener() {},
       removeEventListener() {},
     },
@@ -4088,6 +4200,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
       hasKoTranslator: false,
       mcpManagerCode: 'window.agyMcpManager = { version: "mock" };',
     };
+    let capturedPolicyRules = null;
     ttSb.window.trustedTypes = {
       createPolicy(name, rules) {
         if (name !== 'agy-statusbar') {
@@ -4097,6 +4210,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
           throw new TypeError(`Failed to execute 'createPolicy' on 'TrustedTypePolicyFactory': Policy with name '${name}' already exists.`);
         }
         createdPolicies.add(name);
+        capturedPolicyRules = rules;
         const pol = {};
         if (typeof rules.createHTML === 'function') {
           pol.createHTML = (s) => ({ __ttHtml: String(rules.createHTML(s)) });
@@ -4154,14 +4268,11 @@ describe('D-0015..D-0021 full audit regressions', () => {
           },
         });
       } else {
-        let _html = '';
+        const origDesc = Object.getOwnPropertyDescriptor(el, 'innerHTML');
         Object.defineProperty(el, 'innerHTML', {
-          get: () => _html,
-          set(v) {
-            if (typeof v !== 'object' || !v.__ttHtml) {
-              throw new TypeError("Failed to set the 'innerHTML' property on 'Element': This document requires 'TrustedHTML' assignment.");
-            }
-            _html = v.__ttHtml;
+          get: () => (origDesc && origDesc.get ? origDesc.get.call(el) : ''),
+          set() {
+            throw new TypeError("D-0032: innerHTML sink must never be invoked when rendering statusbar DOM.");
           },
         });
       }
@@ -4177,16 +4288,17 @@ describe('D-0015..D-0021 full audit regressions', () => {
       clearInterval: () => {},
     });
     await new Promise((r) => setTimeout(r, 40));
-    assert.ok(
-      ttSb.window.__agyTrustedTypesPolicy &&
-        typeof ttSb.window.__agyTrustedTypesPolicy.createHTML === 'function' &&
-        typeof ttSb.window.__agyTrustedTypesPolicy.createScript === 'function' &&
-        typeof ttSb.window.__agyTrustedTypesPolicy.createScriptURL === 'function',
-      'D-0032: shared __agyTrustedTypesPolicy must expose all 3 methods (createHTML, createScript, createScriptURL) without duplicate agy-statusbar policy collision'
+    assert.ok(capturedPolicyRules, 'D-0032: companion loader must register agy-statusbar policy');
+    assert.equal(
+      typeof capturedPolicyRules.createHTML,
+      'undefined',
+      'D-0032: TrustedTypes policy must NOT expose a passthrough createHTML callback'
     );
+    assert.equal(typeof capturedPolicyRules.createScript, 'function');
+    assert.equal(typeof capturedPolicyRules.createScriptURL, 'function');
     assert.ok(
       remoteScriptUrls.some((u) => u.startsWith('https://raw.githubusercontent.com/')),
-      'D-0032: companion loader must succeed using the single unified agy-statusbar TrustedTypes policy'
+      'D-0032: companion loader must succeed using the single strict agy-statusbar TrustedTypes policy'
     );
     ttSb.window.__agyStatusBarCleanup?.();
 
@@ -4510,5 +4622,131 @@ describe('D-0015..D-0021 full audit regressions', () => {
     } finally {
       fs.rmSync(raceHome, { recursive: true, force: true });
     }
+  });
+
+  it('SB-TC-035 Round-3 audit reopen (D-0020, D-0032): zero-innerHTML createTrustedHtmlSetter, strict allowlist TrustedTypes policy rejecting arbitrary scripts/URLs, and residual policy global cleanup', async () => {
+    const { createTrustedHtmlSetter } = require('../src/dom-styles');
+
+    // 1. D-0032: createTrustedHtmlSetter must NEVER call createPolicy and NEVER write innerHTML
+    let htmlPolicyCalls = 0;
+    const { sandbox: domSb } = createDomSandbox();
+    domSb.window.trustedTypes = {
+      createPolicy() {
+        htmlPolicyCalls += 1;
+        throw new Error('D-0032: createTrustedHtmlSetter must not create any TrustedTypes policy');
+      },
+    };
+    const hostSpan = domSb.document.createElement('span');
+    Object.defineProperty(hostSpan, 'innerHTML', {
+      get: () => hostSpan.childNodes.map((c) => c.textContent || '').join(''),
+      set() {
+        throw new TypeError('D-0032: innerHTML assignment is strictly forbidden');
+      },
+    });
+    const setHtml = createTrustedHtmlSetter(domSb.window, domSb.document);
+    setHtml(hostSpan, '<strong class="agy-ctx-pct-val">77%</strong><script>evil()</script>');
+    assert.equal(htmlPolicyCalls, 0, 'D-0032: createTrustedHtmlSetter must make zero createPolicy calls');
+    assert.equal(hostSpan.querySelector('.agy-ctx-pct-val')?.textContent, '77%');
+    assert.equal(hostSpan.querySelector('script'), null);
+
+    // 2. D-0032: Companion TrustedTypes policy must NOT expose createHTML and MUST reject arbitrary scripts & untrusted URLs
+    let capturedRules = null;
+    const inlineCodeSample = 'window.agyMcpManager = { version: "1.4.18" };';
+    const strictWin = {
+      location: { protocol: 'https:', hostname: 'antigravity.google.com', href: 'https://antigravity.google.com/' },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: true,
+        hasKoTranslator: false,
+        mcpManagerCode: inlineCodeSample,
+      },
+      trustedTypes: {
+        createPolicy(name, rules) {
+          capturedRules = rules;
+          return {
+            name,
+            createScript: (s) => ({ __brand: 'script', val: rules.createScript(s) }),
+            createScriptURL: (u) => ({ __brand: 'url', val: rules.createScriptURL(u) }),
+          };
+        },
+      },
+    };
+    const strictDoc = {
+      head: {
+        appendChild(el) {
+          if (el.text && el.text.__brand === 'script') {
+            strictWin.agyMcpManager = { version: '1.4.18' };
+          }
+          return el;
+        },
+      },
+      createElement(tag) {
+        return { tagName: tag.toUpperCase() };
+      },
+      querySelector: () => null,
+    };
+    await ensureRemoteCompanionScripts(strictWin, strictDoc, null, null);
+    assert.ok(capturedRules, 'D-0032: strict TrustedTypes policy rules must be created');
+    assert.equal(typeof capturedRules.createHTML, 'undefined', 'D-0032: createHTML must NOT exist on TrustedTypes policy');
+    assert.throws(
+      () => capturedRules.createScript('alert(1)'),
+      TypeError,
+      'D-0032: arbitrary inline script must be rejected with TypeError'
+    );
+    assert.throws(
+      () => capturedRules.createScript(inlineCodeSample),
+      TypeError,
+      'D-0032: one-shot inline script token must be revoked immediately after injection'
+    );
+    assert.throws(
+      () => capturedRules.createScriptURL('javascript:alert(1)'),
+      TypeError,
+      'D-0032: javascript: URL must be rejected with TypeError'
+    );
+    assert.throws(
+      () => capturedRules.createScriptURL('http://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'),
+      TypeError,
+      'D-0032: plaintext http: URL must be rejected with TypeError'
+    );
+    assert.throws(
+      () => capturedRules.createScriptURL('https://evil.example/pwn.js'),
+      TypeError,
+      'D-0032: untrusted external domain must be rejected with TypeError'
+    );
+    assert.throws(
+      () => capturedRules.createScriptURL('blob:https://antigravity.google.com/unregistered-forged-blob'),
+      TypeError,
+      'D-0032: forged unregistered blob: URL must be rejected with TypeError'
+    );
+    assert.equal(
+      capturedRules.createScriptURL('https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js?t=12345'),
+      'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js?t=12345',
+      'D-0032: allowlisted official https: companion script URL must be permitted'
+    );
+
+    // 3. D-0020: cleanupStatusBar() must clean up residual __agyTrustedTypesPolicy / __agyTrustedHtmlPolicy when companion is inactive
+    const { sandbox: cleanSb } = createDomSandbox();
+    cleanSb.window.__agyTrustedTypesPolicy = { legacy: true };
+    cleanSb.window.__agyTrustedHtmlPolicy = { legacy: true };
+    mountStatusBar({
+      window: cleanSb.window,
+      document: cleanSb.document,
+      localStorage: cleanSb.localStorage,
+      fetch: async () => ({ ok: true, json: async () => ({}) }),
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
+    cleanSb.window.__agyStatusBarCleanup();
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(cleanSb.window, '__agyTrustedTypesPolicy'),
+      false,
+      'D-0020: cleanupStatusBar must delete window.__agyTrustedTypesPolicy when companion is inactive'
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(cleanSb.window, '__agyTrustedHtmlPolicy'),
+      false,
+      'D-0020: cleanupStatusBar must delete window.__agyTrustedHtmlPolicy when companion is inactive'
+    );
   });
 });

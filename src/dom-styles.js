@@ -583,74 +583,12 @@ function renderHtmlViaSafeDomBuilder(doc, rootEl, rawHtml) {
   }
 }
 
-function isCompleteTrustedTypesPolicy(p) {
-  return Boolean(
-    p &&
-      typeof p.createHTML === 'function' &&
-      typeof p.createScript === 'function' &&
-      typeof p.createScriptURL === 'function'
-  );
-}
-
-function resolveAgyTrustedTypesPolicy(window, requiredMethod) {
-  const existingCandidates = [window?.__agyTrustedTypesPolicy, window?.__agyTrustedHtmlPolicy].filter(Boolean);
-  for (const cand of existingCandidates) {
-    if (isCompleteTrustedTypesPolicy(cand)) {
-      try {
-        window.__agyTrustedTypesPolicy = cand;
-        window.__agyTrustedHtmlPolicy = cand;
-      } catch {}
-      return cand;
-    }
-  }
-  if (window?.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
-    const names = [
-      'agy-statusbar',
-      'agy-statusbar-companion',
-      'agy-statusbar-html',
-      'agy-statusbar-' + Date.now(),
-    ];
-    for (const name of names) {
-      try {
-        const p = window.trustedTypes.createPolicy(name, {
-          createHTML: (s) => String(s ?? ''),
-          createScript: (s) => String(s ?? ''),
-          createScriptURL: (u) => String(u ?? ''),
-        });
-        if (p) {
-          try {
-            window.__agyTrustedTypesPolicy = p;
-            window.__agyTrustedHtmlPolicy = p;
-          } catch {}
-          return p;
-        }
-      } catch {}
-    }
-  }
-  if (requiredMethod) {
-    for (const cand of existingCandidates) {
-      if (typeof cand[requiredMethod] === 'function') return cand;
-    }
-  }
-  return existingCandidates[0] || null;
-}
-
-function createTrustedHtmlSetter(window, document) {
-  const policy = resolveAgyTrustedTypesPolicy(window, 'createHTML');
-  if (policy && typeof policy.createHTML === 'function') {
-    return (el, html) => {
-      try {
-        el.innerHTML = policy.createHTML(html);
-      } catch {
-        renderHtmlViaSafeDomBuilder(document, el, html);
-      }
-    };
-  }
+function createTrustedHtmlSetter(_window, document) {
   return (el, html) => {
-    try {
-      el.innerHTML = html;
-    } catch {
+    if (document && typeof document.createElement === 'function') {
       renderHtmlViaSafeDomBuilder(document, el, html);
+    } else if (el && typeof el === 'object') {
+      el.textContent = decodeHtmlEntities(String(html ?? '').replace(/<[^>]*>/g, ''));
     }
   };
 }
@@ -701,7 +639,6 @@ module.exports = {
   STYLE_CSS,
   buildDynamicCwWarnCss,
   ensureStyleElement,
-  resolveAgyTrustedTypesPolicy,
   createTrustedHtmlSetter,
   fmtK,
   fmtNum,

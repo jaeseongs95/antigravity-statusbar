@@ -5,6 +5,7 @@ const DEFAULT_HOST_ADAPTER_CONFIG = Object.freeze({
   csrfHeaderName: 'x-codeium-csrf-token',
   remoteHostDomains: Object.freeze(['antigravity.google.com']),
   staticCdnOrigins: Object.freeze(['https://antigravity.static.usercontent.goog']),
+  cdnOrigin: 'https://www.gstatic.com/antigravity',
   companionScripts: Object.freeze({
     mcpManagerUrl:
       'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
@@ -12,6 +13,16 @@ const DEFAULT_HOST_ADAPTER_CONFIG = Object.freeze({
       'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
   }),
 });
+
+function normalizeHttpsBaseUrl(raw, fallback) {
+  try {
+    const u = new URL(String(raw || '').trim());
+    if (u.protocol === 'https:' && !u.username && !u.password) {
+      return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+    }
+  } catch {}
+  return fallback;
+}
 
 function resolveHostAdapterConfig(overrides, win) {
   if (overrides && typeof overrides.buildRpcPath === 'function' && typeof overrides.isRemoteHost === 'function') {
@@ -40,6 +51,7 @@ function resolveHostAdapterConfig(overrides, win) {
   const staticCdnOrigins = Array.isArray(src.staticCdnOrigins) && src.staticCdnOrigins.length > 0
     ? src.staticCdnOrigins.map((o) => String(o).trim()).filter(Boolean)
     : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
+  const cdnOrigin = normalizeHttpsBaseUrl(src.cdnOrigin, DEFAULT_HOST_ADAPTER_CONFIG.cdnOrigin);
   const companionScripts = {
     ...DEFAULT_HOST_ADAPTER_CONFIG.companionScripts,
     ...(winCfg?.companionScripts || {}),
@@ -51,6 +63,7 @@ function resolveHostAdapterConfig(overrides, win) {
     csrfHeaderName,
     remoteHostDomains,
     staticCdnOrigins,
+    cdnOrigin,
     companionScripts,
     buildRpcPath(methodName) {
       const clean = String(methodName || '').replace(/^\/+/, '');
