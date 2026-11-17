@@ -580,15 +580,45 @@ function acquireFileLock(lockPath, token, staleMs = LOCK_STALE_MS) {
     const staleTmp = `${lockPath}.stale.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
     try {
       fs.renameSync(lockPath, staleTmp);
-      try { fs.unlinkSync(staleTmp); } catch {}
     } catch {
       return false;
     }
+    try {
+      const displacedStat = fs.statSync(staleTmp);
+      const displacedAgeMs = Date.now() - displacedStat.mtimeMs;
+      const displacedInfo = JSON.parse(fs.readFileSync(staleTmp, 'utf8'));
+      const displacedPid = Number(displacedInfo?.pid || 0);
+      const displacedAlive = displacedPid > 0 && isProcessAlive(displacedPid);
+      const displacedStillStale =
+        (displacedPid > 0 && !displacedAlive) ||
+        (!displacedAlive && displacedAgeMs > staleMs) ||
+        displacedAgeMs > staleMs * 10;
+      if (!displacedStillStale) {
+        restoreDisplacedLockFile(staleTmp, lockPath);
+        return false;
+      }
+    } catch {}
+    try { fs.unlinkSync(staleTmp); } catch {}
     writeLockPayload(lockPath, token);
     return true;
   } catch {
     return false;
   }
+}
+
+function restoreDisplacedLockFile(relTmp, lockPath) {
+  try {
+    fs.linkSync(relTmp, lockPath);
+    try { fs.unlinkSync(relTmp); } catch {}
+    return;
+  } catch {}
+  try {
+    if (!fs.existsSync(lockPath)) {
+      fs.renameSync(relTmp, lockPath);
+      return;
+    }
+  } catch {}
+  try { fs.unlinkSync(relTmp); } catch {}
 }
 
 function releaseFileLock(lockPath, token) {
@@ -602,13 +632,18 @@ function releaseFileLock(lockPath, token) {
     const relTmp = `${lockPath}.rel.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
     try {
       fs.renameSync(lockPath, relTmp);
-      fs.unlinkSync(relTmp);
     } catch {
-      const verify = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-      if (verify && verify.token === token) {
-        fs.unlinkSync(lockPath);
-      }
+      return false;
     }
+    let movedInfo = null;
+    try {
+      movedInfo = JSON.parse(fs.readFileSync(relTmp, 'utf8'));
+    } catch {}
+    if (!movedInfo || movedInfo.token !== token) {
+      restoreDisplacedLockFile(relTmp, lockPath);
+      return false;
+    }
+    try { fs.unlinkSync(relTmp); } catch {}
     return true;
   } catch {
     return false;
@@ -730,10 +765,32 @@ function createRfc6455WebSocketClient(wsUrl) {
 
   let sock = null;
   let closed = false;
+  let closeNotified = false;
+  const emitClose = (code = 1000, reason = '') => {
+    if (closeNotified) return;
+    closeNotified = true;
+    if (typeof client.onclose === 'function') {
+      try { client.onclose({ code, reason }); } catch {}
+    }
+  };
+  const gracefulEndWithCloseFrame = (targetSock, code = 1000) => {
+    if (!targetSock) return;
+    const mask = crypto.randomBytes(4);
+    const payload = Buffer.alloc(2);
+    payload.writeUInt16BE(code, 0);
+    for (let i = 0; i < 2; i++) payload[i] ^= mask[i & 3];
+    const destroyTimer = setTimeout(() => {
+      try { targetSock.destroy(); } catch {}
+    }, 250);
+    if (destroyTimer && typeof destroyTimer.unref === 'function') destroyTimer.unref();
+    targetSock.once('close', () => clearTimeout(destroyTimer));
+    targetSock.end(Buffer.concat([Buffer.from([0x88, 0x82]), mask, payload]));
+  };
   const client = {
     onopen: null,
     onmessage: null,
     onerror: null,
+    onclose: null,
     send(data) {
       if (closed || !sock) throw new Error('WebSocket is not open');
       const payload = Buffer.from(String(data), 'utf8');
@@ -766,13 +823,16 @@ function createRfc6455WebSocketClient(wsUrl) {
     close() {
       if (closed) return;
       closed = true;
+      if (!sock) {
+        try { req.destroy(); } catch {}
+        emitClose(1006, 'Closed before upgrade');
+        return;
+      }
       try {
-        if (sock) {
-          const mask = crypto.randomBytes(4);
-          sock.end(Buffer.concat([Buffer.from([0x88, 0x80]), mask]));
-          sock.destroy();
-        }
-      } catch {}
+        gracefulEndWithCloseFrame(sock, 1000);
+      } catch {
+        try { if (sock) sock.destroy(); } catch {}
+      }
     },
   };
 
@@ -791,11 +851,13 @@ function createRfc6455WebSocketClient(wsUrl) {
   const emitError = (err) => {
     if (closed) return;
     closed = true;
+    const errObj = err instanceof Error ? err : new Error(String(err));
     try { req.destroy(); } catch {}
     try { if (sock) sock.destroy(); } catch {}
     if (typeof client.onerror === 'function') {
-      client.onerror(err instanceof Error ? err : new Error(String(err)));
+      client.onerror(errObj);
     }
+    emitClose(1006, errObj.message);
   };
 
   req.on('error', emitError);
@@ -815,10 +877,19 @@ function createRfc6455WebSocketClient(wsUrl) {
 
     const drainFrames = () => {
       while (!closed && recvBuf.length >= 2) {
+        const rsv = recvBuf[0] & 0x70;
         const fin = (recvBuf[0] & 0x80) !== 0;
         const opcode = recvBuf[0] & 0x0f;
+        if (rsv !== 0) {
+          emitError(new Error('Unsupported WebSocket RSV extension bits'));
+          return;
+        }
         const isMasked = (recvBuf[1] & 0x80) !== 0;
         let len = recvBuf[1] & 0x7f;
+        if (opcode >= 0x08 && (!fin || len > 125)) {
+          emitError(new Error('Invalid WebSocket control frame'));
+          return;
+        }
         let offset = 2;
         if (len === 126) {
           if (recvBuf.length < 4) return;
@@ -848,7 +919,21 @@ function createRfc6455WebSocketClient(wsUrl) {
         recvBuf = recvBuf.subarray(offset + maskBytes + len);
 
         if (opcode === 0x08) {
-          client.close();
+          if (body.length === 1) {
+            emitError(new Error('Invalid 1-byte WebSocket Close payload'));
+            return;
+          }
+          const closeCode = body.length >= 2 ? body.readUInt16BE(0) : 1005;
+          const closeReason = body.length > 2 ? body.subarray(2).toString('utf8') : '';
+          if (!closed) {
+            closed = true;
+            try {
+              gracefulEndWithCloseFrame(sock, closeCode === 1005 ? 1000 : closeCode);
+            } catch {
+              try { if (sock) sock.destroy(); } catch {}
+            }
+          }
+          emitClose(closeCode, closeReason);
           return;
         }
         if (opcode === 0x09 && sock && !closed) {
@@ -866,6 +951,10 @@ function createRfc6455WebSocketClient(wsUrl) {
           continue;
         }
         if (opcode === 0x01 || opcode === 0x02) {
+          if (fragOpcode !== 0) {
+            emitError(new Error('Interleaved WebSocket data frame during fragmentation'));
+            return;
+          }
           if (fin) {
             if (opcode === 0x01 && typeof client.onmessage === 'function') {
               client.onmessage({ data: body.toString('utf8') });
@@ -898,7 +987,10 @@ function createRfc6455WebSocketClient(wsUrl) {
               client.onmessage({ data: fullBuf.toString('utf8') });
             }
           }
+          continue;
         }
+        emitError(new Error(`Unsupported WebSocket opcode: ${opcode}`));
+        return;
       }
     };
 
@@ -913,6 +1005,7 @@ function createRfc6455WebSocketClient(wsUrl) {
     socket.on('error', emitError);
     socket.on('close', () => {
       closed = true;
+      emitClose(1006, 'Socket closed');
     });
 
     Promise.resolve().then(() => {
@@ -1009,6 +1102,13 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
       try { ws.close(); } catch {}
       reject(err instanceof Error ? err : new Error('WebSocket error'));
     };
+
+    ws.onclose = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error('WebSocket closed before CDP evaluation completed'));
+    };
   });
 }
 
@@ -1078,6 +1178,10 @@ function injectViaBrowserCdpWs(browserWsUrl, scriptCode, scriptHash, timeoutMs =
 
     ws.onerror = (err) => {
       finish(err instanceof Error ? err : new Error('Browser CDP WebSocket error'));
+    };
+
+    ws.onclose = () => {
+      finish(new Error('Browser CDP WebSocket closed before completion'));
     };
 
     ws.onopen = async () => {

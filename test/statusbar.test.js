@@ -1079,6 +1079,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
             state: {
               agentStateProvider: {
                 getState: () => ({
+                  conversationId: 'test-session-1',
                   trajectorySlice: {
                     totalGeneratorMetadataLength: -1,
                     totalStepsLength: currentStepCount,
@@ -1372,6 +1373,7 @@ describe('statusbar adapter architecture and built-in button adapters', () => {
     const fakeAsp = {
       getState() {
         return {
+          conversationId: cid,
           trajectorySlice: {
             totalGeneratorMetadataLength: 5,
             totalStepsLength: currentMetaStep + 1,
@@ -4062,6 +4064,451 @@ describe('D-0015..D-0021 full audit regressions', () => {
       assert.equal(updatedStorage['agy-statusbar-code'], '// v32 test code\n');
     } finally {
       fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('Round-2 audit reopen (D-0012, D-0020, D-0023, D-0030, D-0032, D-0033): unified TrustedTypes policy, Fail-Closed RPC state & fallback TTL cache, Promise.all rejection recovery, full dispose cleanup, RFC6455 close/interleaving, and lock release race protection', async () => {
+    const net = require('node:net');
+    const crypto = require('node:crypto');
+    const os = require('node:os');
+    const { execFileSync } = require('node:child_process');
+    const { createRpcClient } = require('../src/rpc-client');
+    const { createHostBridge } = require('../src/host-bridge');
+    const { configureTargetViaCdp } = require('../scripts/ensure_statusbar_patch');
+
+    // 1. D-0032: Full mountStatusBar on remote host with strict Chromium TrustedTypes ('trusted-types agy-statusbar', duplicate name throws)
+    const createdPolicies = new Set();
+    const remoteScriptUrls = [];
+    const { sandbox: ttSb } = createDomSandbox();
+    ttSb.window.location = { protocol: 'https:', hostname: 'antigravity.google.com', href: 'https://antigravity.google.com/' };
+    ttSb.window.__agyHostInstalledPlugins = {
+      resolved: true,
+      hasStatusbar: true,
+      hasMcpManager: true,
+      hasKoTranslator: false,
+      mcpManagerCode: 'window.agyMcpManager = { version: "mock" };',
+    };
+    ttSb.window.trustedTypes = {
+      createPolicy(name, rules) {
+        if (name !== 'agy-statusbar') {
+          throw new TypeError(`Refused to create a TrustedTypePolicy named '${name}': violates CSP 'trusted-types agy-statusbar'.`);
+        }
+        if (createdPolicies.has(name)) {
+          throw new TypeError(`Failed to execute 'createPolicy' on 'TrustedTypePolicyFactory': Policy with name '${name}' already exists.`);
+        }
+        createdPolicies.add(name);
+        const pol = {};
+        if (typeof rules.createHTML === 'function') {
+          pol.createHTML = (s) => ({ __ttHtml: String(rules.createHTML(s)) });
+        }
+        if (typeof rules.createScript === 'function') {
+          pol.createScript = (s) => ({ __ttScript: String(rules.createScript(s)) });
+        }
+        if (typeof rules.createScriptURL === 'function') {
+          pol.createScriptURL = (u) => ({ __ttScriptUrl: String(rules.createScriptURL(u)) });
+        }
+        return pol;
+      },
+    };
+    const origCreateEl = ttSb.document.createElement.bind(ttSb.document);
+    ttSb.document.head = {
+      appendChild(el) {
+        if (el.tagName === 'SCRIPT') {
+          if (el.text) {
+            // Simulate strict CSP blocking inline script execution asynchronously
+            return el;
+          }
+          if (el.src) {
+            if (typeof el.src !== 'object' || !el.src.__ttScriptUrl) {
+              throw new TypeError("Failed to set the 'src' property on 'HTMLScriptElement': This document requires 'TrustedScriptURL' assignment.");
+            }
+            const rawSrc = el.src.__ttScriptUrl;
+            if (rawSrc.startsWith('blob:')) {
+              // Simulate strict CSP script-src blocking blob: so companion loader falls back to allowed https: URL
+              setTimeout(() => el._listeners?.error?.(), 2);
+              return el;
+            }
+            remoteScriptUrls.push(rawSrc);
+            setTimeout(() => {
+              ttSb.window.agyMcpManager = { version: 'loaded-via-url' };
+              el._listeners?.load?.();
+            }, 5);
+          }
+        }
+        return el;
+      },
+    };
+    ttSb.document.createElement = (tag) => {
+      const el = origCreateEl(tag);
+      if (String(tag).toLowerCase() === 'script') {
+        el._listeners = {};
+        el.addEventListener = (ev, fn) => { el._listeners[ev] = fn; };
+        let _text = '';
+        Object.defineProperty(el, 'text', {
+          get: () => _text,
+          set(v) {
+            if (typeof v !== 'object' || !v.__ttScript) {
+              throw new TypeError("Failed to set the 'text' property on 'HTMLScriptElement': This document requires 'TrustedScript' assignment.");
+            }
+            _text = v.__ttScript;
+          },
+        });
+      } else {
+        let _html = '';
+        Object.defineProperty(el, 'innerHTML', {
+          get: () => _html,
+          set(v) {
+            if (typeof v !== 'object' || !v.__ttHtml) {
+              throw new TypeError("Failed to set the 'innerHTML' property on 'Element': This document requires 'TrustedHTML' assignment.");
+            }
+            _html = v.__ttHtml;
+          },
+        });
+      }
+      return el;
+    };
+
+    mountStatusBar({
+      window: ttSb.window,
+      document: ttSb.document,
+      localStorage: ttSb.localStorage,
+      fetch: async () => ({ ok: true, json: async () => ({ groups: [], generatorMetadata: [] }) }),
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(
+      ttSb.window.__agyTrustedTypesPolicy &&
+        typeof ttSb.window.__agyTrustedTypesPolicy.createHTML === 'function' &&
+        typeof ttSb.window.__agyTrustedTypesPolicy.createScript === 'function' &&
+        typeof ttSb.window.__agyTrustedTypesPolicy.createScriptURL === 'function',
+      'D-0032: shared __agyTrustedTypesPolicy must expose all 3 methods (createHTML, createScript, createScriptURL) without duplicate agy-statusbar policy collision'
+    );
+    assert.ok(
+      remoteScriptUrls.some((u) => u.startsWith('https://raw.githubusercontent.com/')),
+      'D-0032: companion loader must succeed using the single unified agy-statusbar TrustedTypes policy'
+    );
+    ttSb.window.__agyStatusBarCleanup?.();
+
+    // 2. D-0033: Fail-Closed when stateCid === null AND no repeated RPC storm when latestState === null
+    let rpcFetchCalls = 0;
+    const rpcFailClosed = createRpcClient({
+      window: {},
+      localStorage: { getItem: () => null, setItem() {} },
+      getAgentStateProviderForInputBox: () => ({
+        // Host schema without conversationId / cascadeId -> stateCid === null
+        getState: () => ({
+          compactedAtStepIndices: [500],
+          contextWindowUsage: { estimatedTokensUsed: 331000, estimatedAfterCompaction: 280000, maxContextTokens: 384000 },
+        }),
+      }),
+      fetchFn: async () => {
+        rpcFetchCalls += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            generatorMetadata: [
+              {
+                chatModel: {
+                  chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 42000, maxContextTokens: 256000 } },
+                  usage: { cacheReadTokens: 20000, inputTokens: 22000 },
+                },
+              },
+            ],
+          }),
+        };
+      },
+    });
+    assert.equal(
+      rpcFailClosed.getImmediateStats('session-target', {}),
+      null,
+      'D-0033: isStateForCascade must Fail-Closed (return false) when stateCid is null/missing'
+    );
+    const s1 = await rpcFailClosed.fetchCascadeStats('session-target', 'csrf-tok', {});
+    const s2 = await rpcFailClosed.fetchCascadeStats('session-target', 'csrf-tok', {});
+    const s3 = await rpcFailClosed.fetchCascadeStats('session-target', 'csrf-tok', {});
+    assert.equal(s1.used, 42000);
+    assert.equal(s2.used, 42000);
+    assert.equal(s3.used, 42000);
+    assert.equal(
+      rpcFetchCalls,
+      1,
+      `D-0033: fetchCascadeStats must reuse cached entry within 3000ms fallback TTL when latestState is null instead of hammering RPC on every poll (got ${rpcFetchCalls} calls)`
+    );
+    rpcFailClosed.dispose();
+
+    // 3. D-0012: Promise.all rejection in updateAll must not cause unhandledRejection or freeze previous session metrics
+    const { sandbox: rejSb, getMountedBar: getRejBar } = createDomSandbox();
+    rejSb.localStorage.setItem(
+      'agy-session-ctx-windows-v1',
+      JSON.stringify({ 'test-session-1': '256K', 'session-reject-b': '256K' })
+    );
+    let rejActiveCid = 'test-session-1';
+    const rejView = rejSb.document.querySelector('[data-testid="conversation-view"]');
+    rejView.getAttribute = (k) => (k === 'data-cascade-id' ? rejActiveCid : null);
+    let rejectQuotaNow = false;
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      mountStatusBar({
+        window: rejSb.window,
+        document: rejSb.document,
+        localStorage: rejSb.localStorage,
+        fetch: async (url) => {
+          if (String(url).includes('RetrieveUserQuotaSummary')) {
+            if (rejectQuotaNow) throw new Error('Simulated quota transport failure');
+            return { ok: true, json: async () => ({ groups: [] }) };
+          }
+          if (rejActiveCid === 'session-reject-b') {
+            throw new Error('Simulated stats failure');
+          }
+          return {
+            ok: true,
+            json: async () => ({
+              generatorMetadata: [
+                {
+                  chatModel: {
+                    chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 204800, maxContextTokens: 256000 } },
+                    usage: { cacheReadTokens: 100000, inputTokens: 104800 },
+                  },
+                },
+              ],
+            }),
+          };
+        },
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      await new Promise((r) => setTimeout(r, 25));
+      const rejCore = getRejBar().querySelector('.agy-ctx-left').querySelector('[data-agy-adapter-id="core-metrics"]');
+      assert.ok(rejCore.innerHTML.includes('>80%<'));
+
+      rejActiveCid = 'session-reject-b';
+      rejectQuotaNow = true;
+      rejSb.window.agyStatusBar.updateAll();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(unhandled.length, 0, 'D-0012: Promise.all in updateAll must catch rejections without unhandledRejection');
+      assert.ok(
+        rejCore.innerHTML.includes('>0%<'),
+        'D-0012: when async fetch fails/returns null on uncached session switch, deferred metrics must unfreeze and render fallback 0%'
+      );
+      rejSb.window.__agyStatusBarCleanup?.();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    // 4. D-0020: hookLsClient without sendUserCascadeMessage & full cleanup of __agyLastAppliedContextWindow*, __agySniffedCascadeId*, __agyCapturedLsClient
+    const { sandbox: cleanSb } = createDomSandbox();
+    const readOnlyLsClient = {
+      retrieveUserQuotaSummary: async () => ({ groups: [] }),
+      getCascadeTrajectory: async () => ({ trajectory: { generatorMetadata: [] } }),
+    };
+    cleanSb.window.__agyCapturedLsClient = readOnlyLsClient;
+    mountStatusBar({
+      window: cleanSb.window,
+      document: cleanSb.document,
+      localStorage: cleanSb.localStorage,
+      fetch: async () => ({ ok: true, json: async () => ({ groups: [], generatorMetadata: [] }) }),
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
+    cleanSb.window.__agySniffedCascadeId = '11111111-2222-3333-4444-555555555555';
+    cleanSb.window.__agySniffedCascadeTs = Date.now();
+    cleanSb.window.__agyRcStepCountByCascade = { '11111111-2222-3333-4444-555555555555': 3 };
+    cleanSb.window.__agyRcGenLenByCascade = { '11111111-2222-3333-4444-555555555555': 2 };
+    cleanSb.window.__agyLastAppliedContextWindow = '1437:256K';
+    cleanSb.window.__agyLastAppliedContextWindowByCascade = { 'test-session-1': '1437:256K' };
+    // Trigger getRemoteRpcServiceForElement via non-csrf remote update path so hookLsClient runs on readOnlyLsClient
+    delete cleanSb.window.__APP_CONFIG__.csrfToken;
+    cleanSb.window.agyStatusBar.updateAll();
+    await new Promise((r) => setTimeout(r, 20));
+    cleanSb.window.__agyStatusBarCleanup();
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(readOnlyLsClient, '__agyCwHooked') ||
+        Object.prototype.hasOwnProperty.call(readOnlyLsClient, '__agyCwHookV2'),
+      false,
+      'D-0020: hookLsClient markers must be cleaned up on dispose even when sendUserCascadeMessage is absent'
+    );
+    for (const leakedKey of [
+      '__agyLastAppliedContextWindow',
+      '__agyLastAppliedContextWindowByCascade',
+      '__agySniffedCascadeId',
+      '__agySniffedCascadeTs',
+      '__agyCapturedLsClient',
+      '__agyRcStepCountByCascade',
+      '__agyRcGenLenByCascade',
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(cleanSb.window, leakedKey),
+        false,
+        `D-0020: cleanupStatusBar/dispose must delete window.${leakedKey}`
+      );
+    }
+
+    // 5. D-0030: Close frame delivery (no immediate destroy RST), fast reject on server 0x08/close, and RFC6455 §5.4 fragmentation interleaving error
+    const savedGlobalWs = globalThis.WebSocket;
+    delete globalThis.WebSocket;
+    try {
+      // 5a) Normal close sends 0x08 frame cleanly before socket teardown
+      let sawClientCloseFrame = false;
+      const srvCloseCheck = net.createServer((socket) => {
+        let upgraded = false;
+        let buf = Buffer.alloc(0);
+        socket.on('data', (chunk) => {
+          if (!upgraded) {
+            const txt = chunk.toString('utf8');
+            if (!txt.includes('\r\n\r\n')) return;
+            upgraded = true;
+            const key = txt.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i)[1].trim();
+            const acc = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+            socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acc}\r\n\r\n`);
+            return;
+          }
+          buf = Buffer.concat([buf, chunk]);
+          while (buf.length >= 6) {
+            const op = buf[0] & 0x0f;
+            let len = buf[1] & 0x7f;
+            let off = 2;
+            if (len === 126) {
+              if (buf.length < 8) return;
+              len = buf.readUInt16BE(2);
+              off = 4;
+            }
+            if (buf.length < off + 4 + len) return;
+            buf = buf.subarray(off + 4 + len);
+            if (op === 0x01) {
+              const rep = Buffer.from(JSON.stringify({ id: 1, result: { result: { value: 'INJECTED_OK' } } }), 'utf8');
+              socket.write(Buffer.concat([Buffer.from([0x81, rep.length]), rep]));
+            } else if (op === 0x08) {
+              sawClientCloseFrame = true;
+              socket.end();
+            }
+          }
+        });
+      });
+      await new Promise((r) => srvCloseCheck.listen(0, '127.0.0.1', r));
+      try {
+        const resVal = await configureTargetViaCdp(`ws://127.0.0.1:${srvCloseCheck.address().port}/devtools/page/1`, 'void 0;', 'h1', 1500);
+        assert.equal(resVal, 'INJECTED_OK');
+        await new Promise((r) => setTimeout(r, 30));
+        assert.equal(sawClientCloseFrame, true, 'D-0030: client.close() must flush Close frame (0x08) without immediate sock.destroy() RST');
+      } finally {
+        srvCloseCheck.close();
+      }
+
+      // 5b) Server sends 0x08 Close before CDP reply -> configureTargetViaCdp must reject immediately (<400ms), NOT wait for 2000ms timeout!
+      const srvAbruptClose = net.createServer((socket) => {
+        let upgraded = false;
+        let sentClose = false;
+        socket.on('data', (chunk) => {
+          if (!upgraded) {
+            const txt = chunk.toString('utf8');
+            if (!txt.includes('\r\n\r\n')) return;
+            upgraded = true;
+            const key = txt.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i)[1].trim();
+            const acc = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+            socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acc}\r\n\r\n`);
+            return;
+          }
+          if (sentClose) return;
+          sentClose = true;
+          // Immediately send server Close frame (0x88, 0x00) without replying id:1
+          socket.end(Buffer.from([0x88, 0x00]));
+        });
+      });
+      await new Promise((r) => srvAbruptClose.listen(0, '127.0.0.1', r));
+      try {
+        const t0 = Date.now();
+        await assert.rejects(
+          () => configureTargetViaCdp(`ws://127.0.0.1:${srvAbruptClose.address().port}/devtools/page/1`, 'void 0;', 'h1', 2000),
+          /closed|WebSocket/i,
+          'D-0030: configureTargetViaCdp must reject when server sends 0x08 / closes socket'
+        );
+        const elapsed = Date.now() - t0;
+        assert.ok(elapsed < 600, `D-0030: server close must reject promptly without waiting for 2000ms timeout (took ${elapsed}ms)`);
+      } finally {
+        srvAbruptClose.close();
+      }
+
+      // 5c) RFC 6455 §5.4: New data frame (opcode=0x01) during active fragmentation (fragOpcode !== 0) must fail with protocol error
+      const srvBadFrag = net.createServer((socket) => {
+        let upgraded = false;
+        let sentBad = false;
+        socket.on('data', (chunk) => {
+          if (!upgraded) {
+            const txt = chunk.toString('utf8');
+            if (!txt.includes('\r\n\r\n')) return;
+            upgraded = true;
+            const key = txt.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i)[1].trim();
+            const acc = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+            socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acc}\r\n\r\n`);
+            return;
+          }
+          if (sentBad) return;
+          sentBad = true;
+          const fragStart = Buffer.from('{"id":1,', 'utf8');
+          const illegalNewData = Buffer.from(JSON.stringify({ id: 1, result: { result: { value: 'INJECTED_OK' } } }), 'utf8');
+          // FIN=0 opcode=0x01 followed illegally by FIN=1 opcode=0x01 (instead of opcode=0x00 continuation)
+          socket.write(Buffer.concat([Buffer.from([0x01, fragStart.length]), fragStart]));
+          socket.write(Buffer.concat([Buffer.from([0x81, illegalNewData.length]), illegalNewData]));
+        });
+      });
+      await new Promise((r) => srvBadFrag.listen(0, '127.0.0.1', r));
+      try {
+        await assert.rejects(
+          () => configureTargetViaCdp(`ws://127.0.0.1:${srvBadFrag.address().port}/devtools/page/1`, 'void 0;', 'h1', 1500),
+          /fragment|interleaved|protocol|WebSocket/i,
+          'D-0030: interleaved data frame during fragmentation must trigger RFC6455 §5.4 protocol error'
+        );
+      } finally {
+        srvBadFrag.close();
+      }
+    } finally {
+      if (savedGlobalWs !== undefined) globalThis.WebSocket = savedGlobalWs;
+    }
+
+    // 6. D-0023: Deterministic stale-lock takeover race between readFileSync and renameSync inside releaseLock()
+    const raceHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sb-relrace-'));
+    try {
+      const agyDir = path.join(raceHome, '.gemini', 'antigravity');
+      const lockFile = path.join(agyDir, 'statusbar_patch.lock');
+      const raceOut = execFileSync(
+        process.execPath,
+        [
+          '-e',
+          `const fs = require('fs');
+           const p = require(${JSON.stringify(SRC_PATCHER_PATH)});
+           const acquired = p.acquireLock();
+           const origRead = fs.readFileSync.bind(fs);
+           let injected = false;
+           fs.readFileSync = function(targetPath, ...rest) {
+             const res = origRead(targetPath, ...rest);
+             if (!injected && String(targetPath) === ${JSON.stringify(lockFile)}) {
+               injected = true;
+               // Simulate Process B reclaiming stale lock and writing token-B right after Process A's initial readFileSync!
+               fs.writeFileSync(${JSON.stringify(lockFile)}, JSON.stringify({ pid: 99999, token: 'process-b-fresh-token', startedAt: new Date().toISOString() }), 'utf8');
+             }
+             return res;
+           };
+           const released = p.releaseLock();
+           fs.readFileSync = origRead;
+           const existsAfter = fs.existsSync(${JSON.stringify(lockFile)});
+           const survivingToken = existsAfter ? JSON.parse(origRead(${JSON.stringify(lockFile)}, 'utf8')).token : null;
+           console.log(JSON.stringify({ acquired, released, existsAfter, survivingToken }));`,
+        ],
+        {
+          env: { ...process.env, USERPROFILE: raceHome, HOME: raceHome },
+          encoding: 'utf8',
+        }
+      );
+      const raceRes = JSON.parse(raceOut.trim());
+      assert.equal(raceRes.acquired, true);
+      assert.equal(raceRes.released, false, 'D-0023: releaseLock must return false when lock was replaced after initial read');
+      assert.equal(raceRes.existsAfter, true, 'D-0023: Process B new lock file must survive Process A stale releaseLock');
+      assert.equal(raceRes.survivingToken, 'process-b-fresh-token', 'D-0023: Process B lock token must remain intact');
+    } finally {
+      fs.rmSync(raceHome, { recursive: true, force: true });
     }
   });
 });

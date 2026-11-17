@@ -1074,23 +1074,66 @@
         appendText(stack[stack.length - 1], html.slice(lastIdx));
       }
     }
-    function createTrustedHtmlSetter(window, document) {
-      if (window?.__agyTrustedHtmlPolicy) {
-        return (el, html) => { el.innerHTML = window.__agyTrustedHtmlPolicy.createHTML(html); };
+    function isCompleteTrustedTypesPolicy(p) {
+      return Boolean(
+        p &&
+          typeof p.createHTML === 'function' &&
+          typeof p.createScript === 'function' &&
+          typeof p.createScriptURL === 'function'
+      );
+    }
+    function resolveAgyTrustedTypesPolicy(window, requiredMethod) {
+      const existingCandidates = [window?.__agyTrustedTypesPolicy, window?.__agyTrustedHtmlPolicy].filter(Boolean);
+      for (const cand of existingCandidates) {
+        if (isCompleteTrustedTypesPolicy(cand)) {
+          try {
+            window.__agyTrustedTypesPolicy = cand;
+            window.__agyTrustedHtmlPolicy = cand;
+          } catch {}
+          return cand;
+        }
       }
       if (window?.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
         const names = [
           'agy-statusbar',
+          'agy-statusbar-companion',
           'agy-statusbar-html',
           'agy-statusbar-' + Date.now(),
         ];
         for (const name of names) {
           try {
-            const p = window.trustedTypes.createPolicy(name, { createHTML: (s) => s, createScript: (s) => s });
-            try { window.__agyTrustedHtmlPolicy = p; } catch {}
-            return (el, html) => { el.innerHTML = p.createHTML(html); };
+            const p = window.trustedTypes.createPolicy(name, {
+              createHTML: (s) => String(s ?? ''),
+              createScript: (s) => String(s ?? ''),
+              createScriptURL: (u) => String(u ?? ''),
+            });
+            if (p) {
+              try {
+                window.__agyTrustedTypesPolicy = p;
+                window.__agyTrustedHtmlPolicy = p;
+              } catch {}
+              return p;
+            }
           } catch {}
         }
+      }
+      if (requiredMethod) {
+        for (const cand of existingCandidates) {
+          if (typeof cand[requiredMethod] === 'function') return cand;
+        }
+      }
+      return existingCandidates[0] || null;
+    }
+    function createTrustedHtmlSetter(window, document) {
+      const policy = resolveAgyTrustedTypesPolicy(window, 'createHTML');
+      if (policy && typeof policy.createHTML === 'function') {
+        return (el, html) => {
+          try {
+            el.innerHTML = policy.createHTML(html);
+          } catch {
+            renderHtmlViaSafeDomBuilder(document, el, html);
+          }
+        };
       }
       return (el, html) => {
         try {
@@ -1142,6 +1185,7 @@
       STYLE_CSS,
       buildDynamicCwWarnCss,
       ensureStyleElement,
+      resolveAgyTrustedTypesPolicy,
       createTrustedHtmlSetter,
       fmtK,
       fmtNum,
@@ -1405,19 +1449,17 @@
         return base;
       }
       function isStateForCascade(fullState, cascadeId) {
-        if (!fullState || typeof fullState !== 'object') return false;
+        if (!fullState || typeof fullState !== 'object' || !cascadeId) return false;
         const stateCid =
           fullState.conversationId ||
           fullState.cascadeId ||
           fullState.trajectorySlice?.conversationId ||
           fullState.trajectorySlice?.cascadeId ||
           null;
-        if (stateCid && cascadeId && stateCid !== cascadeId) {
-          return false;
-        }
-        return true;
+        if (!stateCid) return false;
+        return stateCid === cascadeId;
       }
-      function extractVersionMetrics(fullState) {
+      function extractVersionMetrics(fullState, cascadeId, fallbackGenLen) {
         const slice = fullState?.trajectorySlice;
         const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
         const totalStepsLen = slice?.totalStepsLength ?? -1;
@@ -1431,12 +1473,22 @@
         const cwAfterCompact = typeof rawCwAfter === 'boolean'
           ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
           : Number(rawCwAfter || 0);
+        const hasLiveVersion = Boolean(fullState && (totalGenLen >= 0 || totalStepsLen >= 0));
+        const rcSteps =
+          cascadeId && window?.__agyRcStepCountByCascade && typeof window.__agyRcStepCountByCascade[cascadeId] === 'number'
+            ? window.__agyRcStepCountByCascade[cascadeId]
+            : -1;
+        const effGenLen = typeof fallbackGenLen === 'number' && fallbackGenLen > 0 ? fallbackGenLen : -1;
         return {
           totalGenLen,
           totalStepsLen,
           latestCompactedStep,
           cwAfterCompact,
-          versionKey: `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`,
+          hasLiveVersion,
+          rcSteps,
+          versionKey: hasLiveVersion
+            ? `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`
+            : `fallback:${rcSteps}:${effGenLen}`,
         };
       }
       function fetchCascadeStats(cascadeId, csrf, inputBox) {
@@ -1446,12 +1498,23 @@
         const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
         const rawState = asp?.getState?.();
         const fullState = isStateForCascade(rawState, cascadeId) ? rawState : null;
-        const { totalGenLen, totalStepsLen, versionKey } = extractVersionMetrics(fullState);
         const cached = stateCache.get(cascadeId);
-        const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
-        const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
-        if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
-          return Promise.resolve(cached);
+        const baseKnownGenLen = knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1;
+        const { totalGenLen, totalStepsLen, hasLiveVersion, rcSteps, versionKey } = extractVersionMetrics(
+          fullState,
+          cascadeId,
+          baseKnownGenLen
+        );
+        const knownGenLen = totalGenLen > 0 ? totalGenLen : baseKnownGenLen;
+        const cacheTtlMs = hasLiveVersion ? 12000 : 3000;
+        if (cached && Date.now() - cached.ts < cacheTtlMs) {
+          if (hasLiveVersion) {
+            if (cached.versionKey === versionKey) {
+              return Promise.resolve(cached);
+            }
+          } else if (rcSteps < 0 || cached.rcSteps === undefined || cached.rcSteps === rcSteps) {
+            return Promise.resolve(cached);
+          }
         }
         if (inFlightStats.has(cascadeId)) {
           return inFlightStats.get(cascadeId);
@@ -1528,7 +1591,7 @@
             if (discoveredGenLen > 0) {
               setBoundedGenLen(cascadeId, discoveredGenLen);
             }
-            const { versionKey: finalVersionKey } = extractVersionMetrics(latestState);
+            const finalMetrics = extractVersionMetrics(latestState, cascadeId, discoveredGenLen);
             const data = {
               used: parsed.used,
               trajectoryMax: parsed.trajectoryMax,
@@ -1537,7 +1600,8 @@
               cachePct: parsed.cachePct,
               lastMetaStepIndex: parsed.lastMetaStepIndex,
               knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
-              versionKey: finalVersionKey,
+              rcSteps: finalMetrics.rcSteps,
+              versionKey: finalMetrics.versionKey,
               ts: Date.now(),
             };
             setBoundedCache(cascadeId, data);
@@ -1578,6 +1642,11 @@
             clearTimeout(cacheFlushTimer);
             cacheFlushTimer = null;
           }
+          try {
+            if (window) {
+              delete window.__agyRcGenLenByCascade;
+            }
+          } catch {}
         },
       };
     }
@@ -2617,10 +2686,12 @@
         try {
           lsClient.__agyCwHooked = true;
           lsClient.__agyCwHookV2 = true;
+          let origSend = null;
+          let wrappedSend = null;
           if (typeof lsClient.sendUserCascadeMessage === 'function') {
-            const origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
+            origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
             lsClient.__agyOrigSendUserCascadeMessage = origSend;
-            const wrappedSend = function (req, ...rest) {
+            wrappedSend = function (req, ...rest) {
               const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
               const nextReq = injectFn(
                 resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
@@ -2630,17 +2701,17 @@
               return origSend.call(this, nextReq, ...rest);
             };
             lsClient.sendUserCascadeMessage = wrappedSend;
-            cleanupCallbacks.push(() => {
-              try {
-                if (lsClient.sendUserCascadeMessage === wrappedSend) {
-                  lsClient.sendUserCascadeMessage = origSend;
-                }
-                delete lsClient.__agyOrigSendUserCascadeMessage;
-                delete lsClient.__agyCwHooked;
-                delete lsClient.__agyCwHookV2;
-              } catch {}
-            });
           }
+          cleanupCallbacks.push(() => {
+            try {
+              if (wrappedSend && lsClient.sendUserCascadeMessage === wrappedSend) {
+                lsClient.sendUserCascadeMessage = origSend;
+              }
+              delete lsClient.__agyOrigSendUserCascadeMessage;
+              delete lsClient.__agyCwHooked;
+              delete lsClient.__agyCwHookV2;
+            } catch {}
+          });
         } catch {}
         return lsClient;
       }
@@ -3495,6 +3566,7 @@
         if ((typeof steps === 'number' && steps >= 0) || (typeof knownGenLen === 'number' && knownGenLen >= 0)) {
           return {
             getState: () => ({
+              conversationId: cid,
               trajectorySlice: {
                 totalGeneratorMetadataLength: -1,
                 totalStepsLength: typeof steps === 'number' ? steps : -1,
@@ -3941,6 +4013,19 @@
               delete window.__agySniffCascadeFromRpc;
               delete window.__agyOnCascadeSniffed;
               delete window.__agyProbingRcInstance;
+              delete window.__agyLastAppliedContextWindow;
+              delete window.__agyLastAppliedContextWindowByCascade;
+              delete window.__agySniffedCascadeId;
+              delete window.__agySniffedCascadeTs;
+              delete window.__agyRcStepCountByCascade;
+              delete window.__agyRcGenLenByCascade;
+              if (!window.agyMcpManager) {
+                delete window.__agyCapturedLsClient;
+              }
+            }
+            if (document) {
+              delete document.__agyCachedCustomizationsStore;
+              delete document.__agyLastCustomizationsDfsTs;
             }
           } catch {}
         },
@@ -4862,7 +4947,7 @@
     'use strict';
     const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
     const { resolveHostAdapterConfig } = require('./host-adapter-config');
-    const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
+    const { ensureStyleElement, resolveAgyTrustedTypesPolicy, createTrustedHtmlSetter } = require('./dom-styles');
     const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
     const { createRpcClient } = require('./rpc-client');
     const { createAdapterRegistry } = require('./adapter-registry');
@@ -4979,27 +5064,7 @@
       return false;
     }
     function resolveCompanionScriptPolicy(win) {
-      let policy = win?.__agyTrustedTypesPolicy || null;
-      if (!policy && win?.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-        const policyNames = [
-          'agy-statusbar',
-          'agy-statusbar-companion',
-          'agy-rc-' + Date.now(),
-        ];
-        for (const name of policyNames) {
-          try {
-            policy = win.trustedTypes.createPolicy(name, {
-              createScript: (x) => x,
-              createScriptURL: (u) => u,
-            });
-            if (policy) {
-              try { win.__agyTrustedTypesPolicy = policy; } catch {}
-              break;
-            }
-          } catch {}
-        }
-      }
-      return policy;
+      return resolveAgyTrustedTypesPolicy(win, 'createScriptURL');
     }
     function getScriptNonce(doc) {
       const nonceEl = doc?.querySelector?.('script[nonce]');
@@ -5239,7 +5304,7 @@
         cwStore,
         hostConfig: resolvedHostConfig,
       });
-      ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, resolvedHostConfig);
+      Promise.resolve(ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, resolvedHostConfig)).catch(() => null);
       const rpcClient = createRpcClient({
         window: win,
         fetchFn,
@@ -5382,12 +5447,15 @@
           const deferUncachedMetrics = Boolean(!isNewlyCreatedBar && !immediateData);
           renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics });
           Promise.all([
-            rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
-            quotaPromise,
+            Promise.resolve(rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox)).catch(() => null),
+            Promise.resolve(quotaPromise).catch(() => null),
           ]).then(([data, freshQuota]) => {
-            if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
+            if (disposed || !barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
             const finalData = data || cachedData || immediateData;
             renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
+          }).catch(() => {
+            if (disposed || !barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
+            renderBar(barEl, view, inputBox, cachedData || immediateData || null, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
           });
         }
       }
@@ -5400,7 +5468,7 @@
         getConversationContextWindow,
         setConversationContextWindow,
       };
-      cwStore.loadPersistentContextSettings().then(() => {
+      Promise.resolve(cwStore.loadPersistentContextSettings()).then(() => {
         if (disposed) return;
         hostBridge.syncDesktopAnnotations(
           win.__APP_CONFIG__?.csrfToken,
@@ -5409,7 +5477,7 @@
           true
         );
         updateAll();
-      });
+      }).catch(() => {});
       updateAll();
       const setIntervalFn = env.setInterval || win.setInterval || setInterval;
       const clearIntervalFn = env.clearInterval || win.clearInterval || clearInterval;
@@ -5514,6 +5582,21 @@
             styleEl.remove();
           }
         }
+        try {
+          delete win.__agyHostInstalledPlugins;
+          delete win.__agyLoadingMcpManagerCompanion;
+          delete win.__agyLoadingKoTranslatorCompanion;
+          delete win.__agyRcGenLenByCascade;
+          delete win.__agyRcStepCountByCascade;
+          delete win.__agyLastAppliedContextWindow;
+          delete win.__agyLastAppliedContextWindowByCascade;
+          delete win.__agySniffedCascadeId;
+          delete win.__agySniffedCascadeTs;
+          if (!win.agyMcpManager) {
+            delete win.__agyCapturedLsClient;
+            delete win.__agyRemoteControlInstance;
+          }
+        } catch {}
         try {
           delete win.agyStatusBar;
         } catch {

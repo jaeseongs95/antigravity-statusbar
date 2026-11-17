@@ -1089,10 +1089,12 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     try {
       lsClient.__agyCwHooked = true;
       lsClient.__agyCwHookV2 = true;
+      let origSend = null;
+      let wrappedSend = null;
       if (typeof lsClient.sendUserCascadeMessage === 'function') {
-        const origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
+        origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
         lsClient.__agyOrigSendUserCascadeMessage = origSend;
-        const wrappedSend = function (req, ...rest) {
+        wrappedSend = function (req, ...rest) {
           const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
           const nextReq = injectFn(
             resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
@@ -1102,17 +1104,17 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
           return origSend.call(this, nextReq, ...rest);
         };
         lsClient.sendUserCascadeMessage = wrappedSend;
-        cleanupCallbacks.push(() => {
-          try {
-            if (lsClient.sendUserCascadeMessage === wrappedSend) {
-              lsClient.sendUserCascadeMessage = origSend;
-            }
-            delete lsClient.__agyOrigSendUserCascadeMessage;
-            delete lsClient.__agyCwHooked;
-            delete lsClient.__agyCwHookV2;
-          } catch {}
-        });
       }
+      cleanupCallbacks.push(() => {
+        try {
+          if (wrappedSend && lsClient.sendUserCascadeMessage === wrappedSend) {
+            lsClient.sendUserCascadeMessage = origSend;
+          }
+          delete lsClient.__agyOrigSendUserCascadeMessage;
+          delete lsClient.__agyCwHooked;
+          delete lsClient.__agyCwHookV2;
+        } catch {}
+      });
     } catch {}
     return lsClient;
   }
@@ -2022,6 +2024,7 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     if ((typeof steps === 'number' && steps >= 0) || (typeof knownGenLen === 'number' && knownGenLen >= 0)) {
       return {
         getState: () => ({
+          conversationId: cid,
           trajectorySlice: {
             totalGeneratorMetadataLength: -1,
             totalStepsLength: typeof steps === 'number' ? steps : -1,
@@ -2506,6 +2509,19 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
           delete window.__agySniffCascadeFromRpc;
           delete window.__agyOnCascadeSniffed;
           delete window.__agyProbingRcInstance;
+          delete window.__agyLastAppliedContextWindow;
+          delete window.__agyLastAppliedContextWindowByCascade;
+          delete window.__agySniffedCascadeId;
+          delete window.__agySniffedCascadeTs;
+          delete window.__agyRcStepCountByCascade;
+          delete window.__agyRcGenLenByCascade;
+          if (!window.agyMcpManager) {
+            delete window.__agyCapturedLsClient;
+          }
+        }
+        if (document) {
+          delete document.__agyCachedCustomizationsStore;
+          delete document.__agyLastCustomizationsDfsTs;
         }
       } catch {}
     },

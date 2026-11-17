@@ -274,20 +274,18 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
   }
 
   function isStateForCascade(fullState, cascadeId) {
-    if (!fullState || typeof fullState !== 'object') return false;
+    if (!fullState || typeof fullState !== 'object' || !cascadeId) return false;
     const stateCid =
       fullState.conversationId ||
       fullState.cascadeId ||
       fullState.trajectorySlice?.conversationId ||
       fullState.trajectorySlice?.cascadeId ||
       null;
-    if (stateCid && cascadeId && stateCid !== cascadeId) {
-      return false;
-    }
-    return true;
+    if (!stateCid) return false;
+    return stateCid === cascadeId;
   }
 
-  function extractVersionMetrics(fullState) {
+  function extractVersionMetrics(fullState, cascadeId, fallbackGenLen) {
     const slice = fullState?.trajectorySlice;
     const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
     const totalStepsLen = slice?.totalStepsLength ?? -1;
@@ -301,12 +299,22 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     const cwAfterCompact = typeof rawCwAfter === 'boolean'
       ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
       : Number(rawCwAfter || 0);
+    const hasLiveVersion = Boolean(fullState && (totalGenLen >= 0 || totalStepsLen >= 0));
+    const rcSteps =
+      cascadeId && window?.__agyRcStepCountByCascade && typeof window.__agyRcStepCountByCascade[cascadeId] === 'number'
+        ? window.__agyRcStepCountByCascade[cascadeId]
+        : -1;
+    const effGenLen = typeof fallbackGenLen === 'number' && fallbackGenLen > 0 ? fallbackGenLen : -1;
     return {
       totalGenLen,
       totalStepsLen,
       latestCompactedStep,
       cwAfterCompact,
-      versionKey: `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`,
+      hasLiveVersion,
+      rcSteps,
+      versionKey: hasLiveVersion
+        ? `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`
+        : `fallback:${rcSteps}:${effGenLen}`,
     };
   }
 
@@ -317,13 +325,24 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
     const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
     const rawState = asp?.getState?.();
     const fullState = isStateForCascade(rawState, cascadeId) ? rawState : null;
-    const { totalGenLen, totalStepsLen, versionKey } = extractVersionMetrics(fullState);
     const cached = stateCache.get(cascadeId);
-    const knownGenLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1);
-    const cacheTtlMs = totalGenLen >= 0 ? 12000 : 3000;
+    const baseKnownGenLen = knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1;
+    const { totalGenLen, totalStepsLen, hasLiveVersion, rcSteps, versionKey } = extractVersionMetrics(
+      fullState,
+      cascadeId,
+      baseKnownGenLen
+    );
+    const knownGenLen = totalGenLen > 0 ? totalGenLen : baseKnownGenLen;
+    const cacheTtlMs = hasLiveVersion ? 12000 : 3000;
 
-    if (cached && cached.versionKey === versionKey && (totalGenLen >= 0 || totalStepsLen >= 0) && (Date.now() - cached.ts < cacheTtlMs)) {
-      return Promise.resolve(cached);
+    if (cached && Date.now() - cached.ts < cacheTtlMs) {
+      if (hasLiveVersion) {
+        if (cached.versionKey === versionKey) {
+          return Promise.resolve(cached);
+        }
+      } else if (rcSteps < 0 || cached.rcSteps === undefined || cached.rcSteps === rcSteps) {
+        return Promise.resolve(cached);
+      }
     }
 
     if (inFlightStats.has(cascadeId)) {
@@ -409,7 +428,7 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           setBoundedGenLen(cascadeId, discoveredGenLen);
         }
 
-        const { versionKey: finalVersionKey } = extractVersionMetrics(latestState);
+        const finalMetrics = extractVersionMetrics(latestState, cascadeId, discoveredGenLen);
         const data = {
           used: parsed.used,
           trajectoryMax: parsed.trajectoryMax,
@@ -418,7 +437,8 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
           cachePct: parsed.cachePct,
           lastMetaStepIndex: parsed.lastMetaStepIndex,
           knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
-          versionKey: finalVersionKey,
+          rcSteps: finalMetrics.rcSteps,
+          versionKey: finalMetrics.versionKey,
           ts: Date.now(),
         };
         setBoundedCache(cascadeId, data);
@@ -462,6 +482,11 @@ function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderF
         clearTimeout(cacheFlushTimer);
         cacheFlushTimer = null;
       }
+      try {
+        if (window) {
+          delete window.__agyRcGenLenByCascade;
+        }
+      } catch {}
     },
   };
 }

@@ -2,7 +2,7 @@
 
 const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
 const { resolveHostAdapterConfig } = require('./host-adapter-config');
-const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
+const { ensureStyleElement, resolveAgyTrustedTypesPolicy, createTrustedHtmlSetter } = require('./dom-styles');
 const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
 const { createRpcClient } = require('./rpc-client');
 const { createAdapterRegistry } = require('./adapter-registry');
@@ -124,27 +124,7 @@ function isRelevantStatusBarMutation(mutations) {
 }
 
 function resolveCompanionScriptPolicy(win) {
-  let policy = win?.__agyTrustedTypesPolicy || null;
-  if (!policy && win?.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-    const policyNames = [
-      'agy-statusbar',
-      'agy-statusbar-companion',
-      'agy-rc-' + Date.now(),
-    ];
-    for (const name of policyNames) {
-      try {
-        policy = win.trustedTypes.createPolicy(name, {
-          createScript: (x) => x,
-          createScriptURL: (u) => u,
-        });
-        if (policy) {
-          try { win.__agyTrustedTypesPolicy = policy; } catch {}
-          break;
-        }
-      } catch {}
-    }
-  }
-  return policy;
+  return resolveAgyTrustedTypesPolicy(win, 'createScriptURL');
 }
 
 function getScriptNonce(doc) {
@@ -402,7 +382,7 @@ function mountStatusBar(env = {}) {
     cwStore,
     hostConfig: resolvedHostConfig,
   });
-  ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, resolvedHostConfig);
+  Promise.resolve(ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, resolvedHostConfig)).catch(() => null);
 
   const rpcClient = createRpcClient({
     window: win,
@@ -565,12 +545,15 @@ function mountStatusBar(env = {}) {
       renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics });
 
       Promise.all([
-        rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox),
-        quotaPromise,
+        Promise.resolve(rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox)).catch(() => null),
+        Promise.resolve(quotaPromise).catch(() => null),
       ]).then(([data, freshQuota]) => {
-        if (!barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
+        if (disposed || !barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
         const finalData = data || cachedData || immediateData;
         renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
+      }).catch(() => {
+        if (disposed || !barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
+        renderBar(barEl, view, inputBox, cachedData || immediateData || null, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
       });
     }
   }
@@ -585,7 +568,7 @@ function mountStatusBar(env = {}) {
     setConversationContextWindow,
   };
 
-  cwStore.loadPersistentContextSettings().then(() => {
+  Promise.resolve(cwStore.loadPersistentContextSettings()).then(() => {
     if (disposed) return;
     hostBridge.syncDesktopAnnotations(
       win.__APP_CONFIG__?.csrfToken,
@@ -594,7 +577,7 @@ function mountStatusBar(env = {}) {
       true
     );
     updateAll();
-  });
+  }).catch(() => {});
   updateAll();
 
   const setIntervalFn = env.setInterval || win.setInterval || setInterval;
@@ -702,6 +685,21 @@ function mountStatusBar(env = {}) {
         styleEl.remove();
       }
     }
+    try {
+      delete win.__agyHostInstalledPlugins;
+      delete win.__agyLoadingMcpManagerCompanion;
+      delete win.__agyLoadingKoTranslatorCompanion;
+      delete win.__agyRcGenLenByCascade;
+      delete win.__agyRcStepCountByCascade;
+      delete win.__agyLastAppliedContextWindow;
+      delete win.__agyLastAppliedContextWindowByCascade;
+      delete win.__agySniffedCascadeId;
+      delete win.__agySniffedCascadeTs;
+      if (!win.agyMcpManager) {
+        delete win.__agyCapturedLsClient;
+        delete win.__agyRemoteControlInstance;
+      }
+    } catch {}
     try {
       delete win.agyStatusBar;
     } catch {
