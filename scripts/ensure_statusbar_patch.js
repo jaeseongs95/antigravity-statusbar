@@ -650,14 +650,175 @@ function isInjectablePageTarget(t) {
   );
 }
 
-function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) {
-  return new Promise((resolve, reject) => {
-    if (typeof WebSocket !== 'function') {
-      reject(new Error('Global WebSocket unavailable'));
+function createRfc6455WebSocketClient(wsUrl) {
+  const parsed = new URL(wsUrl);
+  const secKey = crypto.randomBytes(16).toString('base64');
+  const expectedAccept = crypto
+    .createHash('sha1')
+    .update(secKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    .digest('base64');
+
+  let sock = null;
+  let closed = false;
+  const client = {
+    onopen: null,
+    onmessage: null,
+    onerror: null,
+    send(data) {
+      if (closed || !sock) throw new Error('WebSocket is not open');
+      const payload = Buffer.from(String(data), 'utf8');
+      const mask = crypto.randomBytes(4);
+      let header;
+      if (payload.length < 126) {
+        header = Buffer.alloc(6);
+        header[0] = 0x81;
+        header[1] = 0x80 | payload.length;
+        mask.copy(header, 2);
+      } else if (payload.length < 65536) {
+        header = Buffer.alloc(8);
+        header[0] = 0x81;
+        header[1] = 0x80 | 126;
+        header.writeUInt16BE(payload.length, 2);
+        mask.copy(header, 4);
+      } else {
+        header = Buffer.alloc(14);
+        header[0] = 0x81;
+        header[1] = 0x80 | 127;
+        header.writeBigUInt64BE(BigInt(payload.length), 2);
+        mask.copy(header, 10);
+      }
+      const masked = Buffer.allocUnsafe(payload.length);
+      for (let i = 0; i < payload.length; i++) {
+        masked[i] = payload[i] ^ mask[i & 3];
+      }
+      sock.write(Buffer.concat([header, masked]));
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      try {
+        if (sock) {
+          const mask = crypto.randomBytes(4);
+          sock.end(Buffer.concat([Buffer.from([0x88, 0x80]), mask]));
+          sock.destroy();
+        }
+      } catch {}
+    },
+  };
+
+  const req = http.request({
+    host: parsed.hostname || '127.0.0.1',
+    port: Number(parsed.port) || 80,
+    path: (parsed.pathname || '/') + (parsed.search || ''),
+    headers: {
+      Connection: 'Upgrade',
+      Upgrade: 'websocket',
+      'Sec-WebSocket-Version': '13',
+      'Sec-WebSocket-Key': secKey,
+    },
+  });
+
+  const emitError = (err) => {
+    if (closed) return;
+    closed = true;
+    try { req.destroy(); } catch {}
+    try { if (sock) sock.destroy(); } catch {}
+    if (typeof client.onerror === 'function') {
+      client.onerror(err instanceof Error ? err : new Error(String(err)));
+    }
+  };
+
+  req.on('error', emitError);
+  req.on('response', (res) => {
+    emitError(new Error(`Unexpected HTTP response ${res.statusCode} during WebSocket upgrade`));
+  });
+  req.on('upgrade', (res, socket, head) => {
+    if (res.headers['sec-websocket-accept'] !== expectedAccept) {
+      emitError(new Error('Invalid Sec-WebSocket-Accept header'));
       return;
     }
+    sock = socket;
+    let recvBuf = head && head.length > 0 ? Buffer.from(head) : Buffer.alloc(0);
+
+    const drainFrames = () => {
+      while (!closed && recvBuf.length >= 2) {
+        const opcode = recvBuf[0] & 0x0f;
+        const isMasked = (recvBuf[1] & 0x80) !== 0;
+        let len = recvBuf[1] & 0x7f;
+        let offset = 2;
+        if (len === 126) {
+          if (recvBuf.length < 4) return;
+          len = recvBuf.readUInt16BE(2);
+          offset = 4;
+        } else if (len === 127) {
+          if (recvBuf.length < 10) return;
+          len = Number(recvBuf.readBigUInt64BE(2));
+          offset = 10;
+        }
+        const maskBytes = isMasked ? 4 : 0;
+        if (recvBuf.length < offset + maskBytes + len) return;
+        const body = Buffer.from(recvBuf.subarray(offset + maskBytes, offset + maskBytes + len));
+        if (isMasked) {
+          const m = recvBuf.subarray(offset, offset + 4);
+          for (let i = 0; i < body.length; i++) body[i] ^= m[i & 3];
+        }
+        recvBuf = recvBuf.subarray(offset + maskBytes + len);
+
+        if (opcode === 0x08) {
+          client.close();
+          return;
+        }
+        if (opcode === 0x09 && sock && !closed) {
+          const pongMask = crypto.randomBytes(4);
+          const pongHdr = Buffer.from([0x8a, 0x80 | (body.length < 126 ? body.length : 0)]);
+          if (body.length === 0) sock.write(Buffer.concat([pongHdr, pongMask]));
+          continue;
+        }
+        if (opcode === 0x01 && typeof client.onmessage === 'function') {
+          client.onmessage({ data: body.toString('utf8') });
+        }
+      }
+    };
+
+    socket.on('data', (chunk) => {
+      recvBuf = Buffer.concat([recvBuf, chunk]);
+      drainFrames();
+    });
+    socket.on('error', emitError);
+    socket.on('close', () => {
+      closed = true;
+    });
+
+    Promise.resolve().then(() => {
+      if (!closed && typeof client.onopen === 'function') {
+        client.onopen();
+      }
+      if (!closed && recvBuf.length > 0) {
+        drainFrames();
+      }
+    });
+  });
+  req.end();
+  return client;
+}
+
+function openCdpWebSocket(wsUrl) {
+  if (typeof WebSocket === 'function') {
+    return new WebSocket(wsUrl);
+  }
+  return createRfc6455WebSocketClient(wsUrl);
+}
+
+function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) {
+  return new Promise((resolve, reject) => {
     let settled = false;
-    const ws = new WebSocket(wsUrl);
+    let ws;
+    try {
+      ws = openCdpWebSocket(wsUrl);
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -727,14 +888,16 @@ function configureTargetViaCdp(wsUrl, scriptCode, scriptHash, timeoutMs = 1500) 
 
 function injectViaBrowserCdpWs(browserWsUrl, scriptCode, scriptHash, timeoutMs = 4000) {
   return new Promise((resolve, reject) => {
-    if (typeof WebSocket !== 'function') {
-      reject(new Error('Global WebSocket unavailable'));
-      return;
-    }
     let closed = false;
     let nextId = 1;
     const pending = new Map();
-    const ws = new WebSocket(browserWsUrl);
+    let ws;
+    try {
+      ws = openCdpWebSocket(browserWsUrl);
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
     const immediateExpr = buildImmediateEvalExpression(scriptCode, scriptHash);
 
     const finish = (err, val) => {
