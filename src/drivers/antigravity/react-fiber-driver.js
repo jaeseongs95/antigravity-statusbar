@@ -1284,6 +1284,7 @@ function createReactFiberDriver({
   }
 
   function getActiveSessions(onCascadeChange) {
+    ensureCustomizationsStoreLoaded();
     ensureRemoteHostView(onCascadeChange);
     const sessions = [];
     const seenBoxes = new Set();
@@ -1311,12 +1312,22 @@ function createReactFiberDriver({
       }
       const effView = resolveEffectiveView(viewEl);
       const triggerEl = effView?.querySelector?.('[data-testid="model-selector-trigger"]') || null;
+      let observedEngineCw = triggerEl?.getAttribute?.('data-context-window') || '';
+      if (!observedEngineCw && sessionId && sessionId !== 'remote-session') {
+        const info = getModelSelectorContextForView(effView);
+        const st = info?.reduxStore ? info.reduxStore.getState() : null;
+        observedEngineCw =
+          st?.modelSelection?.byConversation?.[sessionId]?.contextWindow ||
+          info?.legacyCtx?.getContextWindowForConversation?.(sessionId) ||
+          '';
+      }
       sessions.push({
         sessionId: sessionId || 'remote-session',
         viewEl,
         inputEl: boxEl,
         triggerEl,
         isRemoteShell,
+        observedEngineCw: observedEngineCw || undefined,
       });
     }
     return sessions;
@@ -1404,7 +1415,8 @@ function createReactFiberDriver({
 
   function observeSessions(onRelevantChange) {
     const MoCtor = window?.MutationObserver || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
-    if (!MoCtor || !document?.body) return () => {};
+    const rootTarget = document?.body || document?.documentElement || null;
+    if (!MoCtor || !rootTarget) return () => {};
 
     const isIgnoredNode = (node) => {
       let cur = node && node.nodeType === 3 ? node.parentElement : node;
@@ -1425,8 +1437,19 @@ function createReactFiberDriver({
       return false;
     };
 
-    const obs = new MoCtor((mutations) => {
+    const obsOptions = {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-cascade-id', 'data-context-window'],
+    };
+
+    const observers = [];
+    const observedDocs = typeof WeakSet === 'function' ? new WeakSet() : null;
+
+    const handleMutations = (mutations) => {
       if (!mutations || mutations.length === 0) return;
+      attachChildIframeObserver();
       let relevant = false;
       for (const m of mutations) {
         if (!isIgnoredNode(m.target)) {
@@ -1437,10 +1460,43 @@ function createReactFiberDriver({
       if (relevant && typeof onRelevantChange === 'function') {
         onRelevantChange();
       }
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
+    };
+
+    const observeDocTarget = (targetDoc) => {
+      if (!targetDoc) return;
+      if (observedDocs && observedDocs.has(targetDoc)) return;
+      const targetNode = targetDoc.body || targetDoc.documentElement;
+      if (!targetNode) return;
+      try {
+        const WinMo = targetDoc.defaultView?.MutationObserver || MoCtor;
+        const o = new WinMo(handleMutations);
+        o.observe(targetNode, obsOptions);
+        observers.push(o);
+        observedDocs?.add(targetDoc);
+      } catch {}
+    };
+
+    const attachChildIframeObserver = () => {
+      const cdoc = remotePortDriver?.getAccessibleIframeDocument?.();
+      if (cdoc && cdoc !== document) {
+        observeDocTarget(cdoc);
+      }
+    };
+
+    observeDocTarget(document);
+    attachChildIframeObserver();
+    const iframePollId = scope?.setInterval?.(() => {
+      if (!scope.isDisposed()) attachChildIframeObserver();
+    }, 1500);
+
     const stop = () => {
-      try { obs.disconnect(); } catch {}
+      if (iframePollId !== null && iframePollId !== undefined) {
+        scope?.clearInterval?.(iframePollId);
+      }
+      for (const o of observers) {
+        try { o.disconnect(); } catch {}
+      }
+      observers.length = 0;
     };
     scope?.add?.(stop);
     return stop;

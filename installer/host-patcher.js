@@ -213,7 +213,29 @@ function patchAsarOnDisk(opts = {}) {
     writeFileAtomicVerified(backupPath, archive.buf);
     backupCreated = true;
   } else if (!isPureUnpatched && fs.existsSync(backupPath)) {
-    archive = readAsarArchive(backupPath);
+    try {
+      const candidateBackup = readAsarArchive(backupPath);
+      if (
+        !candidateBackup?.fileMap?.get('dist/utils.js') ||
+        !candidateBackup?.fileMap?.get('dist/main.js') ||
+        !candidateBackup?.fileMap?.get('dist/preload.js')
+      ) {
+        return {
+          status: 'FAILED_CORRUPTED_BACKUP',
+          appVersion,
+          backupPath,
+          detail: 'Backup ASAR archive is missing required dist/{utils,main,preload}.js entries',
+        };
+      }
+      archive = candidateBackup;
+    } catch (backupErr) {
+      return {
+        status: 'FAILED_CORRUPTED_BACKUP',
+        appVersion,
+        backupPath,
+        detail: String(backupErr?.message || backupErr),
+      };
+    }
   }
 
   const origArchiveSize = archive.buf.length;
@@ -334,7 +356,7 @@ function uninstallFromDisk(opts = {}) {
   const report = {
     asarRestored: false,
     asarStatus: 'SKIPPED_NO_ASAR',
-    appStorageRemoved: removeAppStorageCode(opts),
+    appStorageRemoved: false,
     removedFiles: [],
   };
 
@@ -350,7 +372,21 @@ function uninstallFromDisk(opts = {}) {
     }
 
     if (backupPath && fs.existsSync(backupPath)) {
-      const backupArchive = readAsarArchive(backupPath);
+      let backupArchive = null;
+      try {
+        backupArchive = readAsarArchive(backupPath);
+        if (
+          !backupArchive?.fileMap?.get('dist/utils.js') ||
+          !backupArchive?.fileMap?.get('dist/main.js') ||
+          !backupArchive?.fileMap?.get('dist/preload.js')
+        ) {
+          throw new Error('Backup ASAR archive is missing required dist/{utils,main,preload}.js entries');
+        }
+      } catch (backupErr) {
+        report.asarStatus = 'FAILED_CORRUPTED_BACKUP';
+        report.detail = String(backupErr?.message || backupErr);
+        return report;
+      }
       const tmpRestore = `${asarPath}.restore.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
       try {
         fs.writeFileSync(tmpRestore, backupArchive.buf);
@@ -373,10 +409,15 @@ function uninstallFromDisk(opts = {}) {
           try { fs.unlinkSync(tmpRestore); } catch {}
         }
       }
+    } else if (isAsarPatchedFast(asarPath)) {
+      report.asarStatus = 'NO_BACKUP_FOUND';
+      return report;
     } else {
-      report.asarStatus = isAsarPatchedFast(asarPath) ? 'NO_BACKUP_FOUND' : 'ALREADY_UNPATCHED';
+      report.asarStatus = 'ALREADY_UNPATCHED';
     }
   }
+
+  report.appStorageRemoved = removeAppStorageCode(opts);
 
   for (const fileTarget of [autoinjectPath, patcherShimPath, statusPath]) {
     if (fileTarget && fs.existsSync(fileTarget)) {

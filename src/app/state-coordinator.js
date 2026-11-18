@@ -40,6 +40,7 @@ function createStateCoordinator({
   let quotaRefreshing = false;
 
   const statsPendingRefresh = new Set();
+  const statsAttemptedSessions = new Set();
 
   function getCsrf() {
     return typeof csrfProvider === 'function' ? csrfProvider() : '';
@@ -65,7 +66,7 @@ function createStateCoordinator({
     }
     if (opts.applyEngine !== false) {
       try {
-        engine.applyContextLimit(view, cascadeId, norm);
+        engine.applyContextLimit(view, cascadeId, norm, opts.userTriggered !== false);
       } catch {}
     }
     return norm;
@@ -124,15 +125,20 @@ function createStateCoordinator({
 
     const cachedStats = isRemotePlaceholder ? null : transport.getCachedStats(cascadeId);
     const immediateStats = isRemotePlaceholder ? null : transport.getImmediateStats(cascadeId, rawState);
+    if (!isRemotePlaceholder && session?.observedEngineCw && !cwStore.hasSessionOverride(cascadeId)) {
+      cwStore.seedSessionIfEmpty(cascadeId, session.observedEngineCw);
+    }
     const currentCw = getConversationContextWindow(view, isRemotePlaceholder ? '' : cascadeId);
 
     // Sync active model's Redux state when drift is detected
     try {
-      engine.applyContextLimit(view, isRemotePlaceholder ? '' : cascadeId, currentCw);
+      engine.applyContextLimit(view, isRemotePlaceholder ? '' : cascadeId, currentCw, false);
     } catch {}
 
     const activeStats = immediateStats || cachedStats || null;
-    const deferUncachedMetrics = Boolean(!isRemotePlaceholder && !activeStats && lastViewCount > 0);
+    const deferUncachedMetrics = Boolean(
+      !isRemotePlaceholder && !activeStats && lastViewCount > 0 && !statsAttemptedSessions.has(cascadeId)
+    );
 
     if (!isRemotePlaceholder && !statsPendingRefresh.has(cascadeId)) {
       const csrf = getCsrf();
@@ -141,28 +147,43 @@ function createStateCoordinator({
         .getStats({
           cascadeId,
           rawState,
+          getLatestState: () => {
+            const curAsp =
+              typeof engine.getAgentStateProviderForInputBox === 'function'
+                ? engine.getAgentStateProviderForInputBox(inputBox || view, cascadeId)
+                : asp;
+            return curAsp?.getState?.() || null;
+          },
           el: inputBox || view,
           csrf,
           totalGenLen: typeof getRcGenLen === 'function' ? getRcGenLen(cascadeId) : 0,
           totalStepsLen: typeof getRcStepLen === 'function' ? getRcStepLen(cascadeId) : -1,
         })
         .then((nextStats) => {
+          const firstCompletion = !statsAttemptedSessions.has(cascadeId);
+          statsAttemptedSessions.add(cascadeId);
           statsPendingRefresh.delete(cascadeId);
-          if (nextStats && nextStats !== activeStats) {
+          if ((nextStats && nextStats !== activeStats) || firstCompletion) {
             scheduleUpdate();
           }
         })
         .catch(() => {
+          const firstCompletion = !statsAttemptedSessions.has(cascadeId);
+          statsAttemptedSessions.add(cascadeId);
           statsPendingRefresh.delete(cascadeId);
+          if (firstCompletion) {
+            scheduleUpdate();
+          }
         });
     }
 
     const barTarget = isRemoteHost && hostBox ? hostBox : inputBox;
     if (!barTarget) return;
 
+    const barDoc = barTarget.ownerDocument || document;
     let barEl = barTarget.querySelector?.('.agy-ctx-statusbar') || null;
     if (!barEl) {
-      barEl = document.createElement('div');
+      barEl = barDoc.createElement('div');
       barEl.className = 'agy-ctx-statusbar';
       barEl.setAttribute?.('data-agy-no-translate', 'true');
       barEl.setAttribute?.('translate', 'no');
@@ -313,15 +334,22 @@ function createStateCoordinator({
       adapterRegistry.clearAllMenus?.(targetDoc);
       try {
         const bars = targetDoc?.querySelectorAll?.('.agy-ctx-statusbar') || [];
-        for (const b of bars) b.remove?.();
+        for (const b of bars) {
+          adapterRegistry.runNodeCleanup?.(b);
+          b.remove?.();
+        }
         const hostViews = targetDoc?.querySelectorAll?.('.agy-rc-host-view') || [];
         for (const hv of hostViews) hv.remove?.();
         const modal = targetDoc?.getElementById?.('agy-ctx-debug-modal');
-        modal?.remove?.();
+        if (modal) {
+          adapterRegistry.runNodeCleanup?.(modal);
+          modal.remove?.();
+        }
       } catch {}
     }
     removeStyles?.();
     statsPendingRefresh.clear();
+    statsAttemptedSessions.clear();
   }
 
   return {

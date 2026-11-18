@@ -57,27 +57,36 @@ describe('v2.0 Domain, Ports, Codecs, HostConfig & Hexagonal Boundary Suite', ()
     assert.equal(normalizeContextWindow('invalid'), null);
     assert.equal(getCwLimit('400K'), 400000);
 
-    const localMap = new Map();
-    const cookies = { session: {}, def: '' };
-    const deletedCookies = [];
+    const persisted = {
+      defaultCw: null,
+      sessionMap: null,
+      tsMap: null,
+    };
+    const lazyOverrides = { 's-fresh-cookie': { cw: '900K', ts: 500 } };
+    const evictedIds = [];
     const storage = {
+      loadSnapshot: () => persisted,
       loadPersistent: async () => ({
         sessionMap: { 's-cookie-only': '750K' },
         tsMap: { 's-cookie-only': 100 },
         defaultCw: '384K',
       }),
-      readSessionCookie: (cid) => cookies.session[cid] || null,
-      writeSessionCookie: (cid, cw, ts) => { cookies.session[cid] = { cw, ts }; },
-      deleteSessionCookie: (cid) => {
-        deletedCookies.push(cid);
-        delete cookies.session[cid];
+      readSessionOverride: (cid) => lazyOverrides[cid] || null,
+      saveSessionOverride: (cid, cw, meta = {}) => {
+        if (cid && cw) lazyOverrides[cid] = { cw, ts: meta.ts || 1 };
+        if (meta.sessionMap !== undefined) persisted.sessionMap = meta.sessionMap;
+        if (meta.tsMap !== undefined) persisted.tsMap = meta.tsMap;
       },
-      readDefaultCookie: () => cookies.def || null,
-      writeDefaultCookie: (cw) => { cookies.def = cw; },
-      getLocalItem: (k) => (localMap.has(k) ? localMap.get(k) : null),
-      setLocalItem: (k, v) => { localMap.set(k, v); },
-      flushNative: () => {},
+      evictSessionOverride: (cid) => {
+        evictedIds.push(cid);
+        delete lazyOverrides[cid];
+      },
+      saveDefaultLimit: (cw, meta = {}) => {
+        persisted.defaultCw = cw;
+        if (meta.tsMap !== undefined) persisted.tsMap = meta.tsMap;
+      },
     };
+    validateStoragePort(storage);
 
     const customSeen = [];
     const savedEvents = [];
@@ -88,11 +97,10 @@ describe('v2.0 Domain, Ports, Codecs, HostConfig & Hexagonal Boundary Suite', ()
     });
     await store.loadPersistentContextSettings();
 
-    // Cookie-only override preserved even with older monotonic seed attempt (D-0018)
+    // Persistent + lazy override preserved even with older monotonic seed attempt (D-0018)
     assert.equal(store.getSavedContextWindow('s-cookie-only'), '750K');
     assert.equal(store.getDefaultCw(), '384K');
 
-    cookies.session['s-fresh-cookie'] = { cw: '900K', ts: 500 };
     assert.equal(store.getSavedContextWindow('s-fresh-cookie'), '900K');
     store.seedSessionIfEmpty('s-fresh-cookie', '128K');
     assert.equal(store.getSavedContextWindow('s-fresh-cookie'), '900K');
@@ -101,12 +109,12 @@ describe('v2.0 Domain, Ports, Codecs, HostConfig & Hexagonal Boundary Suite', ()
     for (let i = 0; i < 215; i++) {
       store.saveContextWindowSetting(`sess-${i}`, i % 2 === 0 ? '400K' : '640K', { updatedAtMs: 1000 + i });
     }
-    const serialized = JSON.parse(localMap.get('agy-session-ctx-windows-v1'));
-    const serializedTs = JSON.parse(localMap.get('agy-session-ctx-ts-v1'));
+    const serialized = typeof persisted.sessionMap === 'string' ? JSON.parse(persisted.sessionMap) : persisted.sessionMap;
+    const serializedTs = typeof persisted.tsMap === 'string' ? JSON.parse(persisted.tsMap) : persisted.tsMap;
     assert.equal(Object.keys(serialized).length, 200);
     assert.equal(Object.keys(serializedTs).length, 200);
     assert.equal(serialized['sess-0'], undefined);
-    assert.ok(deletedCookies.includes('sess-0'), 'Evicted session cookie must be cleaned up');
+    assert.ok(evictedIds.includes('sess-0'), 'Evicted session override must be cleaned up');
     assert.equal(store.saveContextWindowSetting('__proto__', '512K'), null);
     assert.equal(store.saveContextWindowSetting('constructor', '512K'), null);
     assert.equal(store.saveContextWindowSetting('bad;id=1', '512K'), null);
@@ -300,13 +308,20 @@ describe('v2.0 Domain, Ports, Codecs, HostConfig & Hexagonal Boundary Suite', ()
       DEFAULT_HOST_ADAPTER_CONFIG.cdnOrigin
     );
     // Reject DOM-clobbering, single-label domains, and unsafe rpcServicePrefix
-    const clobberedWin = { __AGY_HOST_ADAPTER_CONFIG__: { nodeType: 1, rpcServicePrefix: '//evil.com' } };
+    const clobberedWin = {
+      __AGY_HOST_ADAPTER_CONFIG__: { nodeType: 1, rpcServicePrefix: '//evil.com' },
+      __AGY_STATUSBAR_HOST_CONFIG__: { locale: 'ko' },
+      __APP_CONFIG__: { csrfToken: ' csrf-123 ' },
+    };
     const safeFromClobber = resolveHostAdapterConfig(
       { rpcServicePrefix: '//evil.example/rpc', remoteHostDomains: ['com', 'evil'] },
       clobberedWin
     );
     assert.equal(safeFromClobber.rpcServicePrefix, DEFAULT_HOST_ADAPTER_CONFIG.rpcServicePrefix);
     assert.deepEqual(safeFromClobber.remoteHostDomains, DEFAULT_HOST_ADAPTER_CONFIG.remoteHostDomains);
+    assert.equal(safeFromClobber.locale, 'ko');
+    assert.equal(safeFromClobber.resolveCsrfToken(clobberedWin), 'csrf-123');
+    assert.equal(safeFromClobber.resolveCsrfToken({ __APP_CONFIG__: { nodeType: 1, csrfToken: 'bad' } }), '');
   });
 
   it('Static Hexagonal Architecture & Standalone Boundary Check (zero sibling URLs, zero HTML sinks, strict imports)', () => {
@@ -361,6 +376,19 @@ describe('v2.0 Domain, Ports, Codecs, HostConfig & Hexagonal Boundary Suite', ()
       }
 
       const myLayer = layerOf(file);
+      if (myLayer === 'ports' || myLayer === 'domain' || myLayer === 'ui' || myLayer === 'app' || myLayer === 'app_root') {
+        assert.equal(code.includes('__APP_CONFIG__'), false, `${rel} must never reference vendor __APP_CONFIG__ directly`);
+      }
+      if (myLayer === 'ports' || myLayer === 'domain') {
+        assert.equal(/Cookie|localStorage/i.test(code), false, `${rel} must remain storage-mechanism neutral`);
+      }
+      if (myLayer === 'ui') {
+        assert.equal(
+          /ga-remote-control|data-cascade-id|remote-session|exa\.language_server_pb/.test(code),
+          false,
+          `${rel} must never embed Antigravity host DOM selectors or placeholders`
+        );
+      }
       const reqMatches = [...code.matchAll(/require\(['"](\.[^'"]+)['"]\)/g)];
       for (const m of reqMatches) {
         const resolved = path.resolve(path.dirname(file), `${m[1]}.js`);
@@ -375,5 +403,10 @@ describe('v2.0 Domain, Ports, Codecs, HostConfig & Hexagonal Boundary Suite', ()
     const ciYml = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'ci.yml'), 'utf8');
     assert.equal(ciYml.includes('antigravity-mcp-manager'), false, 'ci.yml must not reference sibling repo');
     assert.equal(ciYml.includes('ko-thought-translator'), false, 'ci.yml must not reference sibling repo');
+    assert.ok(ciYml.includes('develop'), 'ci.yml must cover develop branch (D-0028)');
+
+    const relNotes = fs.readFileSync(path.join(rootDir, 'RELEASE_NOTES.md'), 'utf8');
+    assert.ok(relNotes.includes('## [English] `v2.0.0` Release Notes'), 'RELEASE_NOTES.md must contain inline English edition (D-0029)');
+    assert.ok(relNotes.includes('## [한국어] `v2.0.0` 릴리즈 노트'), 'RELEASE_NOTES.md must contain inline Korean edition (D-0029)');
   });
 });

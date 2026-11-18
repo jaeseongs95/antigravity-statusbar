@@ -124,6 +124,8 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
   let probingRcInstance = false;
   let disposed = false;
 
+  let setOwnGlobalRcInstance = false;
+
   function captureInstance(inst) {
     if (isRcComponentInstance(inst)) {
       discoveredRcInstance = inst;
@@ -131,6 +133,7 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
         try {
           if (!win.__agyRemoteControlInstance || win.__agyRemoteControlInstance.destroyed) {
             win.__agyRemoteControlInstance = inst;
+            setOwnGlobalRcInstance = true;
           }
         } catch {}
       }
@@ -142,10 +145,7 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
     const iframeWin = getAccessibleIframeWindowNoCache();
     if (iframeWin && ev.source === iframeWin) return true;
     const evOrigin = typeof ev.origin === 'string' ? ev.origin.trim() : '';
-    if (!evOrigin) {
-      // Allow same-window probe only when explicitly initiated internally
-      return Boolean(probingRcInstance && ev.data === '__agy_probe__');
-    }
+    if (!evOrigin) return false;
     if (win?.location?.origin && evOrigin === win.location.origin) return true;
     for (const rawCdn of resolvedHostConfig.staticCdnOrigins || []) {
       try {
@@ -192,9 +192,7 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
 
     const wrapMethod = (mName, buildHandler) => {
       if (typeof proto[mName] !== 'function') return;
-      let methodChain = chainTable[mName];
-      if (!methodChain) {
-        const baseFn = proto[mName];
+      const createChain = (baseFn) => {
         const nodes = [];
         const dispatcher = function (...args) {
           let idx = nodes.length - 1;
@@ -210,36 +208,43 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
           };
           return callNext(...args);
         };
-        methodChain = { baseFn, nodes, dispatcher };
-        chainTable[mName] = methodChain;
+        const chainObj = { baseFn, nodes, dispatcher };
+        chainTable[mName] = chainObj;
         proto[mName] = dispatcher;
-      } else if (proto[mName] !== methodChain.dispatcher) {
-        // An external non-chain wrapper was installed outside us; capture it cleanly
-        const extFn = proto[mName];
-        methodChain.baseFn = extFn;
-        proto[mName] = methodChain.dispatcher;
+        return chainObj;
+      };
+
+      let methodChain = chainTable[mName];
+      if (!methodChain || proto[mName] !== methodChain.dispatcher) {
+        // If an external non-chain wrapper replaced proto[mName], start a fresh chain over extFn
+        // so extFn can still invoke the previous dispatcher without forming a cycle!
+        methodChain = createChain(proto[mName]);
       }
 
+      const capturedChain = methodChain;
       const node = {
         disposed: false,
         handler: buildHandler(() => protoDisposed || disposed || node.disposed),
       };
-      methodChain.nodes.push(node);
+      capturedChain.nodes.push(node);
 
       leaseTokens.push(() => {
         if (node.disposed) return;
         node.disposed = true;
-        const pos = methodChain.nodes.indexOf(node);
-        if (pos >= 0) methodChain.nodes.splice(pos, 1);
-        if (methodChain.nodes.length === 0) {
-          if (proto[mName] === methodChain.dispatcher) {
-            proto[mName] = methodChain.baseFn;
-          }
-          delete chainTable[mName];
-          if (Object.keys(chainTable).length === 0) {
-            try {
-              delete proto[RC_PROTO_CHAIN_SYMBOL];
-            } catch {}
+        const pos = capturedChain.nodes.indexOf(node);
+        if (pos >= 0) capturedChain.nodes.splice(pos, 1);
+        if (capturedChain.nodes.length === 0) {
+          // Only unwrap proto[mName] if our dispatcher is still at the top of proto[mName]
+          if (proto[mName] === capturedChain.dispatcher) {
+            proto[mName] = capturedChain.baseFn;
+            if (chainTable[mName] === capturedChain) {
+              delete chainTable[mName];
+              if (Object.keys(chainTable).length === 0) {
+                try {
+                  delete proto[RC_PROTO_CHAIN_SYMBOL];
+                } catch {}
+              }
+            }
           }
         }
       });
@@ -247,11 +252,14 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
 
     wrapMethod('handleIframeMessage', (isOff) => function (next, ev) {
       if (isOff()) return next.call(this, ev);
+      if (probingRcInstance && ev && ev.data === '__agy_probe__') {
+        captureInstance(this);
+        return;
+      }
       if (!isTrustedMessageEvent(ev)) {
         return next.call(this, ev);
       }
       captureInstance(this);
-      if (ev && ev.data === '__agy_probe__') return;
       if (typeof hooks.onIframeMessage === 'function') {
         try {
           hooks.onIframeMessage(ev, this);
@@ -301,10 +309,10 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
       }
       wrapMethod(mName, (isOff) => function (next, ...args) {
         if (isOff()) return next.apply(this, args);
+        captureInstance(this);
         if (mName === 'onIframeLoad' && isAutoIframeLoadSuppressed(this)) {
           return Promise.resolve();
         }
-        captureInstance(this);
         if (
           probingRcInstance &&
           (mName === 'handleUrlChanged' || mName === 'onIframeLoad' || mName === 'onWindowOnline' || mName === 'loadInstances')
@@ -601,20 +609,65 @@ function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks 
       } catch {}
     }
     hookedPrototypes.clear();
+    if (setOwnGlobalRcInstance && win && win.__agyRemoteControlInstance === discoveredRcInstance) {
+      try {
+        delete win.__agyRemoteControlInstance;
+      } catch {}
+    }
+    setOwnGlobalRcInstance = false;
     discoveredRcInstance = null;
     probingRcInstance = false;
+  }
+
+  function getSelectedGeminiDir() {
+    try {
+      const rcInst = resolveInstance();
+      if (!rcInst) return '';
+      const selInst = typeof rcInst.getSelectedInstance === 'function' ? rcInst.getSelectedInstance() : null;
+      const cand =
+        selInst?.geminiDir ||
+        selInst?.selectedGeminiDir ||
+        (typeof rcInst.selectedGeminiDir === 'function' ? rcInst.selectedGeminiDir() : rcInst.selectedGeminiDir) ||
+        '';
+      return typeof cand === 'string' ? cand.trim() : '';
+    } catch {
+      return '';
+    }
   }
 
   return {
     resolvedHostConfig,
     tapPrototype,
     resolveInstance,
+    getSelectedGeminiDir,
     getAccessibleIframeWindow,
     getAccessibleIframeDocument,
     createRcServiceAdapter,
     dispose,
   };
 }
+
+const REMOTE_SHELL_LAYOUT_CSS = `
+    ga-remote-control {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    ga-remote-control .app-container {
+      display: flex !important;
+      flex-direction: column !important;
+      height: 100vh !important;
+      height: 100dvh !important;
+      max-height: 100dvh !important;
+      overflow: hidden !important;
+      box-sizing: border-box !important;
+    }
+    ga-remote-control .iframe-panel {
+      min-height: 0 !important;
+      flex: 1 1 0% !important;
+      overflow: hidden !important;
+    }
+`;
 
 function createDocumentHostDriver({ document: defaultDoc, remotePortDriver }) {
   const SAFE_CW_CSS_RE = /^\d+(?:\.\d+)?[KkMm]$/;
@@ -642,7 +695,11 @@ function createDocumentHostDriver({ document: defaultDoc, remotePortDriver }) {
           }
         }
       }
-      return `\n    ${selectors.join(',\n    ')} {\n      display: none !important;\n    }\n`;
+      return `${REMOTE_SHELL_LAYOUT_CSS}\n    ${selectors.join(',\n    ')} {\n      display: none !important;\n    }\n`;
+    },
+    resolveViewSessionId(view, fallbackSessionId = '') {
+      const cid = view?.getAttribute?.('data-cascade-id') || fallbackSessionId || '';
+      return cid === 'remote-session' ? '' : cid;
     },
     findFallbackSessionTarget(rootDoc = defaultDoc) {
       const view = rootDoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]') || null;

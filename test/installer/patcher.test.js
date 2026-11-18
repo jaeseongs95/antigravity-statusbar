@@ -35,6 +35,7 @@ const { acquireFileLock, releaseFileLock } = require('../../installer/file-lock'
 const { createRfc6455WebSocketClient, openCdpWebSocket } = require('../../installer/rfc6455-client');
 const { detectBundledPlugins, configureTargetViaCdp, injectViaBrowserCdpWs } = require('../../installer/cdp-injector');
 const { syncAppStorageCode, patchAsarOnDisk, uninstallFromDisk } = require('../../installer/host-patcher');
+const { spawnSync } = require('node:child_process');
 
 function createTestAsar(fileEntries) {
   const headerObj = { files: {} };
@@ -254,6 +255,106 @@ describe('v2.0 Build, Install, ASAR Codec, Atomic Lock, RFC6455 & CDP Patcher Su
       const afterUninstStorage = JSON.parse(fs.readFileSync(appStoragePath, 'utf8'));
       assert.equal('agy-statusbar-code' in afterUninstStorage, false);
       assert.equal(afterUninstStorage.otherKey, 42);
+
+      // Corrupted .orig backup must fail closed with FAILED_CORRUPTED_BACKUP without touching live app.asar
+      const corruptDir = path.join(tmpDir, 'corrupt-backup-test');
+      fs.mkdirSync(corruptDir, { recursive: true });
+      const corruptAsar = path.join(corruptDir, 'app.asar');
+      const legacyPatchedUtils = Buffer.from(
+        origUtils.toString('utf8').replace('"use strict";', '"use strict"; /* AGY_STATUSBAR_AUTOINJECT_V4 */'),
+        'utf8'
+      );
+      const legacyAsarBuf = createTestAsar({
+        'package.json': Buffer.from(JSON.stringify({ version: '2.33.0' }), 'utf8'),
+        'dist/utils.js': legacyPatchedUtils,
+        'dist/main.js': origMain,
+        'dist/preload.js': origPreload,
+      });
+      fs.writeFileSync(corruptAsar, legacyAsarBuf);
+      fs.writeFileSync(`${corruptAsar}.v2.33.0.orig`, Buffer.from('corrupted-not-an-asar-header', 'utf8'));
+
+      const corruptAutoinject = path.join(corruptDir, 'statusbar_autoinject.js');
+      fs.writeFileSync(corruptAutoinject, '/* statusbar bundle */ window.__testOk = 1;', 'utf8');
+
+      const corruptPatchRes = patchAsarOnDisk({
+        asarPath: corruptAsar,
+        autoinjectPath: corruptAutoinject,
+        appStoragePath,
+        appStorageLockPath: storageLockPath,
+      });
+      assert.equal(corruptPatchRes.status, 'FAILED_CORRUPTED_BACKUP');
+      assert.equal(fs.readFileSync(corruptAsar).equals(legacyAsarBuf), true, 'Corrupted .orig must leave live app.asar untouched on patch');
+
+      const corruptUninstRes = uninstallFromDisk({
+        asarPath: corruptAsar,
+        autoinjectPath: corruptAutoinject,
+        appStoragePath,
+        appStorageLockPath: storageLockPath,
+      });
+      assert.equal(corruptUninstRes.asarRestored, false);
+      assert.equal(corruptUninstRes.asarStatus, 'FAILED_CORRUPTED_BACKUP');
+      assert.equal(fs.readFileSync(corruptAsar).equals(legacyAsarBuf), true, 'Corrupted .orig must leave live app.asar untouched on uninstall');
+
+      // NO_BACKUP_FOUND on patched app.asar must NOT delete autoinject payload or app_storage code (prevents broken startup!)
+      const noBakDir = path.join(tmpDir, 'no-backup-test');
+      fs.mkdirSync(noBakDir, { recursive: true });
+      const noBakAsar = path.join(noBakDir, 'app.asar');
+      const noBakAuto = path.join(noBakDir, 'statusbar_autoinject.js');
+      const noBakStorage = path.join(noBakDir, 'app_storage.json');
+      fs.writeFileSync(noBakAsar, fs.readFileSync(asarPath)); // copy patched ASAR? Wait: asarPath was restored above, so patch fresh first
+      fs.writeFileSync(noBakAsar, rawAsar);
+      fs.writeFileSync(noBakAuto, '/* keep-alive */', 'utf8');
+      fs.writeFileSync(noBakStorage, JSON.stringify({ 'agy-statusbar-code': '/* keep-alive */' }), 'utf8');
+      const noBakPatch = patchAsarOnDisk({
+        asarPath: noBakAsar,
+        autoinjectPath: noBakAuto,
+        appStoragePath: noBakStorage,
+        appStorageLockPath: path.join(noBakDir, 's.lock'),
+      });
+      assert.equal(noBakPatch.status, 'PATCHED');
+      fs.unlinkSync(noBakPatch.backupPath); // simulate missing .orig backup
+      const noBakUninst = uninstallFromDisk({
+        asarPath: noBakAsar,
+        autoinjectPath: noBakAuto,
+        appStoragePath: noBakStorage,
+        appStorageLockPath: path.join(noBakDir, 's.lock'),
+      });
+      assert.equal(noBakUninst.asarStatus, 'NO_BACKUP_FOUND');
+      assert.equal(fs.existsSync(noBakAuto), true, 'Payload must NOT be deleted when patched ASAR cannot be restored');
+      assert.equal(
+        JSON.parse(fs.readFileSync(noBakStorage, 'utf8'))['agy-statusbar-code'],
+        '/* keep-alive */',
+        'app_storage code must NOT be deleted when patched ASAR cannot be restored'
+      );
+
+      // CLI --worker exit code must be non-zero (1) when ASAR patch fails
+      const badCliDir = path.join(tmpDir, 'bad-cli-worker');
+      fs.mkdirSync(badCliDir, { recursive: true });
+      const badAsarDir = path.join(badCliDir, 'Programs', 'antigravity', 'resources');
+      const badAgyDir = path.join(badCliDir, '.gemini', 'antigravity');
+      fs.mkdirSync(badAsarDir, { recursive: true });
+      fs.mkdirSync(badAgyDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(badAsarDir, 'app.asar'),
+        createTestAsar({ 'package.json': Buffer.from('{"version":"2.33.0"}', 'utf8') })
+      );
+      fs.writeFileSync(path.join(badAgyDir, 'statusbar_autoinject.js'), '/* payload */', 'utf8');
+      const cliWorkerRes = spawnSync(
+        process.execPath,
+        [path.join(__dirname, '..', '..', 'scripts', 'ensure_statusbar_patch.js'), '--worker'],
+        {
+          env: {
+            ...process.env,
+            USERPROFILE: badCliDir,
+            HOME: badCliDir,
+            LOCALAPPDATA: badCliDir,
+            APPDATA: badCliDir,
+          },
+          encoding: 'utf8',
+          windowsHide: true,
+        }
+      );
+      assert.equal(cliWorkerRes.status, 1, 'CLI --worker must exit 1 when patchAsarOnDisk fails');
 
       // Loopback enforcement & no global WebSocket bypass
       assert.throws(() => createRfc6455WebSocketClient('ws://evil.example:9222/devtools'), /non-loopback/);

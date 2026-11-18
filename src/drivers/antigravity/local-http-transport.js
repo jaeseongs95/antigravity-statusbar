@@ -57,7 +57,38 @@ function createStorageAdapter({ window, document, localStorage, nativeStorage })
     } catch {}
   }
 
+  function getLocalItem(key) {
+    try {
+      return localStorage?.getItem?.(key) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function setLocalItem(key, value) {
+    try {
+      localStorage?.setItem?.(key, String(value));
+    } catch {}
+  }
+
+  function flushNative(patchObj) {
+    if (effNative && typeof effNative.updateItems === 'function' && patchObj && typeof patchObj === 'object') {
+      try {
+        effNative.updateItems(patchObj);
+      } catch {}
+    }
+  }
+
   return {
+    loadSnapshot() {
+      const lsDef = getLocalItem(DEFAULT_CW_KEY);
+      const cDef = readCookie('agy_default_cw');
+      return {
+        defaultCw: cDef || lsDef || null,
+        sessionMap: getLocalItem(STORAGE_MAP_KEY),
+        tsMap: getLocalItem(STORAGE_TS_MAP_KEY),
+      };
+    },
     async loadPersistent() {
       if (!effNative || typeof effNative.getItems !== 'function') return null;
       try {
@@ -72,7 +103,7 @@ function createStorageAdapter({ window, document, localStorage, nativeStorage })
         return null;
       }
     },
-    readSessionCookie(cascadeId) {
+    readSessionOverride(cascadeId) {
       if (!cascadeId) return null;
       const raw = readCookie('agy_cw_' + cascadeId);
       if (!raw || typeof raw !== 'string') return null;
@@ -83,12 +114,33 @@ function createStorageAdapter({ window, document, localStorage, nativeStorage })
       const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
       return { cw, ts };
     },
-    writeSessionCookie(cascadeId, cw, ts) {
+    saveSessionOverride(cascadeId, cw, meta = {}) {
+      const ts = typeof meta?.ts === 'number' && meta.ts > 0 ? meta.ts : Date.now();
       if (cascadeId && /^[A-Za-z0-9._:-]{1,128}$/.test(cascadeId) && cw) {
-        writeCookie('agy_cw_' + cascadeId, `${cw}|${ts || Date.now()}`);
+        writeCookie('agy_cw_' + cascadeId, `${cw}|${ts}`);
+      }
+      const serializedMap =
+        meta?.sessionMap !== undefined
+          ? typeof meta.sessionMap === 'string'
+            ? meta.sessionMap
+            : JSON.stringify(meta.sessionMap)
+          : null;
+      const serializedTs =
+        meta?.tsMap !== undefined
+          ? typeof meta.tsMap === 'string'
+            ? meta.tsMap
+            : JSON.stringify(meta.tsMap)
+          : null;
+      if (serializedMap !== null) setLocalItem(STORAGE_MAP_KEY, serializedMap);
+      if (serializedTs !== null) setLocalItem(STORAGE_TS_MAP_KEY, serializedTs);
+      if (!meta?.deferFlush && (serializedMap !== null || serializedTs !== null)) {
+        const patch = {};
+        if (serializedMap !== null) patch[STORAGE_MAP_KEY] = serializedMap;
+        if (serializedTs !== null) patch[STORAGE_TS_MAP_KEY] = serializedTs;
+        flushNative(patch);
       }
     },
-    deleteSessionCookie(cascadeId) {
+    evictSessionOverride(cascadeId) {
       if (!cascadeId || !/^[A-Za-z0-9._:-]{1,128}$/.test(cascadeId)) return;
       try {
         if (document) {
@@ -96,29 +148,23 @@ function createStorageAdapter({ window, document, localStorage, nativeStorage })
         }
       } catch {}
     },
-    readDefaultCookie() {
-      return readCookie('agy_default_cw');
-    },
-    writeDefaultCookie(cw) {
-      if (cw) writeCookie('agy_default_cw', cw);
-    },
-    getLocalItem(key) {
-      try {
-        return localStorage?.getItem?.(key) ?? null;
-      } catch {
-        return null;
+    saveDefaultLimit(cw, meta = {}) {
+      if (cw) {
+        writeCookie('agy_default_cw', cw);
+        setLocalItem(DEFAULT_CW_KEY, cw);
       }
-    },
-    setLocalItem(key, value) {
-      try {
-        localStorage?.setItem?.(key, String(value));
-      } catch {}
-    },
-    flushNative(patchObj) {
-      if (effNative && typeof effNative.updateItems === 'function' && patchObj && typeof patchObj === 'object') {
-        try {
-          effNative.updateItems(patchObj);
-        } catch {}
+      const serializedTs =
+        meta?.tsMap !== undefined
+          ? typeof meta.tsMap === 'string'
+            ? meta.tsMap
+            : JSON.stringify(meta.tsMap)
+          : null;
+      if (serializedTs !== null) setLocalItem(STORAGE_TS_MAP_KEY, serializedTs);
+      if (!meta?.deferFlush && (cw || serializedTs !== null)) {
+        const patch = {};
+        if (cw) patch[DEFAULT_CW_KEY] = cw;
+        if (serializedTs !== null) patch[STORAGE_TS_MAP_KEY] = serializedTs;
+        flushNative(patch);
       }
     },
   };
@@ -261,7 +307,19 @@ function createLocalHttpTransport({
     const rpcMethodKey = methodName.charAt(0).toLowerCase() + methodName.slice(1);
     if (svc && typeof svc[rpcMethodKey] === 'function') {
       try {
-        const res = await svc[rpcMethodKey](reqPayload || {});
+        let svcArg = reqPayload || {};
+        if (!svc.isRemoteControlHost) {
+          if (rpcMethodKey === 'getCustomizationStates' || rpcMethodKey === 'getAllSkills') {
+            svcArg = Array.isArray(reqPayload?.workspaceUris) ? reqPayload.workspaceUris : [];
+          } else if (rpcMethodKey === 'readFile' && reqPayload && typeof reqPayload.uri === 'string') {
+            try {
+              const directRes = await svc[rpcMethodKey](reqPayload);
+              if (directRes !== undefined && directRes !== null) return directRes;
+            } catch {}
+            svcArg = reqPayload.uri;
+          }
+        }
+        const res = await svc[rpcMethodKey](svcArg);
         if (res !== undefined && res !== null) return res;
       } catch {}
     }

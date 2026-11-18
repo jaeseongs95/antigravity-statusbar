@@ -58,14 +58,21 @@ function normalizeAdapter(adapter) {
   };
 }
 
-function createAdapterRegistry({ window, document, onUpdate }) {
+function createAdapterRegistry({ window, document, documentHost, onUpdate }) {
   const adapterRegistry = new Map();
-  if (window) {
-    if (!window.__agyCustomStatusBarAdapters || !(window.__agyCustomStatusBarAdapters instanceof Map)) {
-      window.__agyCustomStatusBarAdapters = new Map();
-    }
+  const hadPreexistingCustomStore = Boolean(window && window.__agyCustomStatusBarAdapters instanceof Map);
+  if (window && !hadPreexistingCustomStore) {
+    window.__agyCustomStatusBarAdapters = new Map();
   }
   const customStore = window?.__agyCustomStatusBarAdapters || new Map();
+
+  function getTargetDocs() {
+    if (documentHost && typeof documentHost.getAccessibleDocs === 'function') {
+      const docs = documentHost.getAccessibleDocs(document);
+      if (Array.isArray(docs) && docs.length > 0) return docs;
+    }
+    return document ? [document] : [];
+  }
 
   function cleanupChildMenus(container) {
     if (!container || typeof container.querySelectorAll !== 'function') return;
@@ -79,16 +86,18 @@ function createAdapterRegistry({ window, document, onUpdate }) {
   }
 
   function removeAdapterDomElements(id) {
-    if (!document || typeof document.querySelectorAll !== 'function') return;
-    const bars = document.querySelectorAll('.agy-ctx-statusbar');
-    for (const bar of bars) {
-      const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
-      for (const node of nodes) {
-        cleanupChildMenus(node);
-        runNodeCleanup(node);
-        try {
-          node.remove();
-        } catch {}
+    for (const targetDoc of getTargetDocs()) {
+      if (!targetDoc || typeof targetDoc.querySelectorAll !== 'function') continue;
+      const bars = targetDoc.querySelectorAll('.agy-ctx-statusbar');
+      for (const bar of bars) {
+        const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
+        for (const node of nodes) {
+          cleanupChildMenus(node);
+          runNodeCleanup(node);
+          try {
+            node.remove();
+          } catch {}
+        }
       }
     }
   }
@@ -156,12 +165,13 @@ function createAdapterRegistry({ window, document, onUpdate }) {
   }
 
   function ensureBarStructure(barEl) {
+    const ownerDoc = barEl?.ownerDocument || document;
     let leftEl = barEl.querySelector?.('.agy-ctx-left') || null;
     let rightEl = barEl.querySelector?.('.agy-ctx-right') || null;
     if (!leftEl || !rightEl) {
       cleanupChildMenus(barEl);
-      leftEl = h(document, 'div', { className: 'agy-ctx-left' });
-      rightEl = h(document, 'div', { className: 'agy-ctx-right' });
+      leftEl = h(ownerDoc, 'div', { className: 'agy-ctx-left' });
+      rightEl = h(ownerDoc, 'div', { className: 'agy-ctx-right' });
       if (typeof barEl.replaceChildren === 'function') {
         barEl.replaceChildren(leftEl, rightEl);
       } else {
@@ -177,6 +187,7 @@ function createAdapterRegistry({ window, document, onUpdate }) {
 
   function renderSlotAdapters(slotEl, slotName, ctx) {
     if (!slotEl) return;
+    const ownerDoc = slotEl.ownerDocument || document;
     const adapters = getSortedAdapters(slotName);
     const activeIds = new Set(adapters.map((a) => a.id));
 
@@ -199,7 +210,7 @@ function createAdapterRegistry({ window, document, onUpdate }) {
       let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
       if (typeof adapter.render === 'function') {
         if (!itemEl) {
-          itemEl = h(document, adapter.tagName || 'span', {
+          itemEl = h(ownerDoc, adapter.tagName || 'span', {
             className: adapter.className || undefined,
             'data-agy-adapter-id': adapter.id,
           });
@@ -208,7 +219,7 @@ function createAdapterRegistry({ window, document, onUpdate }) {
         adapter.render(itemEl, ctx);
       } else {
         if (!itemEl) {
-          itemEl = h(document, 'button', {
+          itemEl = h(ownerDoc, 'button', {
             type: 'button',
             'data-agy-adapter-id': adapter.id,
             onclick(e) {
@@ -287,6 +298,22 @@ function createAdapterRegistry({ window, document, onUpdate }) {
     cleanupChildMenus(targetDoc || document);
   }
 
+  function dispose() {
+    for (const adapter of adapterRegistry.values()) {
+      if (adapter && typeof adapter.unmount === 'function') {
+        try {
+          adapter.unmount();
+        } catch {}
+      }
+    }
+    adapterRegistry.clear();
+    if (window && window.__agyCustomStatusBarAdapters === customStore && customStore.size === 0 && !hadPreexistingCustomStore) {
+      try {
+        delete window.__agyCustomStatusBarAdapters;
+      } catch {}
+    }
+  }
+
   return {
     registerAdapter,
     unregisterAdapter,
@@ -296,6 +323,7 @@ function createAdapterRegistry({ window, document, onUpdate }) {
     ensureBarStructure,
     renderSlotAdapters,
     clearAllMenus,
+    dispose,
     registerNodeCleanup,
     runNodeCleanup,
   };

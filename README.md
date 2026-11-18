@@ -1,6 +1,6 @@
 # antigravity-statusbar (`v2.0.0`)
 
-**Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)**
+**Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)** | **[Release Notes (RELEASE_NOTES.md)](./RELEASE_NOTES.md)**
 
 Standalone **Hexagonal Architecture** context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary token limit selector (`32K`–`980K`) with real-time backend checkpointer synchronization, zero-HTML-string pure DOM UI (`TrustedHTML`-free), pluggable **`StatusBarAdapter`** extension API, `Symbol.for('agy.plugin.bus.v2')` plugin event bus, modular zero-offset `app.asar` + live CDP auto-patcher, and **Remote Control Web (`https://antigravity.google.com/r/...`)** bookmarklet & userscript support for **Google Antigravity IDE**.
 
@@ -63,7 +63,7 @@ npm run uninstall
 Save the single-line JavaScript below as the **URL** of a browser bookmark and click it once inside `https://antigravity.google.com/r/...`:
 
 ```javascript
-javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>{if(!r.ok||!r.url.startsWith('https://raw.githubusercontent.com/'))throw new Error(r.status);return r.text()}).then(c=>{const s=document.createElement('script'),n=[...document.querySelectorAll('script,style,link')].map(x=>x.nonce||x.getAttribute('nonce')).find(Boolean),t=window.trustedTypes;let p=null;if(t?.createPolicy){for(const k of['agy-sb-bm','agy-sb-'+Date.now()])try{let u=1;p=t.createPolicy(k,{createScript:x=>{if(!u)throw new TypeError();u=0;return x}});break}catch{}}if(t&&!p&&!t.defaultPolicy)return;if(n){s.nonce=n;s.setAttribute('nonce',n)}s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
+javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>{if(!r.ok||!r.url.startsWith('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/'))throw new Error(r.status);return r.text()}).then(c=>{const g=Symbol.for('agy.sb.tt.scriptGate.v2'),s=document.createElement('script'),n=[...document.querySelectorAll('script,style,link')].map(x=>x.nonce||x.getAttribute('nonce')).find(Boolean),t=window.trustedTypes;let k=window[g];if(!k&&t?.createPolicy){const a=new Set();for(const m of['agy-sb-bm','agy-sb-companion-v2'])try{const p=t.createPolicy(m,{createScript:x=>{const v=String(x??'');if(!a.has(v))throw new TypeError();a.delete(v);return v}});k=Object.freeze({run:(x,f)=>{const v=String(x??'');a.add(v);try{return f(p.createScript(v))}finally{a.delete(v)}}});Object.defineProperty(window,g,{value:k,configurable:true});break}catch{}}if(t&&!k)return;if(n){s.nonce=n;s.setAttribute('nonce',n)}const d=v=>{s.text=v;document.head.appendChild(s)};k?k.run(c,d):d(c)})})();
 ```
 
 ### Method 2: Automatic UserScript (Tampermonkey / Violentmonkey / AdGuard)
@@ -174,6 +174,7 @@ antigravity-statusbar/
 │   ├── installer/patcher.test.js             # Build, install, ASAR, lock, RFC6455 & CDP tests
 │   └── e2e/remote-chrome.test.js             # Headless Chromium CSP/TrustedTypes & live host smoke
 ├── .github/workflows/ci.yml                  # Standalone Windows + Ubuntu CI matrix
+├── RELEASE_NOTES.md                          # Bilingual (EN/KO inline) release notes
 └── docs/{ARCHITECTURE_V2,TEST_CASES}.md
 ```
 

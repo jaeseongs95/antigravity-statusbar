@@ -93,11 +93,24 @@ async function runHookFastPath(entryFilename = __filename) {
   process.exit(0);
 }
 
+function isHealthyAsarStatus(status) {
+  return (
+    status === 'PATCHED' ||
+    status === 'ALREADY_PATCHED' ||
+    status === 'SKIPPED_NO_ASAR' ||
+    status === 'SKIPPED_NO_AUTOINJECT_SCRIPT'
+  );
+}
+
 async function main(entryFilename = __filename) {
   const args = process.argv.slice(2);
   if (args.includes('--worker')) {
-    await runWorkerMode();
-    process.exit(0);
+    const report = await runWorkerMode();
+    if (!report) {
+      process.exit(1);
+    }
+    const asarOk = isHealthyAsarStatus(report?.asar?.status);
+    process.exit(asarOk ? 0 : 1);
   } else if (args.includes('--uninstall')) {
     const token = `${process.pid}:${crypto.randomBytes(8).toString('hex')}`;
     if (!acquireLock(DEFAULT_PATHS.LOCK_PATH, token)) {
@@ -111,7 +124,11 @@ async function main(entryFilename = __filename) {
       releaseLock(DEFAULT_PATHS.LOCK_PATH, token);
     }
     process.stdout.write(JSON.stringify(res, null, 2) + '\n');
-    process.exit(res.asarStatus === 'FAILED_WRITE_BUSY' ? 1 : 0);
+    const okUninst =
+      res.asarStatus === 'RESTORED' ||
+      res.asarStatus === 'ALREADY_UNPATCHED' ||
+      res.asarStatus === 'SKIPPED_NO_ASAR';
+    process.exit(okUninst ? 0 : 1);
   } else if (args.includes('--status')) {
     const patched = isAsarPatchedFast(DEFAULT_PATHS.ASAR_PATH);
     let lastStatus = null;

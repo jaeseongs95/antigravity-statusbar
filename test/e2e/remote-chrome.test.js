@@ -69,6 +69,8 @@ function loadReadmeBookmarklet() {
 }
 
 async function launchChromeWithCdp(chromeBin, profileDir, extraArgs = []) {
+  const chromeEnv = { ...process.env };
+  delete chromeEnv.DBUS_SESSION_BUS_ADDRESS;
   const proc = spawn(
     chromeBin,
     [
@@ -76,6 +78,10 @@ async function launchChromeWithCdp(chromeBin, profileDir, extraArgs = []) {
       '--no-sandbox',
       '--disable-gpu',
       '--disable-dev-shm-usage',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--password-store=basic',
+      '--use-mock-keychain',
       '--disable-quic',
       '--no-first-run',
       '--no-default-browser-check',
@@ -84,24 +90,50 @@ async function launchChromeWithCdp(chromeBin, profileDir, extraArgs = []) {
       ...extraArgs,
       'about:blank',
     ],
-    { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }
+    { stdio: ['ignore', 'ignore', 'pipe'], env: chromeEnv, windowsHide: true }
   );
 
   let stderrBuf = '';
+  const activePortFile = path.join(profileDir, 'DevToolsActivePort');
   const wsUrl = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`DevTools URL timeout. stderr=${stderrBuf}`)), 15000);
+    let settled = false;
+    const cleanupWatch = () => {
+      clearTimeout(timer);
+      clearInterval(portPoll);
+    };
+    const succeed = (url) => {
+      if (settled) return;
+      settled = true;
+      cleanupWatch();
+      resolve(url);
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanupWatch();
+      reject(err);
+    };
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      fail(new Error(`DevTools URL timeout. stderr=${stderrBuf}`));
+    }, 35000);
+    const portPoll = setInterval(() => {
+      try {
+        if (!fs.existsSync(activePortFile)) return;
+        const lines = fs.readFileSync(activePortFile, 'utf8').trim().split(/\r?\n/);
+        if (lines.length >= 2 && /^\d+$/.test(lines[0].trim()) && lines[1].trim().startsWith('/')) {
+          succeed(`ws://127.0.0.1:${lines[0].trim()}${lines[1].trim()}`);
+        }
+      } catch {}
+    }, 100);
     proc.stderr.setEncoding('utf8');
     proc.stderr.on('data', (chunk) => {
       stderrBuf += chunk;
       const m = stderrBuf.match(/DevTools listening on (ws:\/\/[^\s\r\n]+)/);
-      if (m) {
-        clearTimeout(timer);
-        resolve(m[1]);
-      }
+      if (m) succeed(m[1]);
     });
     proc.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`Chrome exited early (${code}): ${stderrBuf}`));
+      fail(new Error(`Chrome exited early (${code}): ${stderrBuf}`));
     });
   });
 
@@ -194,7 +226,13 @@ describe('v2.0 Standalone Headless Chromium E2E Suite', () => {
           `script-src 'nonce-${hostNonce}';style-src 'nonce-${hostNonce}';connect-src *;worker-src 'self'`,
           "require-trusted-types-for 'script'",
         ]);
-        res.end(`<!doctype html><html><head><style nonce="${hostNonce}">body{margin:0}</style></head><body><div id="style-only">ok</div></body></html>`);
+        res.end(`<!doctype html><html><head><style nonce="${hostNonce}">body{margin:0}</style><script nonce="${hostNonce}">
+          window.__e2eCspViolations = [];
+          window.__e2eErrors = [];
+          document.addEventListener('securitypolicyviolation', (e) => window.__e2eCspViolations.push(e.violatedDirective + ':' + (e.blockedURI || '')));
+          window.addEventListener('error', (e) => window.__e2eErrors.push(String(e.message || e)));
+          window.addEventListener('unhandledrejection', (e) => window.__e2eErrors.push(String(e.reason || e)));
+        </script></head><body><div id="style-only">ok</div></body></html>`);
         return;
       }
 
@@ -217,13 +255,8 @@ describe('v2.0 Standalone Headless Chromium E2E Suite', () => {
         <script nonce="${hostNonce}">
           window.__e2eCspViolations = [];
           window.__e2eErrors = [];
-          window.__AGY_STATUSBAR_HOST_CONFIG__ = {
-            companionScripts: [
-              'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
-            ],
-          };
           document.addEventListener('securitypolicyviolation', (e) => {
-            window.__e2eCspViolations.push(e.violatedDirective + ':' + e.blockedURI);
+            window.__e2eCspViolations.push(e.violatedDirective + ':' + (e.blockedURI || ''));
           });
           window.addEventListener('error', (e) => window.__e2eErrors.push(String(e.message || e)));
           window.addEventListener('unhandledrejection', (e) => window.__e2eErrors.push(String(e.reason || e)));
@@ -237,11 +270,34 @@ describe('v2.0 Standalone Headless Chromium E2E Suite', () => {
         <script nonce="${hostNonce}">
           const dec = new TextDecoder();
           const enc = (obj) => ({ payload: new TextEncoder().encode(JSON.stringify(obj)) });
+          const hostAutoinjectText = [
+            '// statusbar bundle header',
+            'const strGuard = "\\n// === END_AGY_MCP_MANAGER_V1 ===";',
+            '/* === BEGIN_AGY_MCP_MANAGER_V1 === */',
+            'window.__agyCompanionMarkerLoaded = (window.__agyCompanionMarkerLoaded || 0) + 1;',
+            '/* === END_AGY_MCP_MANAGER_V1 === */',
+          ].join('\\n');
           window.__nativeOnLoadCalls = 0;
+          window.__readFileCalls = 0;
           class RemoteControlComponent {
             constructor(ifr) { this.iframe = ifr; }
             onIframeLoad() { window.__nativeOnLoadCalls += 1; }
-            async proxyCommand(rpcPath) {
+            async proxyCommand(rpcPath, reqBytes) {
+              const reqJson = reqBytes && reqBytes.byteLength ? JSON.parse(dec.decode(reqBytes)) : {};
+              if (rpcPath.endsWith('/GetCustomizationStates')) {
+                return enc({
+                  states: [{ fileUri: 'file:///C%3A/Users/HostUser/.gemini/antigravity/mcp_config.json' }],
+                });
+              }
+              if (rpcPath.endsWith('/ReadFile')) {
+                window.__readFileCalls += 1;
+                if (String(reqJson.uri || '').includes('/.gemini/antigravity/statusbar_autoinject.js')) {
+                  return enc({
+                    content: Array.from(new TextEncoder().encode(hostAutoinjectText)),
+                  });
+                }
+                return enc({});
+              }
               if (rpcPath.endsWith('/GetAllCascadeTrajectories')) {
                 return enc({ trajectorySummaries: { '547d3ff8-7d19-415f-a68a-9bbf28c06f5f': { stepCount: 12, lastModifiedTime: '2026-11-18T12:00:00Z' } } });
               }
@@ -389,9 +445,9 @@ describe('v2.0 Standalone Headless Chromium E2E Suite', () => {
       assert.deepEqual(snap.csp, []);
       assert.deepEqual(snap.err, []);
 
-      // Verify host-config + marker-based companion load under strict CSP/TrustedTypes (only configured companion loads)
+      // Verify real host-marker companion discovery (GetCustomizationStates -> ReadFile) with ZERO synthetic host config
       let companionCount = 0;
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 80; i++) {
         const cr = await sendCdp(
           'Runtime.evaluate',
           { expression: 'Number(window.__agyCompanionMarkerLoaded || 0)', returnByValue: true },
@@ -401,9 +457,9 @@ describe('v2.0 Standalone Headless Chromium E2E Suite', () => {
         if (companionCount >= 1) break;
         await new Promise((r) => setTimeout(r, 50));
       }
-      assert.equal(companionCount, 1, 'Configured marker companion must load once via TrustedTypes + nonce');
-      assert.equal(requestedRawUrls.some((u) => u.includes('mcp_manager_autoinject.js')), true);
-      assert.equal(requestedRawUrls.some((u) => u.includes('ko_thought_autoinject.js')), false, 'Unconfigured companion must never be fetched');
+      assert.equal(companionCount, 1, 'Installed host-marker companion must auto-load once via GetCustomizationStates + ReadFile + TrustedTypes + nonce');
+      assert.equal(requestedRawUrls.length, 1, 'Bookmarklet must fetch ONLY statusbar_autoinject.js and never fetch unconfigured external sibling URLs');
+      assert.equal(requestedRawUrls.some((u) => u.includes('ko_thought_autoinject.js')), false, 'Uninstalled companion must never be fetched');
 
       // Simulate sibling/host promotion of cross-origin child iframe -> same-origin /child-frame.html and verify child mount
       await sendCdp(
@@ -518,6 +574,85 @@ describe('v2.0 Standalone Headless Chromium E2E Suite', () => {
       assert.equal(modalSnap.childStyleAfterCleanup, false, 'Promoted child iframe style must be removed on cleanup');
       assert.deepEqual(modalSnap.csp, []);
       assert.deepEqual(modalSnap.err, []);
+
+      // Verify /r/style-nonce-only (no <script nonce>, only <style nonce>) propagates style nonce cleanly with zero CSP violations
+      await sendCdp('Page.navigate', { url: `https://antigravity.google.com:${hostPort}/r/style-nonce-only` }, sessionId);
+      for (let i = 0; i < 40; i++) {
+        const ready = await sendCdp('Runtime.evaluate', { expression: 'document.readyState === "complete"', returnByValue: true }, sessionId);
+        if (ready?.result?.value === true) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await sendCdp('Runtime.evaluate', { expression: bookmarkletExpr, returnByValue: true }, sessionId);
+      let styleOnlySnap = null;
+      for (let i = 0; i < 60; i++) {
+        const r = await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              if (!window.agyStatusBar) return null;
+              const st = document.getElementById('agy-ctx-statusbar-style');
+              const styleNonce = st ? (st.nonce || st.getAttribute('nonce') || '') : '';
+              window.__agyStatusBarCleanup();
+              return {
+                styleNonce,
+                csp: window.__e2eCspViolations || [],
+                err: window.__e2eErrors || [],
+              };
+            })()`,
+            returnByValue: true,
+          },
+          sessionId
+        );
+        if (r?.result?.value) {
+          styleOnlySnap = r.result.value;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(styleOnlySnap, 'Statusbar must mount on /r/style-nonce-only');
+      assert.equal(styleOnlySnap.styleNonce, hostNonce);
+      assert.deepEqual(styleOnlySnap.csp, []);
+      assert.deepEqual(styleOnlySnap.err, []);
+
+      // Verify /r/strict-tt-preflight (`trusted-types ogb-qtm#html agy-sb-bm` ONLY):
+      // bookmarklet + host-marker companion share scoped one-shot scriptGate without random policy CSP violations!
+      await sendCdp('Page.navigate', { url: `https://antigravity.google.com:${hostPort}/r/strict-tt-preflight?styleNonce=1` }, sessionId);
+      for (let i = 0; i < 40; i++) {
+        const ready = await sendCdp('Runtime.evaluate', { expression: 'document.readyState === "complete"', returnByValue: true }, sessionId);
+        if (ready?.result?.value === true) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await sendCdp('Runtime.evaluate', { expression: bookmarkletExpr, returnByValue: true }, sessionId);
+      let preflightSnap = null;
+      for (let i = 0; i < 80; i++) {
+        const r = await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              const bar = document.querySelector('.agy-ctx-statusbar');
+              const comp = Number(window.__agyCompanionMarkerLoaded || 0);
+              if (!bar || !bar.textContent.includes('98%') || comp < 1) return null;
+              window.__agyStatusBarCleanup();
+              return {
+                comp,
+                csp: window.__e2eCspViolations || [],
+                err: window.__e2eErrors || [],
+              };
+            })()`,
+            returnByValue: true,
+          },
+          sessionId
+        );
+        if (r?.result?.value) {
+          preflightSnap = r.result.value;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(preflightSnap, 'strict-tt-preflight must mount statusbar AND load host-marker companion via shared scriptGate');
+      assert.equal(preflightSnap.comp, 1);
+      assert.deepEqual(preflightSnap.csp, [], 'strict-tt-preflight must emit zero SecurityPolicyViolationEvents');
+      assert.deepEqual(preflightSnap.err, []);
 
       // Graceful failure on denied trusted-types allowlist (strict-tt-block-all)
       await sendCdp('Page.navigate', { url: `https://antigravity.google.com:${hostPort}/r/strict-tt-block-all-v2` }, sessionId);

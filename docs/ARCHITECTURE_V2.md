@@ -4,7 +4,7 @@
 
 - **Version Target**: `2.0.0` (SemVer Major — internal Hexagonal rewrite preserving public `window.agyStatusBar` and CLI `scripts/*` entrypoints)
 - **Repository**: `https://github.com/jaeseongs95/antigravity-statusbar`
-- **Status**: Pre-implementation Design Specification (frozen for independent design review prior to v2.0 implementation)
+- **Status**: Implemented & Active Architecture Specification (`v2.0.0`)
 
 ---
 
@@ -80,13 +80,12 @@ Defines explicit port contracts injected into `StateCoordinator` and `ui/views`:
   - `updateAnnotations({ cascadeIds, annotations, mergeAnnotations }) => Promise<boolean>`
   - `dispose() => void`
 - **`StoragePort`**:
-  - `loadPersistent() => Promise<{ defaultCw?: string, sessionMap?: object, tsMap?: object } | null>`
-  - `readSessionCookie(cascadeId) => { cw: string, ts: number } | null`
-  - `writeSessionCookie(cascadeId, cw, ts) => void`
-  - `readDefaultCookie() => string | null`
-  - `writeDefaultCookie(cw) => void`
-  - `getLocalItem(key) / setLocalItem(key, value)`
-  - `flushNative(patchObj) => void`
+  - `loadSnapshot() => { defaultCw?: string | null, sessionMap?: object | string | null, tsMap?: object | string | null } | null`
+  - `loadPersistent() => Promise<{ defaultCw?: string, sessionMap?: object | string, tsMap?: object | string } | null>`
+  - `readSessionOverride(cascadeId) => { cw: string, ts: number } | null`
+  - `saveSessionOverride(cascadeId, cw, meta) => void`
+  - `evictSessionOverride(cascadeId) => void`
+  - `saveDefaultLimit(cw, meta) => void`
 - **`EnginePort`**:
   - `observeSessions(onRelevantChange) => UnsubscribeFn`
   - `getActiveSessions() => Array<{ sessionId, viewEl, inputEl, triggerEl, isRemoteShell }>`
@@ -129,7 +128,10 @@ Defines explicit port contracts injected into `StateCoordinator` and `ui/views`:
 ### 3.4 `src/drivers/antigravity/` (Vendor Isolation & Coexistence Boundary)
 - **`src/drivers/antigravity/host-config.js`**:
   - Enforces exact domain or dot-boundary subdomain matching (`host === d || host.endsWith('.' + d)` — blocks substring spoofing `D-0031`).
-  - Validates HTTPS CDN origins (`https:` only, zero credentials). Accepts runtime overrides via `mountStatusBar({ hostConfig })` or `window.__AGY_HOST_ADAPTER_CONFIG__`.
+  - Validates HTTPS CDN origins (`https:` only, zero credentials). Accepts runtime overrides via `mountStatusBar(win, { hostConfig })`, `window.__AGY_STATUSBAR_HOST_CONFIG__`, or `window.__AGY_HOST_ADAPTER_CONFIG__`, and encapsulates `resolveCsrfToken(win)` so `src/app/` never touches `window.__APP_CONFIG__`.
+- **`src/drivers/antigravity/companion-driver.js`**:
+  - Discovers installed local companions on Remote Control hosts (`GetCustomizationStates` / `GetAllPlugins` / `GetAllSkills` / `selectedGeminiDir` -> `ReadFile` `${geminiDir}/antigravity/statusbar_autoinject.js` decoding UTF-8, `Uint8Array`, `ArrayBuffer`, and base64) using column-0 `// === BEGIN_AGY_<TAG> ===` and `/* === BEGIN_AGY_<TAG> === */` markers (`_V\d+` normalized, zero hardcoded sibling literals) with `DisposableScope`-tracked `1500ms` retries (`max 5` attempts, cancelled on `dispose()`).
+  - Shares a scoped one-shot TrustedScript token gate (`Symbol.for('agy.sb.tt.scriptGate.v2')`) with the `README.md` bookmarklet (`'agy-sb-bm'`) and caches negative `TrustedTypes` policy blocks per `window` via `WeakMap` (`BLOCKING-B`).
 - **`src/drivers/antigravity/protobuf-wire-codec.js`**:
   - Pure Connect 5-byte frame codec & Protobuf wire injector (`D-0019` exact varint end verification, `D-0022` `ContinueAfterInjection` field-20 bypass + existing `field 5` `cascade_config` merge preserving sibling `planner_config` subfields, handles `Request` clones `D-0008`).
 - **`src/drivers/antigravity/local-http-transport.js`**:
@@ -192,7 +194,7 @@ Replaces monolithic `scripts/ensure_statusbar_patch.js` (`1,618` lines) with six
 ## 6. Standalone CI & Modular Test Layout
 
 - **CI (`.github/workflows/ci.yml`)**: Single-repo checkout on `[ubuntu-latest, windows-latest]` for `main`, `develop`, `feature/**`, `fix/**`, `bugfix/**`, `release/**`, `hotfix/**`, and `workflow_dispatch`. Zero sibling repository checkouts.
-- **Test Suites (`npm test` -> `node scripts/build.js && node --test test/**/*.test.js`)**:
+- **Test Suites (`npm test` -> `node scripts/build.js && node --test test/unit/domain.test.js test/unit/ui.test.js test/integration/drivers.test.js test/installer/patcher.test.js test/e2e/remote-chrome.test.js`)**:
   - `test/unit/domain.test.js` — pure domain policies, metrics, i18n, protobuf wire codec
   - `test/unit/ui.test.js` — DOM builder XSS safety, zero `createPolicy`/`innerHTML`, adapter ordering, menu/modal cleanup
   - `test/integration/drivers.test.js` — Fiber/Redux model preservation, WeakMap RC prototype lease, session-switch anti-bleed, `DisposableScope` & `.bind(win)` timers

@@ -320,27 +320,8 @@ const STYLE_CSS = `
       font-weight: 600;
       background: rgba(255, 255, 255, 0.02);
     }
-    .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
+    .agy-tbl td.num, .agy-ctx-tbl td.num, .agy-ctx-tbl th.num {
       text-align: right;
-    }
-    ga-remote-control {
-      display: block;
-      width: 100%;
-      height: 100%;
-    }
-    ga-remote-control .app-container {
-      display: flex !important;
-      flex-direction: column !important;
-      height: 100vh !important;
-      height: 100dvh !important;
-      max-height: 100dvh !important;
-      overflow: hidden !important;
-      box-sizing: border-box !important;
-    }
-    ga-remote-control .iframe-panel {
-      min-height: 0 !important;
-      flex: 1 1 0% !important;
-      overflow: hidden !important;
     }
     .agy-rc-host-view {
       flex-shrink: 0;

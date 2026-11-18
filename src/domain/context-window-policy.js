@@ -2,8 +2,8 @@
 
 /**
  * Pure Context Window Policy Domain Module.
- * Enforces [32K, 980K] clamping, 200-entry synchronized LRU eviction, cookie override preservation,
- * and remote annotation profile serialization without any DOM or vendor coupling.
+ * Enforces [32K, 980K] clamping, 200-entry synchronized LRU eviction, lazy session override preservation,
+ * and remote annotation profile serialization without any DOM, browser storage, or vendor coupling.
  */
 
 const { DEFAULT_LOCALE, createTranslator } = require('./i18n');
@@ -92,7 +92,7 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
       sessionCwMap.delete(oldestKey);
       sessionCwTsMap.delete(oldestKey);
       try {
-        storage?.deleteSessionCookie?.(oldestKey);
+        storage?.evictSessionOverride?.(oldestKey);
       } catch {}
     }
   }
@@ -143,35 +143,44 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
     } catch {}
   }
 
-  function serializeSessionMap() {
+  function snapshotSessionMap() {
     trimSessionMaps(MAX_SESSION_ENTRIES);
-    return JSON.stringify(Object.fromEntries(sessionCwMap.entries()));
+    return Object.fromEntries(sessionCwMap.entries());
   }
 
-  function serializeSessionTsMap() {
+  function snapshotSessionTsMap() {
     const out = {};
     for (const [k, ts] of sessionCwTsMap.entries()) {
       if (typeof ts === 'number' && ts > 0 && (k === '__default__' || sessionCwMap.has(k))) {
         out[k] = ts;
       }
     }
-    return JSON.stringify(out);
+    return out;
+  }
+
+  function applyHydratedItems(items) {
+    if (!items || typeof items !== 'object') return false;
+    let applied = false;
+    const savedDef = normalize(items.defaultCw ?? items[DEFAULT_CW_KEY]);
+    if (savedDef) {
+      defaultCwCache = savedDef;
+      hasExplicitDefault = true;
+      applied = true;
+    }
+    if (items.tsMap ?? items[STORAGE_TS_MAP_KEY]) {
+      loadTsMapFromRaw(items.tsMap ?? items[STORAGE_TS_MAP_KEY]);
+      applied = true;
+    }
+    if (items.sessionMap ?? items[STORAGE_MAP_KEY]) {
+      loadMapFromRaw(items.sessionMap ?? items[STORAGE_MAP_KEY]);
+      applied = true;
+    }
+    return applied;
   }
 
   // Initial synchronous hydration from StoragePort
   try {
-    const lsDef = normalize(storage?.getLocalItem?.(DEFAULT_CW_KEY));
-    if (lsDef) {
-      defaultCwCache = lsDef;
-      hasExplicitDefault = true;
-    }
-    const cDef = normalize(storage?.readDefaultCookie?.());
-    if (cDef) {
-      defaultCwCache = cDef;
-      hasExplicitDefault = true;
-    }
-    loadTsMapFromRaw(storage?.getLocalItem?.(STORAGE_TS_MAP_KEY));
-    loadMapFromRaw(storage?.getLocalItem?.(STORAGE_MAP_KEY));
+    applyHydratedItems(storage?.loadSnapshot?.());
   } catch {}
 
   async function loadPersistentContextSettings() {
@@ -179,19 +188,15 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
     try {
       const items = await storage.loadPersistent();
       if (!items || typeof items !== 'object') return;
-      const savedDef = normalize(items.defaultCw ?? items[DEFAULT_CW_KEY]);
-      if (savedDef) {
-        defaultCwCache = savedDef;
-        hasExplicitDefault = true;
-      }
-      if (items.tsMap ?? items[STORAGE_TS_MAP_KEY]) {
-        loadTsMapFromRaw(items.tsMap ?? items[STORAGE_TS_MAP_KEY]);
-      }
-      if (items.sessionMap ?? items[STORAGE_MAP_KEY]) {
-        loadMapFromRaw(items.sessionMap ?? items[STORAGE_MAP_KEY]);
+      const hadSessionMap = Boolean(items.sessionMap ?? items[STORAGE_MAP_KEY]);
+      applyHydratedItems(items);
+      if (hadSessionMap) {
         try {
-          storage.setLocalItem?.(STORAGE_MAP_KEY, serializeSessionMap());
-          storage.setLocalItem?.(STORAGE_TS_MAP_KEY, serializeSessionTsMap());
+          storage.saveSessionOverride?.(null, null, {
+            sessionMap: snapshotSessionMap(),
+            tsMap: snapshotSessionTsMap(),
+            deferFlush: true,
+          });
         } catch {}
       }
     } catch {}
@@ -200,12 +205,12 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
   function hasSessionOverride(cascadeId) {
     if (!isValidCascadeId(cascadeId)) return false;
     if (sessionCwMap.has(cascadeId)) return true;
-    const cSession = storage?.readSessionCookie?.(cascadeId);
-    if (cSession) {
-      const norm = normalize(cSession.cw);
+    const extOverride = storage?.readSessionOverride?.(cascadeId);
+    if (extOverride) {
+      const norm = normalize(extOverride.cw);
       if (norm) {
         const prevTs = sessionCwTsMap.get(cascadeId) || 0;
-        const ts = typeof cSession.ts === 'number' && cSession.ts > prevTs ? cSession.ts : prevTs || 1;
+        const ts = typeof extOverride.ts === 'number' && extOverride.ts > prevTs ? extOverride.ts : prevTs || 1;
         touchSessionEntry(cascadeId, norm, ts);
         return true;
       }
@@ -228,22 +233,18 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
     const norm = normalize(targetCw);
     if (!norm) return null;
     const ts = typeof opts?.updatedAtMs === 'number' && opts.updatedAtMs > 0 ? opts.updatedAtMs : Date.now();
+    const deferFlush = Boolean(opts?.deferFlush ?? opts?.deferNativeFlush);
     if (cascadeId !== null && cascadeId !== undefined && cascadeId !== '') {
       if (!isValidCascadeId(cascadeId)) return null;
       touchSessionEntry(cascadeId, norm, ts);
-      storage?.writeSessionCookie?.(cascadeId, norm, ts);
-      const serialized = serializeSessionMap();
-      const serializedTs = serializeSessionTsMap();
       try {
-        storage?.setLocalItem?.(STORAGE_MAP_KEY, serialized);
-        storage?.setLocalItem?.(STORAGE_TS_MAP_KEY, serializedTs);
-      } catch {}
-      if (!opts?.deferNativeFlush) {
-        storage?.flushNative?.({
-          [STORAGE_MAP_KEY]: serialized,
-          [STORAGE_TS_MAP_KEY]: serializedTs,
+        storage?.saveSessionOverride?.(cascadeId, norm, {
+          ts,
+          sessionMap: snapshotSessionMap(),
+          tsMap: snapshotSessionTsMap(),
+          deferFlush,
         });
-      }
+      } catch {}
       if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
         try { onSaveCw(cascadeId, norm, ts); } catch {}
       }
@@ -251,18 +252,13 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
       defaultCwCache = norm;
       hasExplicitDefault = true;
       sessionCwTsMap.set('__default__', ts);
-      const serializedTs = serializeSessionTsMap();
-      storage?.writeDefaultCookie?.(norm);
       try {
-        storage?.setLocalItem?.(DEFAULT_CW_KEY, norm);
-        storage?.setLocalItem?.(STORAGE_TS_MAP_KEY, serializedTs);
-      } catch {}
-      if (!opts?.deferNativeFlush) {
-        storage?.flushNative?.({
-          [DEFAULT_CW_KEY]: norm,
-          [STORAGE_TS_MAP_KEY]: serializedTs,
+        storage?.saveDefaultLimit?.(norm, {
+          ts,
+          tsMap: snapshotSessionTsMap(),
+          deferFlush,
         });
-      }
+      } catch {}
       if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
         try { onSaveCw(null, norm, ts); } catch {}
       }
@@ -313,7 +309,7 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
         if (!localCw || parsed.ts > localTs) {
           saveContextWindowSetting(cid, parsed.sessionCw, {
             fromRemoteSync: true,
-            deferNativeFlush: true,
+            deferFlush: true,
             updatedAtMs: parsed.ts,
           });
           mapUpdated = true;
@@ -325,7 +321,7 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
         if (parsed.ts > localDefTs && parsed.defaultCw !== defaultCwCache) {
           saveContextWindowSetting(null, parsed.defaultCw, {
             fromRemoteSync: true,
-            deferNativeFlush: true,
+            deferFlush: true,
             updatedAtMs: parsed.ts,
           });
           defUpdated = true;
@@ -334,10 +330,25 @@ function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator })
       }
     }
     if (mapUpdated || defUpdated) {
-      const payload = { [STORAGE_TS_MAP_KEY]: serializeSessionTsMap() };
-      if (mapUpdated) payload[STORAGE_MAP_KEY] = serializeSessionMap();
-      if (defUpdated) payload[DEFAULT_CW_KEY] = defaultCwCache;
-      storage?.flushNative?.(payload);
+      const tsSnapshot = snapshotSessionTsMap();
+      if (mapUpdated) {
+        try {
+          storage?.saveSessionOverride?.(null, null, {
+            sessionMap: snapshotSessionMap(),
+            tsMap: tsSnapshot,
+            deferFlush: false,
+          });
+        } catch {}
+      }
+      if (defUpdated) {
+        try {
+          storage?.saveDefaultLimit?.(defaultCwCache, {
+            ts: sessionCwTsMap.get('__default__') || 1,
+            tsMap: tsSnapshot,
+            deferFlush: false,
+          });
+        } catch {}
+      }
     }
 
     const unsyncedLocalIds = [];

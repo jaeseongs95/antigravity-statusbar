@@ -43,15 +43,19 @@ function resolveHostAdapterConfig(overrides, win) {
   if (
     isPlainConfigObject(overrides) &&
     typeof overrides.buildRpcPath === 'function' &&
-    typeof overrides.isRemoteHost === 'function'
+    typeof overrides.isRemoteHost === 'function' &&
+    typeof overrides.resolveCsrfToken === 'function'
   ) {
     return overrides;
   }
-  const rawWinCfg = win && win.__AGY_HOST_ADAPTER_CONFIG__;
-  const winCfg = isPlainConfigObject(rawWinCfg) ? rawWinCfg : null;
+  const rawLegacyCfg = win && win.__AGY_HOST_ADAPTER_CONFIG__;
+  const rawStatusCfg = win && win.__AGY_STATUSBAR_HOST_CONFIG__;
+  const legacyCfg = isPlainConfigObject(rawLegacyCfg) ? rawLegacyCfg : null;
+  const statusCfg = isPlainConfigObject(rawStatusCfg) ? rawStatusCfg : null;
   const ovrCfg = isPlainConfigObject(overrides) ? overrides : null;
   const src = {
-    ...(winCfg || {}),
+    ...(legacyCfg || {}),
+    ...(statusCfg || {}),
     ...(ovrCfg || {}),
   };
 
@@ -113,6 +117,11 @@ function resolveHostAdapterConfig(overrides, win) {
       const host = String(hostname || '').trim().toLowerCase().replace(/\.+$/, '');
       if (!host) return false;
       return remoteHostDomains.some((d) => host === d || host.endsWith(`.${d}`));
+    },
+    resolveCsrfToken(targetWin = win) {
+      const appCfg = targetWin && targetWin.__APP_CONFIG__;
+      const tok = isPlainConfigObject(appCfg) && typeof appCfg.csrfToken === 'string' ? appCfg.csrfToken.trim() : '';
+      return tok;
     },
   };
 }

@@ -11,7 +11,11 @@ const { mountStatusBar, PLUGIN_BUS_SYMBOL } = require('../../src/app/index');
 const { createRemotePortDriver, RC_PROTO_CHAIN_SYMBOL } = require('../../src/drivers/antigravity/remote-port-driver');
 const { createReactFiberDriver } = require('../../src/drivers/antigravity/react-fiber-driver');
 const { createCompactDriver } = require('../../src/drivers/antigravity/compact-driver');
-const { createCompanionDriver } = require('../../src/drivers/antigravity/companion-driver');
+const {
+  createCompanionDriver,
+  extractColumn0CompanionMarkers,
+  decodeReadFileResponseText,
+} = require('../../src/drivers/antigravity/companion-driver');
 const { createStorageAdapter, createLocalHttpTransport } = require('../../src/drivers/antigravity/local-http-transport');
 const { createContextWindowStore } = require('../../src/domain/context-window-policy');
 const { resolveHostAdapterConfig } = require('../../src/drivers/antigravity/host-config');
@@ -232,6 +236,32 @@ describe('v2.0 Drivers, RemotePort, DisposableScope & Bundle Integration Suite',
     assert.equal(dbg.reduxSessionCw, '750K');
     assert.equal(fetchCalls >= 0, true);
 
+    // Desktop lB() service argument normalization (D-0004: [] for getCustomizationStates/getAllSkills, uri fallback for readFile)
+    const lbSeenArgs = [];
+    const lbTransport = createLocalHttpTransport({
+      window: mockWin,
+      fetchFn: mockWin.fetch,
+      hostConfig,
+      getRemoteRpcServiceForElement: () => ({
+        isRemoteControlHost: false,
+        async getCustomizationStates(arg) {
+          lbSeenArgs.push(['getCustomizationStates', arg]);
+          return [{ fileUri: 'file:///C:/Users/Test/.gemini/antigravity/mcp_config.json' }];
+        },
+        async readFile(arg) {
+          lbSeenArgs.push(['readFile', arg]);
+          if (typeof arg === 'string') return new Uint8Array([65, 66, 67]);
+          throw new Error('expects string uri');
+        },
+      }),
+    });
+    const lbStates = await lbTransport.callRpcJson('GetCustomizationStates', { workspaceUris: [] });
+    assert.ok(Array.isArray(lbStates));
+    assert.deepEqual(lbSeenArgs[0], ['getCustomizationStates', []]);
+    const lbFile = await lbTransport.callRpcJson('ReadFile', { uri: 'C:/Users/Test/.gemini/antigravity/statusbar_autoinject.js' });
+    assert.equal(decodeReadFileResponseText(lbFile), 'ABC');
+    lbTransport.dispose();
+
     scope.dispose();
     driver.dispose();
     transport.dispose();
@@ -307,12 +337,111 @@ describe('v2.0 Drivers, RemotePort, DisposableScope & Bundle Integration Suite',
     scope.dispose();
     assert.equal(SharedRemoteControl.prototype.proxyCommand, origProxy);
     assert.equal(SharedRemoteControl.prototype[RC_PROTO_CHAIN_SYMBOL], undefined);
+
+    // External wrapper interleaved between tapPrototype calls must NOT trigger infinite recursion (HIGH-1)
+    let extCalls = 0;
+    let driverDMsgs = 0;
+    let driverEMsgs = 0;
+    function InterleavedRc() {}
+    InterleavedRc.prototype.proxyCommand = async () => ({ ok: true });
+    InterleavedRc.prototype.handleIframeMessage = function () {};
+    const interInst = new InterleavedRc();
+    const interWin = {
+      location: { hostname: 'antigravity.google.com', origin: 'https://antigravity.google.com', href: 'https://antigravity.google.com/r/inter' },
+    };
+    const interDoc = {
+      querySelector: () => null,
+    };
+    const interCfg = resolveHostAdapterConfig({}, interWin);
+    const driverD = createRemotePortDriver({
+      window: interWin,
+      document: interDoc,
+      hostConfig: interCfg,
+      hooks: { onIframeMessage: () => { driverDMsgs += 1; } },
+    });
+    driverD.tapPrototype(InterleavedRc.prototype);
+
+    // Another external plugin wraps InterleavedRc.prototype.handleIframeMessage directly
+    const prevHandle = InterleavedRc.prototype.handleIframeMessage;
+    InterleavedRc.prototype.handleIframeMessage = function (...a) {
+      extCalls += 1;
+      return prevHandle.apply(this, a);
+    };
+
+    // A second RemotePortDriver mounts after the external wrapper
+    const driverE = createRemotePortDriver({
+      window: interWin,
+      document: interDoc,
+      hostConfig: interCfg,
+      hooks: { onIframeMessage: () => { driverEMsgs += 1; } },
+    });
+    driverE.tapPrototype(InterleavedRc.prototype);
+
+    assert.doesNotThrow(() => {
+      InterleavedRc.prototype.handleIframeMessage.call(interInst, { origin: 'https://antigravity.google.com', data: {} });
+    });
+    assert.equal(driverEMsgs, 1);
+    assert.equal(extCalls, 1);
+    assert.equal(driverDMsgs, 1);
+    assert.equal(interWin.__agyRemoteControlInstance, interInst, 'Captured instance set on window');
+
+    driverE.dispose();
+    driverD.dispose();
+    assert.equal(interWin.__agyRemoteControlInstance, undefined, 'Own __agyRemoteControlInstance cleaned up on dispose');
+
+    // Internal __agy_probe__ must capture instance via handleIframeMessage without forwarding __agy_probe__ to base handler
+    let forwardedProbe = 0;
+    function ProbeOnlyRc() {}
+    ProbeOnlyRc.prototype.proxyCommand = async () => ({});
+    ProbeOnlyRc.prototype.handleIframeMessage = function (ev) {
+      if (ev && ev.data === '__agy_probe__') forwardedProbe += 1;
+    };
+    const hiddenInst = new ProbeOnlyRc();
+    const probeWin = {
+      location: { hostname: 'antigravity.google.com', origin: 'https://antigravity.google.com', href: 'https://antigravity.google.com/r/probe' },
+      default_GoogleAntigravity: { m: { RemoteControlComponent: ProbeOnlyRc } },
+      MessageEvent: function (type, init) {
+        this.type = type;
+        this.data = init?.data;
+        this.origin = init?.origin || '';
+        this.source = init?.source || null;
+      },
+      dispatchEvent(ev) {
+        if (ev.type === 'message') ProbeOnlyRc.prototype.handleIframeMessage.call(hiddenInst, ev);
+      },
+    };
+    const probeDriver = createRemotePortDriver({
+      window: probeWin,
+      document: { querySelector: () => null },
+      hostConfig: resolveHostAdapterConfig({}, probeWin),
+    });
+    assert.equal(probeDriver.resolveInstance(), hiddenInst, 'Internal __agy_probe__ must capture hidden RC instance');
+    assert.equal(forwardedProbe, 0, '__agy_probe__ must never leak to base handleIframeMessage');
+    probeDriver.dispose();
   });
 
-  it('SB2-TC-009 (D-0020, T-0001, AUDIT-M6, NB2): DisposableScope aborts fetches, enforces 429 backoff, handles companion one-shot TT & pagehide cleanup', async () => {
-    // 1. Companion driver one-shot TrustedTypes token revocation + HTTPS allowlist
+  it('SB2-TC-009 (D-0001, D-0004, D-0011, D-0015, D-0020, D-0032, T-0001, AUDIT-M6, NB2): Host-marker companion discovery, retry cancellation, negative TT cache & pagehide cleanup', async () => {
+    // 1a. Column-0 // and /* */ _V\d+ marker extraction (skips statusbar, ignores string literals)
+    const markerBlocks = extractColumn0CompanionMarkers([
+      '// === BEGIN_AGY_STATUSBAR ===',
+      'window.__sb = 1;',
+      '// === END_AGY_STATUSBAR ===',
+      'const s = "\\n/* === END_AGY_ALPHA_PLUGIN_V1 === */";',
+      '/* === BEGIN_AGY_ALPHA_PLUGIN_V1 === */',
+      'window.__alphaLoaded = 1;',
+      '/* === END_AGY_ALPHA_PLUGIN_V1 === */',
+      '// === BEGIN_AGY_BETA_LOCALIZER_V2 ===',
+      'window.__betaLoaded = 1;',
+      '// === END_AGY_BETA_LOCALIZER_V2 ===',
+    ].join('\n'));
+    assert.deepEqual(markerBlocks.map((b) => b.id), ['alpha_plugin', 'beta_localizer']);
+
+    // 1b. Companion driver HTTPS + real host GetCustomizationStates -> ReadFile Uint8Array discovery
     const createdPolicies = [];
     const appendedScripts = [];
+    const hostAutoinjectBytes = new TextEncoder().encode(
+      '/* === BEGIN_AGY_SAMPLE_COMPANION_V1 === */\nwindow.__sampleComp = 1;\n/* === END_AGY_SAMPLE_COMPANION_V1 === */\n'
+    );
     const compWin = {
       location: { hostname: '127.0.0.1', origin: 'https://127.0.0.1' },
       trustedTypes: {
@@ -330,21 +459,102 @@ describe('v2.0 Drivers, RemotePort, DisposableScope & Bundle Integration Suite',
     };
     const compDoc = {
       head: { appendChild: (s) => appendedScripts.push(s) },
-      querySelector: () => ({ nonce: 'comp-nonce' }),
+      querySelector(sel) {
+        if (sel.includes('nonce')) return { nonce: 'comp-nonce' };
+        return null;
+      },
       querySelectorAll: () => [],
-      createElement: (tag) => ({ tagName: tag.toUpperCase(), setAttribute() {}, remove() {} }),
+      createElement: (tag) => {
+        const attrs = new Map();
+        return {
+          tagName: tag.toUpperCase(),
+          setAttribute(k, v) { attrs.set(k, String(v)); },
+          getAttribute: (k) => attrs.get(k) || null,
+          remove() {},
+        };
+      },
     };
     const compScope = createDisposableScope(compWin);
     const compDriver = createCompanionDriver({
       window: compWin,
       document: compDoc,
       hostConfig: { staticCdnOrigins: ['https://cdn.example'], companionScripts: ['https://cdn.example/c.js', 'http://evil.example/bad.js'] },
+      transport: {
+        async callRpcJson(methodName, payload) {
+          if (methodName === 'GetCustomizationStates') {
+            return { states: [{ fileUri: 'file:///C%3A/Users/Dev/.gemini/antigravity/mcp_config.json' }] };
+          }
+          if (methodName === 'ReadFile' && String(payload?.uri || '').includes('/.gemini/antigravity/statusbar_autoinject.js')) {
+            return { content: hostAutoinjectBytes };
+          }
+          return null;
+        },
+      },
       scope: compScope,
     });
     const compRes = await compDriver.loadCompanions();
-    assert.equal(compRes.loaded, 1);
+    assert.equal(compRes.loaded, 2, 'Both allowlisted HTTPS script and host ReadFile marker block must load');
+    assert.equal(createdPolicies.length, 1, 'Scoped TrustedTypes policy gate created once and reused across companions');
     assert.equal(appendedScripts[0].nonce, 'comp-nonce');
+    assert.equal(appendedScripts[1].getAttribute('data-agy-companion'), 'sample_companion');
     compScope.dispose();
+
+    // 1c. Negative TrustedTypes policy caching (BLOCKING-B) & DisposableScope retry timer cancellation (AUDIT-M6)
+    let blockedPolicyAttempts = 0;
+    const blockedWin = {
+      location: { hostname: 'antigravity.google.com', origin: 'https://antigravity.google.com' },
+      trustedTypes: {
+        createPolicy() {
+          blockedPolicyAttempts += 1;
+          throw new TypeError('All policies blocked');
+        },
+      },
+      setTimeout,
+      clearTimeout,
+    };
+    const blockedScope = createDisposableScope(blockedWin);
+    let rpcTries = 0;
+    const retryDriver = createCompanionDriver({
+      window: blockedWin,
+      document: compDoc,
+      hostConfig: {},
+      transport: {
+        async callRpcJson() {
+          rpcTries += 1;
+          return null;
+        },
+      },
+      scope: blockedScope,
+    });
+    const retryPromise = retryDriver.loadCompanions({ retryDelayMs: 500, maxAttempts: 5 });
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(rpcTries, 3, 'First pass probes GetCustomizationStates, GetAllPlugins, GetAllSkills');
+    blockedScope.dispose();
+    await retryPromise;
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(rpcTries, 3, 'Disposed scope must never fire retry attempts after cleanup');
+
+    const negScope = createDisposableScope(blockedWin);
+    const negDriver = createCompanionDriver({
+      window: blockedWin,
+      document: compDoc,
+      hostConfig: {},
+      transport: {
+        async callRpcJson(m) {
+          if (m === 'GetCustomizationStates') {
+            return { companionManifestText: '// === BEGIN_AGY_ONE ===\nx();\n// === END_AGY_ONE ===\n// === BEGIN_AGY_TWO ===\ny();\n// === END_AGY_TWO ===\n' };
+          }
+          return null;
+        },
+      },
+      scope: negScope,
+    });
+    const negRes = await negDriver.loadCompanions({ maxAttempts: 1 });
+    assert.equal(negRes.loaded, 0);
+    assert.equal(blockedPolicyAttempts, 2, 'Probes candidate list once then caches negative result for subsequent blocks');
+    await negDriver.loadCompanions({ maxAttempts: 1 });
+    assert.equal(blockedPolicyAttempts, 2, 'Subsequent calls hit WeakMap negative cache with zero extra createPolicy attempts');
+    negScope.dispose();
 
     // 2. AbortController cancellation & 429 exponential backoff on transport
     let abortCount = 0;
@@ -425,6 +635,10 @@ describe('v2.0 Drivers, RemotePort, DisposableScope & Bundle Integration Suite',
 
     const api = mountStatusBar(strictWin, { document: strictDoc, localStorage: strictWin.localStorage, fetch: strictWin.fetch });
     assert.equal(api.version, '2.0.0');
+    assert.equal(typeof api.getConversationContextWindow, 'function');
+    assert.equal(typeof api.setConversationContextWindow, 'function');
+    assert.equal(api.setConversationContextWindow('cid-compat', '384K'), '384K');
+    assert.equal(api.getConversationContextWindow('cid-compat'), '384K');
     assert.equal(api.getLocale(), 'en');
     assert.equal(api.setLocale('ko'), 'ko');
     assert.equal(api.getLocale(), 'ko');
@@ -436,6 +650,7 @@ describe('v2.0 Drivers, RemotePort, DisposableScope & Bundle Integration Suite',
 
     strictWin.__agyStatusBarCleanup();
     assert.equal(strictWin.__agyStatusBarCleanup, undefined);
+    assert.equal(strictWin.__agyCustomStatusBarAdapters, undefined, 'Empty __agyCustomStatusBarAdapters Map removed on cleanup');
     assert.equal(bus.getPlugin('antigravity-statusbar'), null, 'Cleanup unregisters statusbar from PluginBus');
     assert.equal(winListeners.get('pagehide')?.size || 0, 0, 'pagehide listener detached');
     assert.ok(clearTimerCalls >= 1, 'Cleanup clears bound timers without Illegal invocation');

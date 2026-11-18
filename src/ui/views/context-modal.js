@@ -297,7 +297,7 @@ function createContextModalAdapter({ document, documentHost, window, translator,
     bodyEl.appendChild(turnsBlock);
   }
 
-  async function openOrToggleDebugModal(view, inputBox) {
+  async function openOrToggleDebugModal(view, inputBox, explicitSessionId = '') {
     if (closeExistingModal()) {
       return;
     }
@@ -307,7 +307,10 @@ function createContextModalAdapter({ document, documentHost, window, translator,
       if (!view) view = fb?.view || null;
       if (!inputBox) inputBox = fb?.inputBox || null;
     }
-    const rawCid = view?.getAttribute?.('data-cascade-id') || '';
+    const rawCid =
+      documentHost && typeof documentHost.resolveViewSessionId === 'function'
+        ? documentHost.resolveViewSessionId(view, explicitSessionId)
+        : explicitSessionId || '';
 
     const bodyEl = h(
       document,
@@ -431,8 +434,8 @@ function createContextModalAdapter({ document, documentHost, window, translator,
     className: 'agy-ctx-btn agy-ctx-btn-context',
     label: () => tr.t('context.label'),
     title: () => tr.t('context.title'),
-    onClick({ view, inputBox }) {
-      openOrToggleDebugModal(view, inputBox);
+    onClick({ view, inputBox, cascadeId }) {
+      openOrToggleDebugModal(view, inputBox, cascadeId || '');
     },
     openOrToggleDebugModal,
     closeExistingModal,

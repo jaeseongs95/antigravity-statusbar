@@ -37,7 +37,8 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
   }
 
   const scope = createDisposableScope(win);
-  const resolvedHostConfig = resolveHostAdapterConfig(overrides.hostConfig || win.__AGY_STATUSBAR_HOST_CONFIG__, win);
+  const resolvedHostConfig = resolveHostAdapterConfig(overrides.hostConfig, win);
+  const resolveCsrfToken = () => resolvedHostConfig.resolveCsrfToken(win);
   const translator = createTranslator(
     resolvedHostConfig.locale,
     win.navigator?.language || win.navigator?.userLanguage || ''
@@ -89,7 +90,7 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
         flushSaveTimer = null;
         if (!scope.isDisposed() && engineRef) {
           Promise.resolve(
-            engineRef.syncDesktopAnnotations(win.__APP_CONFIG__?.csrfToken || '', null)
+            engineRef.syncDesktopAnnotations(resolveCsrfToken(), null)
           ).catch(() => {});
         }
       }, 250);
@@ -147,6 +148,7 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
   const adapterRegistry = createAdapterRegistry({
     window: win,
     document: doc,
+    documentHost,
     onUpdate() {
       coordinatorRef?.updateAll?.();
     },
@@ -165,7 +167,7 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
     ensureStyles,
     removeStyles,
     scope,
-    csrfProvider: () => win.__APP_CONFIG__?.csrfToken || '',
+    csrfProvider: resolveCsrfToken,
     getRcGenLen: (cid) => transport.getKnownGenLen?.(cid) || 0,
     getRcStepLen: (cid) => transport.getStepCount?.(cid) || 0,
   });
@@ -207,10 +209,15 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
     document: doc,
     hostConfig: resolvedHostConfig,
     transport,
+    remotePortDriver,
     scope,
     getNonce: () => getCspNonce(doc),
   });
-  if (Array.isArray(resolvedHostConfig.companionScripts) && resolvedHostConfig.companionScripts.length > 0) {
+  const isRemoteHostActive = resolvedHostConfig.isRemoteHost(win.location?.hostname);
+  if (
+    isRemoteHostActive ||
+    (Array.isArray(resolvedHostConfig.companionScripts) && resolvedHostConfig.companionScripts.length > 0)
+  ) {
     Promise.resolve(companionDriver.loadCompanions({ fetch: fetchImpl })).catch(() => {});
   }
 
@@ -221,6 +228,7 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
   });
 
   scope.add(() => unregisterBus());
+  scope.add(() => adapterRegistry.dispose?.());
   scope.add(() => coordinator.dispose());
   scope.add(() => engine.dispose());
   scope.add(() => transport.dispose());
@@ -228,8 +236,8 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
   scope.add(() => cleanupLegacyObjectPrototypeCwGetters(win));
 
   // Initial sync of desktop conversation annotations (best effort, bounded)
-  if (!resolvedHostConfig.isRemoteHost(win.location?.hostname)) {
-    Promise.resolve(engine.syncDesktopAnnotations(win.__APP_CONFIG__?.csrfToken || '', null)).catch(() => {});
+  if (!isRemoteHostActive) {
+    Promise.resolve(engine.syncDesktopAnnotations(resolveCsrfToken(), null)).catch(() => {});
   }
 
   coordinator.start();
@@ -253,6 +261,20 @@ function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : 
     getContextWindow: (cascadeId) => cwStore.getSavedContextWindow(cascadeId),
     setContextWindow: (cascadeId, cw) => {
       const res = coordinator.setConversationContextWindow(null, cascadeId, cw);
+      coordinator.updateAll();
+      return res;
+    },
+    getConversationContextWindow: (viewOrId, cascadeIdOpt) => {
+      if (typeof viewOrId === 'string') {
+        return coordinator.getConversationContextWindow(null, viewOrId);
+      }
+      return coordinator.getConversationContextWindow(viewOrId || null, cascadeIdOpt || '');
+    },
+    setConversationContextWindow: (viewOrId, cascadeIdOrCw, cwOpt, opts) => {
+      const res =
+        typeof viewOrId === 'string' && cwOpt === undefined
+          ? coordinator.setConversationContextWindow(null, viewOrId, cascadeIdOrCw)
+          : coordinator.setConversationContextWindow(viewOrId || null, cascadeIdOrCw || '', cwOpt, opts);
       coordinator.updateAll();
       return res;
     },

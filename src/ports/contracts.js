@@ -32,15 +32,12 @@ const TRANSPORT_PORT_METHODS = Object.freeze([
 ]);
 
 const STORAGE_PORT_METHODS = Object.freeze([
+  'loadSnapshot',
   'loadPersistent',
-  'readSessionCookie',
-  'writeSessionCookie',
-  'deleteSessionCookie',
-  'readDefaultCookie',
-  'writeDefaultCookie',
-  'getLocalItem',
-  'setLocalItem',
-  'flushNative',
+  'readSessionOverride',
+  'saveSessionOverride',
+  'evictSessionOverride',
+  'saveDefaultLimit',
 ]);
 
 const ENGINE_PORT_METHODS = Object.freeze([
@@ -57,6 +54,7 @@ const DOCUMENT_HOST_PORT_METHODS = Object.freeze([
   'getAccessibleDocs',
   'getIframeDocument',
   'buildWarningSuppressionCss',
+  'resolveViewSessionId',
   'findFallbackSessionTarget',
 ]);
 

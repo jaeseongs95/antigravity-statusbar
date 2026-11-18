@@ -50,28 +50,37 @@ function createCoreMetricsAdapter({
   }
 
   function showContextMenu(barEl, view, cascadeId, limitBtn) {
+    const ownerDoc = barEl?.ownerDocument || document;
     const existing = barEl.querySelector?.('.agy-ctx-menu');
     if (existing) {
       closeExistingMenu(existing);
       return;
     }
 
-    if (document && typeof document.querySelectorAll === 'function') {
-      const openMenus = document.querySelectorAll('.agy-ctx-menu');
-      for (const m of openMenus) {
-        if (m.parentNode === barEl) continue;
-        closeExistingMenu(m);
+    const allDocs =
+      documentHost && typeof documentHost.getAccessibleDocs === 'function'
+        ? documentHost.getAccessibleDocs(document)
+        : [ownerDoc, document].filter(Boolean);
+    for (const d of allDocs) {
+      if (d && typeof d.querySelectorAll === 'function') {
+        const openMenus = d.querySelectorAll('.agy-ctx-menu');
+        for (const m of openMenus) {
+          if (m.parentNode === barEl) continue;
+          closeExistingMenu(m);
+        }
       }
     }
 
-    const resolveCurrentCascadeId = () => view?.getAttribute?.('data-cascade-id') || cascadeId;
+    const resolveCurrentCascadeId = () =>
+      documentHost && typeof documentHost.resolveViewSessionId === 'function'
+        ? documentHost.resolveViewSessionId(view, cascadeId)
+        : (cascadeId || '');
     const currentCw = getConversationContextWindow(view, resolveCurrentCascadeId());
     const currentKNum = parseInt(currentCw, 10) || 512;
     const activeHdrCid = resolveCurrentCascadeId();
-    const sessionLabel =
-      activeHdrCid && activeHdrCid !== 'remote-session' ? activeHdrCid.slice(0, 8) : tr.t('metrics.currentSession');
+    const sessionLabel = activeHdrCid ? activeHdrCid.slice(0, 8) : tr.t('metrics.currentSession');
 
-    const winObj = document?.defaultView || null;
+    const winObj = ownerDoc?.defaultView || document?.defaultView || null;
     const nativeSetTimeout = winObj && typeof winObj.setTimeout === 'function' ? winObj.setTimeout.bind(winObj) : setTimeout;
     const nativeClearTimeout =
       winObj && typeof winObj.clearTimeout === 'function' ? winObj.clearTimeout.bind(winObj) : clearTimeout;
@@ -100,7 +109,10 @@ function createCoreMetricsAdapter({
         menu.remove();
       }
       for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
-        document?.removeEventListener?.(evt, outsideHandler, true);
+        ownerDoc?.removeEventListener?.(evt, outsideHandler, true);
+        if (document && document !== ownerDoc) {
+          document.removeEventListener?.(evt, outsideHandler, true);
+        }
         try {
           iframeDoc?.removeEventListener?.(evt, outsideHandler, true);
         } catch {}
@@ -122,7 +134,7 @@ function createCoreMetricsAdapter({
       updateAll();
     };
 
-    const inputEl = h(document, 'input', {
+    const inputEl = h(ownerDoc, 'input', {
       type: 'text',
       inputmode: 'numeric',
       pattern: '[0-9kKmM.]*',
@@ -143,7 +155,7 @@ function createCoreMetricsAdapter({
     });
 
     const applyBtn = h(
-      document,
+      ownerDoc,
       'button',
       {
         type: 'button',
@@ -164,7 +176,7 @@ function createCoreMetricsAdapter({
 
     const optionNodes = optionsList.map((cw) =>
       h(
-        document,
+        ownerDoc,
         'div',
         {
           className: `agy-ctx-menu-item${cw === currentCw ? ' active' : ''}`,
@@ -177,8 +189,8 @@ function createCoreMetricsAdapter({
             updateAll();
           },
         },
-        h(document, 'span', null, `${cw === currentCw ? '✓ ' : '  '}${cw}`),
-        h(document, 'span', { className: 'agy-ctx-menu-hint' }, cwStore.getQuotaHint(cw))
+        h(ownerDoc, 'span', null, `${cw === currentCw ? '✓ ' : '  '}${cw}`),
+        h(ownerDoc, 'span', { className: 'agy-ctx-menu-hint' }, cwStore.getQuotaHint(cw))
       )
     );
 
@@ -186,7 +198,7 @@ function createCoreMetricsAdapter({
     const saveDefaultNode =
       typeof saveDefaultContextWindow === 'function' && currentCw !== defaultCw
         ? h(
-            document,
+            ownerDoc,
             'div',
             {
               className: 'agy-ctx-menu-item agy-ctx-menu-default',
@@ -199,12 +211,12 @@ function createCoreMetricsAdapter({
                 updateAll();
               },
             },
-            h(document, 'span', null, tr.t('menu.saveAsDefault', { cw: currentCw, defCw: defaultCw }))
+            h(ownerDoc, 'span', null, tr.t('menu.saveAsDefault', { cw: currentCw, defCw: defaultCw }))
           )
         : null;
 
     menu = h(
-      document,
+      ownerDoc,
       'div',
       {
         className: 'agy-ctx-menu',
@@ -212,21 +224,21 @@ function createCoreMetricsAdapter({
         translate: 'no',
       },
       h(
-        document,
+        ownerDoc,
         'div',
         { className: 'agy-ctx-menu-hdr' },
-        h(document, 'span', null, tr.t('menu.headerLeft')),
-        h(document, 'span', { style: { opacity: '0.75' } }, sessionLabel)
+        h(ownerDoc, 'span', null, tr.t('menu.headerLeft')),
+        h(ownerDoc, 'span', { style: { opacity: '0.75' } }, sessionLabel)
       ),
       h(
-        document,
+        ownerDoc,
         'div',
         { className: 'agy-ctx-custom-row' },
         inputEl,
-        h(document, 'span', { className: 'agy-ctx-custom-unit' }, 'K'),
+        h(ownerDoc, 'span', { className: 'agy-ctx-custom-unit' }, 'K'),
         applyBtn
       ),
-      h(document, 'div', { className: 'agy-ctx-custom-hint' }, tr.t('menu.customHint')),
+      h(ownerDoc, 'div', { className: 'agy-ctx-custom-hint' }, tr.t('menu.customHint')),
       ...optionNodes,
       saveDefaultNode
     );
@@ -256,7 +268,10 @@ function createCoreMetricsAdapter({
       attachTimer = null;
       if (!menu.isConnected && menu.parentNode !== barEl) return;
       for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
-        document?.addEventListener?.(evt, outsideHandler, true);
+        ownerDoc?.addEventListener?.(evt, outsideHandler, true);
+        if (document && document !== ownerDoc) {
+          document.addEventListener?.(evt, outsideHandler, true);
+        }
         try {
           iframeDoc?.addEventListener?.(evt, outsideHandler, true);
         } catch {}
@@ -276,6 +291,7 @@ function createCoreMetricsAdapter({
   }
 
   function renderQuotaSlot(quotaSlotEl, quota, localeKey) {
+    const ownerDoc = quotaSlotEl?.ownerDocument || document;
     clearChildren(quotaSlotEl);
     if (!quota) return;
 
@@ -283,12 +299,12 @@ function createCoreMetricsAdapter({
     if (quota.pct5h !== null && quota.pct5h !== undefined) {
       parts.push(
         h(
-          document,
+          ownerDoc,
           'span',
           null,
           '5h ',
-          h(document, 'strong', { className: 'agy-ctx-quota' }, `${quota.pct5h}%`),
-          h(document, 'span', { className: 'agy-ctx-quota-left' }, ` ${tr.t('metrics.leftLabel')}`),
+          h(ownerDoc, 'strong', { className: 'agy-ctx-quota' }, `${quota.pct5h}%`),
+          h(ownerDoc, 'span', { className: 'agy-ctx-quota-left' }, ` ${tr.t('metrics.leftLabel')}`),
           quota.rst5h ? ` ${quota.rst5h}` : null
         )
       );
@@ -296,12 +312,12 @@ function createCoreMetricsAdapter({
     if (quota.pct7d !== null && quota.pct7d !== undefined) {
       parts.push(
         h(
-          document,
+          ownerDoc,
           'span',
           null,
           '7d ',
-          h(document, 'strong', { className: 'agy-ctx-quota' }, `${quota.pct7d}%`),
-          h(document, 'span', { className: 'agy-ctx-quota-left' }, ` ${tr.t('metrics.leftLabel')}`)
+          h(ownerDoc, 'strong', { className: 'agy-ctx-quota' }, `${quota.pct7d}%`),
+          h(ownerDoc, 'span', { className: 'agy-ctx-quota-left' }, ` ${tr.t('metrics.leftLabel')}`)
         )
       );
     }
@@ -310,14 +326,14 @@ function createCoreMetricsAdapter({
     const groupChildren = [];
     parts.forEach((part, idx) => {
       if (idx > 0) {
-        groupChildren.push(h(document, 'span', { className: 'agy-ctx-sep' }, ' · '));
+        groupChildren.push(h(ownerDoc, 'span', { className: 'agy-ctx-sep' }, ' · '));
       }
       groupChildren.push(part);
     });
 
-    quotaSlotEl.appendChild(h(document, 'span', { className: 'agy-ctx-sep agy-ctx-sep-pipe' }, '|'));
+    quotaSlotEl.appendChild(h(ownerDoc, 'span', { className: 'agy-ctx-sep agy-ctx-sep-pipe' }, '|'));
     quotaSlotEl.appendChild(
-      h(document, 'span', { className: 'agy-ctx-group agy-ctx-group-quota', 'data-locale': localeKey }, ...groupChildren)
+      h(ownerDoc, 'span', { className: 'agy-ctx-group agy-ctx-group-quota', 'data-locale': localeKey }, ...groupChildren)
     );
   }
 
@@ -347,16 +363,19 @@ function createCoreMetricsAdapter({
 
       const limitModClass =
         maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '';
-      const titleSessionLabel =
-        cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : tr.t('metrics.currentSession');
+      const resolvedViewCid =
+        documentHost && typeof documentHost.resolveViewSessionId === 'function'
+          ? documentHost.resolveViewSessionId(view, cascadeId)
+          : (cascadeId || '');
+      const titleSessionLabel = resolvedViewCid ? resolvedViewCid.slice(0, 8) : tr.t('metrics.currentSession');
       const limitTitle = tr.t('metrics.limitTitle', {
         session: titleSessionLabel,
         cw: currentCw,
         hint: cwStore.getQuotaHint(currentCw),
       });
 
-      const sessionChanged = Boolean(state.lastCascadeId && state.lastCascadeId !== cascadeId);
-      state.lastCascadeId = cascadeId;
+      const sessionChanged = Boolean(state.lastCascadeId && state.lastCascadeId !== resolvedViewCid);
+      state.lastCascadeId = resolvedViewCid;
 
       if (ctx.deferUncachedMetrics) {
         const existingLimitBtn = state.refs?.limitBtn || containerEl.querySelector?.('.agy-ctx-btn-limit');
@@ -390,7 +409,8 @@ function createCoreMetricsAdapter({
       state.lastSignature = signature;
 
       if (!state.refs) {
-        const barFill = h(document, 'span', {
+        const ownerDoc = containerEl?.ownerDocument || document;
+        const barFill = h(ownerDoc, 'span', {
           className: 'agy-ctx-bar-fill',
           style: {
             width: `${pct}%`,
@@ -398,10 +418,10 @@ function createCoreMetricsAdapter({
             ...(suppressBarTransition ? { transition: 'none' } : {}),
           },
         });
-        const pctValEl = h(document, 'strong', { className: `agy-ctx-pct-val ${colorClass}` }, `${pct}%`);
-        const usedValEl = h(document, 'span', { className: 'agy-ctx-used-val' }, usedStr);
+        const pctValEl = h(ownerDoc, 'strong', { className: `agy-ctx-pct-val ${colorClass}` }, `${pct}%`);
+        const usedValEl = h(ownerDoc, 'span', { className: 'agy-ctx-used-val' }, usedStr);
         const limitBtn = h(
-          document,
+          ownerDoc,
           'button',
           {
             type: 'button',
@@ -410,7 +430,10 @@ function createCoreMetricsAdapter({
             onclick(e) {
               e.preventDefault();
               e.stopPropagation();
-              const activeCid = view?.getAttribute?.('data-cascade-id') || state.lastCascadeId;
+              const activeCid =
+                documentHost && typeof documentHost.resolveViewSessionId === 'function'
+                  ? documentHost.resolveViewSessionId(view, state.lastCascadeId)
+                  : state.lastCascadeId;
               if (e.shiftKey) {
                 cycleConversationContextWindow(view, activeCid);
                 updateAll();
@@ -421,33 +444,36 @@ function createCoreMetricsAdapter({
             oncontextmenu(e) {
               e.preventDefault();
               e.stopPropagation();
-              const activeCid = view?.getAttribute?.('data-cascade-id') || state.lastCascadeId;
+              const activeCid =
+                documentHost && typeof documentHost.resolveViewSessionId === 'function'
+                  ? documentHost.resolveViewSessionId(view, state.lastCascadeId)
+                  : state.lastCascadeId;
               showContextMenu(barEl, view, activeCid, limitBtn);
             },
           },
           `[ ${currentCw.toLowerCase()} ▾ ]`
         );
-        const ctxLabelEl = h(document, 'span', null, `${tr.t('metrics.ctxLabel')} `);
-        const cacheLabelEl = h(document, 'span', null, `${tr.t('metrics.cacheLabel')} `);
-        const cacheEl = h(document, 'strong', { className: 'agy-ctx-cache' }, `${cachePct}%`);
-        const quotaSlotEl = h(document, 'span', {
+        const ctxLabelEl = h(ownerDoc, 'span', null, `${tr.t('metrics.ctxLabel')} `);
+        const cacheLabelEl = h(ownerDoc, 'span', null, `${tr.t('metrics.cacheLabel')} `);
+        const cacheEl = h(ownerDoc, 'strong', { className: 'agy-ctx-cache' }, `${cachePct}%`);
+        const quotaSlotEl = h(ownerDoc, 'span', {
           className: 'agy-ctx-quota-slot',
           'data-agy-no-translate': 'true',
           translate: 'no',
         });
 
         const groupCtx = h(
-          document,
+          ownerDoc,
           'span',
           {
             className: 'agy-ctx-group agy-ctx-group-ctx',
             'data-agy-no-translate': 'true',
             translate: 'no',
           },
-          h(document, 'span', { className: 'agy-ctx-bar-wrap' }, barFill),
-          h(document, 'span', null, ctxLabelEl, pctValEl, ' ', usedValEl, '/', limitBtn),
-          h(document, 'span', { className: 'agy-ctx-sep' }, '·'),
-          h(document, 'span', null, cacheLabelEl, cacheEl)
+          h(ownerDoc, 'span', { className: 'agy-ctx-bar-wrap' }, barFill),
+          h(ownerDoc, 'span', null, ctxLabelEl, pctValEl, ' ', usedValEl, '/', limitBtn),
+          h(ownerDoc, 'span', { className: 'agy-ctx-sep' }, '·'),
+          h(ownerDoc, 'span', null, cacheLabelEl, cacheEl)
         );
 
         clearChildren(containerEl);

@@ -282,37 +282,46 @@ describe('v2.0 Zero-HTML UI, CSP Nonce StyleManager & Adapter Registry Suite', (
     const { doc, win } = createMockDom();
     const translator = createTranslator('en');
     const storage = {
-      loadPersistent: () => ({ sessionMap: {}, sessionTsMap: {}, defaultCw: '512K', hasExplicitDefault: false }),
-      readSessionCookie: () => null,
-      writeSessionCookie: () => {},
-      readDefaultCookie: () => null,
-      writeDefaultCookie: () => {},
-      getLocalItem: () => null,
-      setLocalItem: () => {},
-      flushNative: () => {},
+      loadSnapshot: () => ({ sessionMap: {}, tsMap: {}, defaultCw: '512K' }),
+      loadPersistent: async () => ({ sessionMap: {}, tsMap: {}, defaultCw: '512K' }),
+      readSessionOverride: () => null,
+      saveSessionOverride: () => {},
+      evictSessionOverride: () => {},
+      saveDefaultLimit: () => {},
     };
     const cwStore = createContextWindowStore({ storage, translator });
 
+    const { doc: childDoc } = createMockDom();
+    const docHost = {
+      getAccessibleDocs: () => [doc, childDoc],
+      getIframeDocument: () => childDoc,
+      resolveViewSessionId: (v, fallback = '') => v?.getAttribute?.('data-cascade-id') || fallback || '',
+      buildWarningSuppressionCss: () => '',
+      findFallbackSessionTarget: () => ({ view: null, inputBox: null }),
+    };
     let updateCalls = 0;
     const registry = createAdapterRegistry({
       window: win,
       document: doc,
+      documentHost: docHost,
       onUpdate: () => { updateCalls += 1; },
     });
 
     const core = createCoreMetricsAdapter({
       document: doc,
+      documentHost: docHost,
       cwStore,
       translator,
       getConversationContextWindow: (_v, cid) => cwStore.getSavedContextWindow(cid),
-      setConversationContextWindow: (_v, cid, cw) => cwStore.setSessionContextWindow(cid, cw),
+      setConversationContextWindow: (_v, cid, cw) => cwStore.saveContextWindowSetting(cid, cw),
       cycleConversationContextWindow: () => '900K',
-      saveDefaultContextWindow: (cw) => cwStore.setDefaultContextWindow(cw),
+      saveDefaultContextWindow: (cw) => cwStore.saveContextWindowSetting(null, cw),
       updateAll: () => { updateCalls += 1; },
     });
     const compact = createCompactButtonAdapter({ runCompactForInputBox: () => {}, translator });
     const modal = createContextModalAdapter({
       document: doc,
+      documentHost: docHost,
       window: win,
       translator,
       loadDebugTelemetry: async () => ({
@@ -394,6 +403,25 @@ describe('v2.0 Zero-HTML UI, CSP Nonce StyleManager & Adapter Registry Suite', (
     limitBtnAfter.onclick({ preventDefault() {}, stopPropagation() {}, shiftKey: false });
     assert.equal(bar.querySelector('.agy-ctx-menu'), null, 'Toggle closes menu');
     assert.equal(doc._docListeners.get('mousedown')?.size || 0, 0, 'Outside listeners removed on close');
+
+    // Child iframe bar rendering uses childDoc as ownerDocument
+    const childView = h(childDoc, 'div', { 'data-cascade-id': 'cid-child' });
+    const childBar = h(childDoc, 'div', { className: 'agy-ctx-statusbar' });
+    childView.appendChild(childBar);
+    childDoc.body.appendChild(childView);
+    const childSlots = registry.ensureBarStructure(childBar);
+    assert.equal(childSlots.leftEl.ownerDocument, childDoc, 'Child bar slots must use childDoc ownerDocument');
+    registry.renderSlotAdapters(childSlots.leftEl, 'left', {
+      barEl: childBar,
+      view: childView,
+      inputBox: childView,
+      cascadeId: 'cid-child',
+      currentCw: '256K',
+      stats: { used: 64000, cachePct: 90 },
+      quota: { pct5h: 80, rst5h: '', pct7d: 75 },
+    });
+    const childLimitBtn = childBar.querySelector('.agy-ctx-btn-limit');
+    assert.equal(childLimitBtn.ownerDocument, childDoc, 'Child metrics nodes must use childDoc ownerDocument');
 
     // Modal open -> async render -> Escape closes and removes keydown listener
     await modal.openOrToggleDebugModal(view, view);
