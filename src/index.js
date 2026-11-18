@@ -494,10 +494,6 @@ function mountStatusBar(env = {}) {
       }
     }
     try {
-      delete win.__agyHostInstalledPlugins;
-      delete win.__agyLoadingMcpManagerCompanion;
-      delete win.__agyLoadingKoTranslatorCompanion;
-      delete win.__agyLoadingKoThoughtCompanion;
       delete win.__agyRcGenLenByCascade;
       delete win.__agyRcStepCountByCascade;
       delete win.__agyLastAppliedContextWindow;
@@ -505,7 +501,14 @@ function mountStatusBar(env = {}) {
       delete win.__agySniffedCascadeId;
       delete win.__agySniffedCascadeTs;
       disposeCompanionPolicyController(win);
-      if (!win.agyMcpManager) {
+      const hasActiveCompanions = Boolean(
+        win.agyMcpManager || win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup
+      );
+      if (!hasActiveCompanions) {
+        delete win.__agyHostInstalledPlugins;
+        delete win.__agyLoadingMcpManagerCompanion;
+        delete win.__agyLoadingKoTranslatorCompanion;
+        delete win.__agyLoadingKoThoughtCompanion;
         delete win.__agyCapturedLsClient;
         delete win.__agyRemoteControlInstance;
         delete win.__agyTrustedTypesPolicy;

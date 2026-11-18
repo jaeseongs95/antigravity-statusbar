@@ -5023,6 +5023,11 @@ describe('D-0015..D-0021 full audit regressions', () => {
       ];
       if (u.pathname.includes('strict-tt-block-all')) {
         cspHeaders.push('trusted-types ogb-qtm#html');
+      } else if (u.pathname.includes('strict-tt-preflight')) {
+        cspHeaders.push('trusted-types ogb-qtm#html agy-sb-bm');
+      }
+      if (u.searchParams.get('styleNonce') === '1') {
+        cspHeaders.push(`style-src-elem 'nonce-${hostNonce}'`);
       }
       res.setHeader('Content-Security-Policy', cspHeaders);
       const readFilePayloadB64 = serveCombinedHostManifest ? combinedHostAutoinjectB64 : '';
@@ -5334,7 +5339,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
       await sendCdp('Page.enable', {}, sessionId);
       await sendCdp('Runtime.enable', {}, sessionId);
 
-      const runBookmarkletAndCollect = async (pagePath) => {
+      const runBookmarkletAndCollect = async (pagePath, opts = {}) => {
         await sendCdp('Page.navigate', { url: `https://antigravity.google.com${pagePath}` }, sessionId);
         for (let i = 0; i < 80; i++) {
           const r = await sendCdp(
@@ -5344,6 +5349,34 @@ describe('D-0015..D-0021 full audit regressions', () => {
           );
           if (r?.result?.value >= 1) break;
           await new Promise((res) => setTimeout(res, 60));
+        }
+
+        if (opts.reverseLoad) {
+          const revPreload = await sendCdp(
+            'Runtime.evaluate',
+            {
+              expression: `(async () => {
+                const n = [...document.scripts].map((s) => s.nonce || s.getAttribute('nonce')).find(Boolean) || '';
+                const p = window.trustedTypes?.createPolicy ? window.trustedTypes.createPolicy('e2e-rev-loader', { createScriptURL: (u) => u }) : null;
+                const loadExt = (src) => new Promise((resolve, reject) => {
+                  const s = document.createElement('script');
+                  if (n) { s.nonce = n; s.setAttribute('nonce', n); }
+                  s.onload = () => resolve(true);
+                  s.onerror = () => reject(new Error('Failed to load ' + src));
+                  s.src = p ? p.createScriptURL(src) : src;
+                  document.head.appendChild(s);
+                });
+                await loadExt('https://www.gstatic.com/antigravity/web/2.33.0/mcp_manager_autoinject.js');
+                await loadExt('https://www.gstatic.com/antigravity/web/2.33.0/ko_thought_autoinject.js');
+                return { hasMcpPre: Boolean(window.agyMcpManager), hasKoPre: Boolean(window.__agyKoLocalizerActive || window.__agyKoThoughtCleanup) };
+              })()`,
+              awaitPromise: true,
+              returnByValue: true,
+            },
+            sessionId
+          );
+          assert.equal(revPreload?.result?.value?.hasMcpPre, true, 'SB-TC-037(4): mcp-manager must load first in reverse mode');
+          assert.equal(revPreload?.result?.value?.hasKoPre, true, 'SB-TC-037(4): ko-thought-translator must load second in reverse mode');
         }
 
         const bmEval = await sendCdp(
@@ -5365,15 +5398,27 @@ describe('D-0015..D-0021 full audit regressions', () => {
                 let rootHtmlLen = 0;
                 let childMgr = false;
                 let initConfigRecv = false;
+                let diag = {};
                 try {
+                  diag = {
+                    promoOwner: ifr?.__agyRemotePromotionOwner || '',
+                    promoState: ifr?.__agyRemotePromotionState || '',
+                    mcpPromoted: ifr?.__agyMcpPromoted || '',
+                    koPromoted: ifr?.__agyKoPromoted || '',
+                    suppress: Boolean(window.__agyRemoteControlInstance?.__agySuppressAutoIframeLoad),
+                    rawAttrSrc: ifr?.getAttribute?.('src') || ''
+                  };
                   const cd = ifr?.contentDocument;
                   const cw = ifr?.contentWindow;
+                  diag.sameOrigin = Boolean(cd && cw);
+                  diag.cwHref = cw?.location?.href || '';
+                  diag.scriptSrcs = Array.from(cd?.querySelectorAll?.('script') || []).map((s) => s.src || '').filter(Boolean);
                   const rootEl = cd?.getElementById('root');
                   rootChildCount = rootEl ? rootEl.childElementCount : 0;
                   rootHtmlLen = rootEl ? (rootEl.innerHTML || '').length : 0;
                   childMgr = Boolean(cw?.agyMcpManager);
                   initConfigRecv = Boolean(cw?.__initialConfigReceived);
-                } catch {}
+                } catch (e) { diag.err = String(e); }
                 const hp = window.__agyHostInstalledPlugins || null;
                 return {
                   hasBar: Boolean(bar),
@@ -5385,6 +5430,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
                   rootChildCount,
                   rootHtmlLen,
                   initConfigRecv,
+                  diag,
                   manifestKeys: hp ? Object.keys(hp).sort() : [],
                   hasMcpBlockLen: hp?.mcpBlock ? hp.mcpBlock.length : 0,
                   hasKoBlockLen: hp?.koBlock ? hp.koBlock.length : 0,
@@ -5405,6 +5451,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
             snapshot.hasBar &&
             snapshot.hasKo &&
             snapshot.hasMcp &&
+            snapshot.childMgr &&
             snapshot.rootChildCount > 0 &&
             snapshot.initConfigRecv &&
             snapshot.barText.includes('cache 98%')
@@ -5443,9 +5490,35 @@ describe('D-0015..D-0021 full audit regressions', () => {
       assert.ok(snapManifest.hasMcpBlockLen > 200_000, 'SB-TC-037(2): window.__agyHostInstalledPlugins.mcpBlock must be populated');
       assert.ok(snapManifest.hasKoBlockLen > 200_000, 'SB-TC-037(2): window.__agyHostInstalledPlugins.koBlock must be populated');
       assert.ok(snapManifest.hasSbBlockLen > 50_000, 'SB-TC-037(2): window.__agyHostInstalledPlugins.statusbarBlock must be populated');
+      assert.equal(snapManifest.childMgr, true, 'SB-TC-037(2): promoted child window must mount agyMcpManager');
       assert.ok(snapManifest.rootChildCount > 0 && snapManifest.initConfigRecv, 'SB-TC-037(2): real 2.33.0 workbench must render cleanly');
 
-      // Sub-scenario 3: Strict trusted-types ogb-qtm#html blocking custom policies -> bookmarkletExpr exits cleanly (zero sink violation, zero uncaught error)
+      // Sub-scenario 2b (BLOCKING-D): cleanupStatusBar() while companions active preserves __agyHostInstalledPlugins
+      const postCleanupSnap = (
+        await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              const beforeLen = window.__agyHostInstalledPlugins?.mcpBlock?.length || 0;
+              window.__agyStatusBarCleanup?.();
+              const afterLen = window.__agyHostInstalledPlugins?.mcpBlock?.length || 0;
+              return {
+                beforeLen,
+                afterLen,
+                stillHasMcp: Boolean(window.agyMcpManager),
+                stillHasKo: Boolean(window.__agyKoLocalizerActive || window.__agyKoThoughtCleanup),
+                errors: window.__e2eErrors || []
+              };
+            })()`,
+            returnByValue: true,
+          },
+          sessionId
+        )
+      )?.result?.value;
+      assert.ok(postCleanupSnap?.beforeLen > 200_000 && postCleanupSnap?.afterLen === postCleanupSnap?.beforeLen, `SB-TC-037(2b): cleanupStatusBar while companions active must preserve __agyHostInstalledPlugins: ${JSON.stringify(postCleanupSnap)}`);
+      assert.deepEqual(postCleanupSnap?.errors, [], 'SB-TC-037(2b): cleanupStatusBar with active companions must emit zero errors');
+
+      // Sub-scenario 3 (BLOCKING-B): Strict trusted-types (block-all -> exits safely with <= 2 bookmarklet probes; preflight -> <= 3 statusbar policy probes and 0 additional on repeat calls)
       serveCombinedHostManifest = false;
       await sendCdp('Page.navigate', { url: 'https://antigravity.google.com/r/strict-tt-block-all-v2' }, sessionId);
       for (let i = 0; i < 80; i++) {
@@ -5454,27 +5527,106 @@ describe('D-0015..D-0021 full audit regressions', () => {
         await new Promise((res) => setTimeout(res, 60));
       }
       const bmStrict = await sendCdp('Runtime.evaluate', { expression: bookmarkletExpr, returnByValue: true }, sessionId);
-      assert.equal(bmStrict.exceptionDetails, undefined, 'SB-TC-037(3): bookmarkletExpr must not throw synchronously');
-      await new Promise((res) => setTimeout(res, 400));
-      const snapStrict = (
+      assert.equal(bmStrict.exceptionDetails, undefined, 'SB-TC-037(3a): bookmarkletExpr must not throw synchronously');
+      await new Promise((res) => setTimeout(res, 350));
+      const snapStrict1 = (
         await sendCdp(
           'Runtime.evaluate',
           {
             expression: `({
-              cspViolations: window.__e2eCspViolations || [],
-              errors: window.__e2eErrors || []
+              cspViolations: (window.__e2eCspViolations || []).slice(),
+              errors: (window.__e2eErrors || []).slice()
             })`,
             returnByValue: true,
           },
           sessionId
         )
       )?.result?.value;
+      const nonPolicyStrict = (snapStrict1?.cspViolations || []).filter((v) => !v.startsWith('trusted-types:trusted-types-policy'));
       assert.deepEqual(
-        (snapStrict?.cspViolations || []).filter((v) => !v.startsWith('trusted-types:trusted-types-policy')),
+        nonPolicyStrict,
         [],
-        'SB-TC-037(3): bookmarklet must trigger ZERO sink/script-src violations when policy creation fails'
+        `SB-TC-037(3a): bookmarklet must trigger ZERO sink/script-src/style-src violations: ${JSON.stringify(snapStrict1)}`
       );
-      assert.deepEqual(snapStrict?.errors, [], 'SB-TC-037(3): zero uncaught TypeError or rejection when policy creation fails');
+      assert.ok(
+        (snapStrict1?.cspViolations || []).length <= 2,
+        `SB-TC-037(3a): bookmarklet block-all probes must stay bounded (<= 2), got ${JSON.stringify(snapStrict1?.cspViolations)}`
+      );
+      assert.deepEqual(snapStrict1?.errors, [], 'SB-TC-037(3a): zero uncaught TypeError or rejection when policy creation fails');
+
+      await sendCdp('Page.navigate', { url: 'https://antigravity.google.com/r/strict-tt-preflight-v2' }, sessionId);
+      for (let i = 0; i < 80; i++) {
+        const r = await sendCdp('Runtime.evaluate', { expression: 'window.__e2ePortUnaryPaths?.length || 0', returnByValue: true }, sessionId);
+        if (r?.result?.value >= 1) break;
+        await new Promise((res) => setTimeout(res, 60));
+      }
+      const bmPreflight = await sendCdp('Runtime.evaluate', { expression: bookmarkletExpr, returnByValue: true }, sessionId);
+      assert.equal(bmPreflight.exceptionDetails, undefined, 'SB-TC-037(3b): preflight bookmarkletExpr must not throw');
+      for (let i = 0; i < 60; i++) {
+        const r = await sendCdp('Runtime.evaluate', { expression: 'Boolean(document.querySelector(".agy-ctx-statusbar"))', returnByValue: true }, sessionId);
+        if (r?.result?.value === true) break;
+        await new Promise((res) => setTimeout(res, 60));
+      }
+      const snapPreflight = (
+        await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              const beforeRepeat = (window.__e2eCspViolations || []).slice();
+              window.agyStatusBar?.renderNow?.();
+              const afterRepeat = (window.__e2eCspViolations || []).slice();
+              return {
+                hasBar: Boolean(document.querySelector('.agy-ctx-statusbar')),
+                beforeRepeat,
+                afterCount: afterRepeat.length,
+                errors: (window.__e2eErrors || []).slice()
+              };
+            })()`,
+            returnByValue: true,
+          },
+          sessionId
+        )
+      )?.result?.value;
+      assert.equal(snapPreflight?.hasBar, true, 'SB-TC-037(3b): statusbar must still mount cleanly when companion policies are denied');
+      assert.deepEqual(
+        (snapPreflight?.beforeRepeat || []).filter((v) => !v.startsWith('trusted-types:trusted-types-policy')),
+        [],
+        `SB-TC-037(3b): zero sink/script-src/style-src violations under strict-tt-preflight: ${JSON.stringify(snapPreflight)}`
+      );
+      assert.ok(
+        (snapPreflight?.beforeRepeat || []).length <= 4,
+        `SB-TC-037(3b): statusbar policy probes must run once (<= 4), got ${JSON.stringify(snapPreflight?.beforeRepeat)}`
+      );
+      assert.equal(
+        snapPreflight?.afterCount,
+        snapPreflight?.beforeRepeat?.length,
+        'SB-TC-037(3b): repeat statusbar operations must trigger ZERO additional createPolicy CSP violations'
+      );
+      assert.deepEqual(snapPreflight?.errors, [], 'SB-TC-037(3b): zero uncaught errors under strict-tt-preflight');
+
+      // Sub-scenario 4 (BLOCKING-C & D): Reverse load order (mcp-manager + ko-thought-translator preloaded before statusbar) + style-src-elem 'nonce-...'
+      const snapReverse = await runBookmarkletAndCollect('/r/547d3ff8-7d19-415f-a68a-9bbf28c06f5f-v2?styleNonce=1', { reverseLoad: true });
+      assert.ok(snapReverse, 'SB-TC-037(4): reverse-load snapshot must be collected');
+      assert.deepEqual(snapReverse.cspViolations, [], `SB-TC-037(4): reverse load + style-src-elem nonce must produce ZERO CSP violations: ${JSON.stringify(snapReverse)}`);
+      assert.deepEqual(snapReverse.errors, [], `SB-TC-037(4): reverse load must produce ZERO uncaught errors: ${JSON.stringify(snapReverse)}`);
+      assert.equal(snapReverse.hasBar, true, 'SB-TC-037(4): statusbar must mount even when companions loaded first');
+      assert.equal(snapReverse.hasKo, true, 'SB-TC-037(4): ko-thought-translator must remain active after reverse statusbar load');
+      assert.equal(snapReverse.hasMcp, true, 'SB-TC-037(4): mcp-manager must remain active after reverse statusbar load');
+      assert.equal(snapReverse.childMgr, true, `SB-TC-037(4): promoted child window must mount agyMcpManager under reverse load: ${JSON.stringify(snapReverse)}`);
+      const revStyleNonce = (
+        await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              const s = document.getElementById('agy-ctx-statusbar-style');
+              return s ? (s.nonce || s.getAttribute('nonce') || '') : '';
+            })()`,
+            returnByValue: true,
+          },
+          sessionId
+        )
+      )?.result?.value;
+      assert.equal(revStyleNonce, hostNonce, 'SB-TC-037(4): #agy-ctx-statusbar-style must carry active document CSP nonce');
     } finally {
       try { cdpWs?.close(); } catch {}
       try { chromeProc?.kill(); } catch {}
@@ -5625,5 +5777,114 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.equal(Object.keys(mapWin.__testMap).length, 200);
     assert.equal(mapWin.__testMap['cid-0'], undefined);
     assert.equal(mapWin.__testMap['cid-209'], 209);
+  });
+
+  it('SB-TC-039 (BLOCKING-B,C,D): negative TrustedTypes policy cache, style CSP nonce, and companion-safe cleanupStatusBar', async () => {
+    const {
+      getOrCreateCompanionPolicyController,
+      disposeCompanionPolicyController,
+    } = require('../src/companion-loader');
+    const { ensureStyleElement } = require('../src/dom-styles');
+    const { mountStatusBar } = require('../src/index');
+
+    let calls = 0;
+    const deniedWin = {
+      trustedTypes: {
+        createPolicy(name) {
+          calls++;
+          throw new Error(`Denied ${name}`);
+        },
+      },
+    };
+    const c1 = getOrCreateCompanionPolicyController(deniedWin, {});
+    assert.equal(calls, 3, 'SB-TC-039: first probe tries candidate policies once');
+    const c2 = getOrCreateCompanionPolicyController(deniedWin, {});
+    assert.equal(c2, c1);
+    assert.equal(calls, 3, 'SB-TC-039: rejected policy controller must be cached per window');
+    disposeCompanionPolicyController(deniedWin);
+
+    const appendedStyles = [];
+    const mockStyleDoc = {
+      head: { appendChild(el) { appendedStyles.push(el); } },
+      getElementById() { return null; },
+      querySelector(sel) {
+        if (String(sel).includes('nonce')) return { nonce: 'sb-nonce-99', getAttribute: () => 'sb-nonce-99' };
+        return null;
+      },
+      querySelectorAll() { return []; },
+      createElement(tag) {
+        const attrs = {};
+        return {
+          tagName: tag.toUpperCase(),
+          attrs,
+          setAttribute(k, v) { attrs[k] = String(v); },
+          getAttribute(k) { return attrs[k] ?? null; },
+        };
+      },
+    };
+    ensureStyleElement(mockStyleDoc, new Set());
+    assert.equal(appendedStyles.length, 1);
+    assert.equal(appendedStyles[0].nonce, 'sb-nonce-99', 'SB-TC-039: ensureStyleElement must set style nonce property');
+    assert.equal(appendedStyles[0].getAttribute('nonce'), 'sb-nonce-99', 'SB-TC-039: ensureStyleElement must set style nonce attribute');
+
+    const prevDoc = global.document;
+    const prevWin = global.window;
+    const fakeDoc = {
+      head: { appendChild() {} },
+      body: null,
+      getElementById() { return null; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      createElement(tag) {
+        const attrs = {};
+        return {
+          tagName: tag.toUpperCase(),
+          style: {},
+          setAttribute(k, v) { attrs[k] = v; },
+          getAttribute(k) { return attrs[k] ?? null; },
+          remove() {},
+        };
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const fakeWin = {
+      location: { hostname: 'antigravity.google.com', href: 'https://antigravity.google.com/r/x-v2' },
+      document: fakeDoc,
+      agyMcpManager: { active: true },
+      __agyKoLocalizerActive: true,
+      __agyHostInstalledPlugins: { resolved: true, mcpBlock: 'm', koBlock: 'k' },
+      addEventListener() {},
+      removeEventListener() {},
+      setInterval,
+      clearInterval,
+      setTimeout,
+      clearTimeout,
+    };
+    global.document = fakeDoc;
+    global.window = fakeWin;
+    try {
+      mountStatusBar();
+      assert.equal(typeof fakeWin.__agyStatusBarCleanup, 'function');
+      fakeWin.__agyStatusBarCleanup();
+      assert.deepEqual(
+        fakeWin.__agyHostInstalledPlugins,
+        { resolved: true, mcpBlock: 'm', koBlock: 'k' },
+        'SB-TC-039: cleanupStatusBar must preserve __agyHostInstalledPlugins when companions remain active'
+      );
+
+      mountStatusBar();
+      delete fakeWin.agyMcpManager;
+      delete fakeWin.__agyKoLocalizerActive;
+      fakeWin.__agyStatusBarCleanup();
+      assert.equal(
+        fakeWin.__agyHostInstalledPlugins,
+        undefined,
+        'SB-TC-039: cleanupStatusBar must delete __agyHostInstalledPlugins once no companions remain active'
+      );
+    } finally {
+      global.document = prevDoc;
+      global.window = prevWin;
+    }
   });
 });

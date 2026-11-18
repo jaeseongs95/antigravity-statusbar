@@ -1153,7 +1153,7 @@
           throw new TypeError('Untrusted script URL rejected');
         },
       };
-      if (policy && companionPolicyControllers) {
+      if (companionPolicyControllers) {
         companionPolicyControllers.set(win, ctrl);
       }
       return ctrl;
@@ -1165,7 +1165,7 @@
     }
     function getScriptNonce(doc) {
       if (!doc) return '';
-      const nonceEl = doc.querySelector?.('script[nonce]');
+      const nonceEl = doc.querySelector?.('script[nonce]') || doc.querySelector?.('style[nonce]');
       if (nonceEl) {
         const n = nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '';
         if (n) return n;
@@ -1174,6 +1174,12 @@
       for (let i = 0; i < scripts.length; i++) {
         const s = scripts[i];
         const n = s && (s.nonce || s.getAttribute?.('nonce') || '');
+        if (n) return n;
+      }
+      const styles = doc.querySelectorAll?.('style') || [];
+      for (let i = 0; i < styles.length; i++) {
+        const st = styles[i];
+        const n = st && (st.nonce || st.getAttribute?.('nonce') || '');
         if (n) return n;
       }
       return '';
@@ -1846,6 +1852,7 @@
   "./dom-styles": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
+    const { getScriptNonce } = require('./companion-loader');
     const STYLE_CSS = `
     .agy-ctx-statusbar {
       display: flex;
@@ -2278,14 +2285,32 @@
           if (iframe) iframe.__agyCrossOriginInaccessible = true;
         } catch {}
       }
+      const fallbackNonce = getScriptNonce(typeof document !== 'undefined' ? document : null);
       for (const d of docs) {
         const parent = d.head || d.documentElement;
         if (!parent) continue;
+        let docNonce = getScriptNonce(d);
+        if (!docNonce) {
+          try {
+            const pw = d.defaultView && d.defaultView.parent;
+            if (pw && pw !== d.defaultView && pw.document) {
+              docNonce = getScriptNonce(pw.document);
+            }
+          } catch {}
+        }
+        const styleNonce = docNonce || fallbackNonce;
         let styleEl = d.getElementById('agy-ctx-statusbar-style');
         if (!styleEl) {
           styleEl = d.createElement('style');
           styleEl.id = 'agy-ctx-statusbar-style';
+          if (styleNonce) {
+            styleEl.nonce = styleNonce;
+            styleEl.setAttribute?.('nonce', styleNonce);
+          }
           parent.appendChild(styleEl);
+        } else if (styleNonce && !styleEl.nonce && !styleEl.getAttribute?.('nonce')) {
+          styleEl.nonce = styleNonce;
+          styleEl.setAttribute?.('nonce', styleNonce);
         }
         if (styleEl.textContent !== fullCss) {
           styleEl.textContent = fullCss;
@@ -6043,10 +6068,6 @@
           }
         }
         try {
-          delete win.__agyHostInstalledPlugins;
-          delete win.__agyLoadingMcpManagerCompanion;
-          delete win.__agyLoadingKoTranslatorCompanion;
-          delete win.__agyLoadingKoThoughtCompanion;
           delete win.__agyRcGenLenByCascade;
           delete win.__agyRcStepCountByCascade;
           delete win.__agyLastAppliedContextWindow;
@@ -6054,7 +6075,14 @@
           delete win.__agySniffedCascadeId;
           delete win.__agySniffedCascadeTs;
           disposeCompanionPolicyController(win);
-          if (!win.agyMcpManager) {
+          const hasActiveCompanions = Boolean(
+            win.agyMcpManager || win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup
+          );
+          if (!hasActiveCompanions) {
+            delete win.__agyHostInstalledPlugins;
+            delete win.__agyLoadingMcpManagerCompanion;
+            delete win.__agyLoadingKoTranslatorCompanion;
+            delete win.__agyLoadingKoThoughtCompanion;
             delete win.__agyCapturedLsClient;
             delete win.__agyRemoteControlInstance;
             delete win.__agyTrustedTypesPolicy;

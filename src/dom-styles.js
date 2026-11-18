@@ -1,5 +1,7 @@
 'use strict';
 
+const { getScriptNonce } = require('./companion-loader');
+
 const STYLE_CSS = `
     .agy-ctx-statusbar {
       display: flex;
@@ -434,14 +436,32 @@ function ensureStyleElement(document, underDefaultCwSet) {
       if (iframe) iframe.__agyCrossOriginInaccessible = true;
     } catch {}
   }
+  const fallbackNonce = getScriptNonce(typeof document !== 'undefined' ? document : null);
   for (const d of docs) {
     const parent = d.head || d.documentElement;
     if (!parent) continue;
+    let docNonce = getScriptNonce(d);
+    if (!docNonce) {
+      try {
+        const pw = d.defaultView && d.defaultView.parent;
+        if (pw && pw !== d.defaultView && pw.document) {
+          docNonce = getScriptNonce(pw.document);
+        }
+      } catch {}
+    }
+    const styleNonce = docNonce || fallbackNonce;
     let styleEl = d.getElementById('agy-ctx-statusbar-style');
     if (!styleEl) {
       styleEl = d.createElement('style');
       styleEl.id = 'agy-ctx-statusbar-style';
+      if (styleNonce) {
+        styleEl.nonce = styleNonce;
+        styleEl.setAttribute?.('nonce', styleNonce);
+      }
       parent.appendChild(styleEl);
+    } else if (styleNonce && !styleEl.nonce && !styleEl.getAttribute?.('nonce')) {
+      styleEl.nonce = styleNonce;
+      styleEl.setAttribute?.('nonce', styleNonce);
     }
     if (styleEl.textContent !== fullCss) {
       styleEl.textContent = fullCss;
