@@ -5910,4 +5910,184 @@ describe('D-0015..D-0021 full audit regressions', () => {
       global.window = prevWin;
     }
   });
+
+  it('SB-TC-040 (BLOCKING-M4): Live real-site Chromium E2E on https://antigravity.google.com/r/00000000-0000-0000-0000-000000000000-v2 WITHOUT --host-resolver-rules', async (t) => {
+    const os = require('node:os');
+    const { spawn } = require('node:child_process');
+    const { createRfc6455WebSocketClient } = require('../scripts/ensure_statusbar_patch');
+
+    const chromeBin = [
+      process.env.CHROME_BIN,
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    ]
+      .filter(Boolean)
+      .find((p) => fs.existsSync(p));
+    if (!chromeBin) {
+      t.skip('No local Chromium/Edge binary found for live-site E2E test');
+      return;
+    }
+
+    const distBundle = fs.readFileSync(path.join(__dirname, '..', 'dist', 'statusbar_autoinject.js'), 'utf8');
+    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sb-live-'));
+    let chromeProc = null;
+    let cdpWs = null;
+    try {
+      const wsUrlPromise = new Promise((resolve, reject) => {
+        const chromeEnv = { ...process.env };
+        delete chromeEnv.DBUS_SESSION_BUS_ADDRESS;
+        chromeProc = spawn(
+          chromeBin,
+          [
+            '--headless=new',
+            '--no-sandbox',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--remote-debugging-port=0',
+            `--user-data-dir=${profileDir}`,
+            'about:blank',
+          ],
+          { stdio: ['ignore', 'pipe', 'pipe'], env: chromeEnv }
+        );
+        let stderrBuf = '';
+        const timer = setTimeout(() => reject(new Error(`Chrome startup timeout: ${stderrBuf}`)), 15000);
+        chromeProc.stderr.on('data', (chunk) => {
+          stderrBuf += chunk.toString('utf8');
+          const m = stderrBuf.match(/DevTools listening on (ws:\/\/[^\r\n]+)/);
+          if (m) {
+            clearTimeout(timer);
+            resolve(m[1].trim());
+          }
+        });
+        chromeProc.once('exit', (code) => {
+          clearTimeout(timer);
+          reject(new Error(`Chrome exited early (${code}): ${stderrBuf}`));
+        });
+      });
+
+      const browserWsUrl = await wsUrlPromise;
+      cdpWs = createRfc6455WebSocketClient(browserWsUrl);
+      let msgId = 0;
+      const pending = new Map();
+      cdpWs.onmessage = (ev) => {
+        const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString('utf8'));
+        if (msg.id && pending.has(msg.id)) {
+          const { resolve, reject } = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) reject(new Error(msg.error.message));
+          else resolve(msg.result);
+        }
+      };
+      await new Promise((res, rej) => {
+        cdpWs.onopen = res;
+        cdpWs.onerror = rej;
+      });
+      const sendCdp = (method, params = {}, sessionId = undefined) =>
+        new Promise((resolve, reject) => {
+          const id = ++msgId;
+          pending.set(id, { resolve, reject });
+          const payload = { id, method, params };
+          if (sessionId) payload.sessionId = sessionId;
+          cdpWs.send(JSON.stringify(payload));
+        });
+
+      const { targetInfos } = await sendCdp('Target.getTargets');
+      const pageTarget = targetInfos.find((ti) => ti.type === 'page');
+      assert.ok(pageTarget, 'SB-TC-040: page target must exist');
+      const { sessionId } = await sendCdp('Target.attachToTarget', { targetId: pageTarget.targetId, flatten: true });
+      await sendCdp('Page.enable', {}, sessionId);
+      await sendCdp('Runtime.enable', {}, sessionId);
+
+      const liveUrl = 'https://antigravity.google.com/r/00000000-0000-0000-0000-000000000000-v2';
+      await sendCdp('Page.navigate', { url: liveUrl }, sessionId);
+      for (let i = 0; i < 80; i++) {
+        const r = await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: 'document.readyState === "complete" && location.href.startsWith("https://antigravity.google.com/")',
+            returnByValue: true,
+          },
+          sessionId
+        );
+        if (r?.result?.value === true) break;
+        await new Promise((res) => setTimeout(res, 100));
+      }
+
+      const liveSnap = (
+        await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `((bundleCode) => {
+              const cspViolations = [];
+              const runtimeErrors = [];
+              const onCsp = (e) => cspViolations.push(e.violatedDirective + ':' + (e.blockedURI || ''));
+              const onErr = (e) => runtimeErrors.push(String(e?.message || e));
+              document.addEventListener('securitypolicyviolation', onCsp);
+              window.addEventListener('error', onErr);
+              const liveNonce = [...document.querySelectorAll('script,style,link')].find((e) => e.nonce)?.nonce || '';
+              const sc = document.createElement('script');
+              if (liveNonce) sc.nonce = liveNonce;
+              let tp = null;
+              if (window.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
+                try {
+                  tp = window.trustedTypes.createPolicy('agy-sb-live-bm-' + Math.random().toString(36).slice(2), {
+                    createScript: (s) => s,
+                    createScriptURL: (u) => u,
+                  });
+                } catch {}
+              }
+              sc.text = tp ? tp.createScript(bundleCode) : bundleCode;
+              (document.head || document.documentElement).appendChild(sc);
+              const styleEl = document.getElementById('agy-ctx-statusbar-style');
+              const styleNonce = styleEl ? (styleEl.nonce || styleEl.getAttribute('nonce') || '') : '';
+              const hasStyle = Boolean(styleEl);
+              const hasCleanup = typeof window.__agyStatusBarCleanup === 'function';
+              window.__agyStatusBarCleanup?.();
+              const styleAfterCleanup = Boolean(document.getElementById('agy-ctx-statusbar-style'));
+              document.removeEventListener('securitypolicyviolation', onCsp);
+              window.removeEventListener('error', onErr);
+              return {
+                href: location.href,
+                liveNonceLen: liveNonce.length,
+                liveNonce,
+                hasCleanup,
+                hasStyle,
+                styleAfterCleanup,
+                styleNonce,
+                cspViolations,
+                runtimeErrors,
+              };
+            })(${JSON.stringify(distBundle)})`,
+            returnByValue: true,
+          },
+          sessionId
+        )
+      )?.result?.value;
+
+      assert.ok(
+        liveSnap?.href?.startsWith('https://antigravity.google.com/'),
+        `SB-TC-040: Chromium must directly reach live Google host without loopback resolver: ${JSON.stringify(liveSnap)}`
+      );
+      assert.ok(liveSnap?.liveNonceLen >= 8, `SB-TC-040: live antigravity.google.com response must expose CSP nonce: ${JSON.stringify(liveSnap)}`);
+      assert.equal(liveSnap?.hasCleanup, true, `SB-TC-040: statusbar bundle must initialize __agyStatusBarCleanup on live site: ${JSON.stringify(liveSnap)}`);
+      assert.equal(liveSnap?.hasStyle, true, `SB-TC-040: #agy-ctx-statusbar-style must mount cleanly on live antigravity.google.com: ${JSON.stringify(liveSnap)}`);
+      assert.equal(liveSnap?.styleNonce, liveSnap?.liveNonce, 'SB-TC-040: #agy-ctx-statusbar-style must reuse live Google CSP nonce');
+      assert.equal(liveSnap?.styleAfterCleanup, false, 'SB-TC-040: __agyStatusBarCleanup must remove #agy-ctx-statusbar-style on live site');
+      assert.deepEqual(liveSnap?.cspViolations, [], `SB-TC-040: zero live Google CSP violations: ${JSON.stringify(liveSnap?.cspViolations)}`);
+      assert.deepEqual(liveSnap?.runtimeErrors, [], `SB-TC-040: zero uncaught runtime errors on live Google host: ${JSON.stringify(liveSnap?.runtimeErrors)}`);
+    } finally {
+      try { cdpWs?.close(); } catch {}
+      try { chromeProc?.kill(); } catch {}
+      try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch {}
+    }
+  });
 });
