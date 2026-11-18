@@ -5257,12 +5257,19 @@ describe('D-0015..D-0021 full audit regressions', () => {
       const hostPort = hostServer.address().port;
       const cdnPort = cdnServer.address().port;
       const wsUrlPromise = new Promise((resolve, reject) => {
+        const chromeEnv = { ...process.env };
+        delete chromeEnv.DBUS_SESSION_BUS_ADDRESS;
         chromeProc = spawn(
           chromeBin,
           [
             '--headless=new',
             '--no-sandbox',
+            '--disable-dev-shm-usage',
             '--disable-gpu',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--password-store=basic',
+            '--use-mock-keychain',
             '--no-first-run',
             '--no-default-browser-check',
             '--ignore-certificate-errors',
@@ -5271,10 +5278,10 @@ describe('D-0015..D-0021 full audit regressions', () => {
             `--host-resolver-rules=MAP antigravity.google.com 127.0.0.1:${hostPort},MAP antigravity.static.usercontent.goog 127.0.0.1:${cdnPort},MAP www.gstatic.com 127.0.0.1:${cdnPort},MAP raw.githubusercontent.com 127.0.0.1:${cdnPort}`,
             'about:blank',
           ],
-          { stdio: ['ignore', 'ignore', 'pipe'] }
+          { stdio: ['ignore', 'ignore', 'pipe'], env: chromeEnv }
         );
         let stderrBuf = '';
-        const timer = setTimeout(() => reject(new Error(`Chrome startup timeout: ${stderrBuf}`)), 10000);
+        const timer = setTimeout(() => reject(new Error(`Chrome startup timeout: ${stderrBuf}`)), 25000);
         chromeProc.stderr.on('data', (chunk) => {
           stderrBuf += chunk.toString('utf8');
           const m = stderrBuf.match(/DevTools listening on (ws:\/\/[^\r\n]+)/);
