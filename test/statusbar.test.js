@@ -3027,8 +3027,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
     assert.ok(readmeKo.startsWith(expectedHeader), `D-0021: README.ko.md title must start with ${expectedHeader}`);
     assert.equal(readmeEn.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.md');
     assert.equal(readmeKo.includes('17/17'), false, 'D-0021: stale 17/17 test count must be updated in README.ko.md');
-    assert.ok(readmeEn.includes('32/32'), 'D-0021: README.md must state 32/32 tests');
-    assert.ok(readmeKo.includes('32/32'), 'D-0021: README.ko.md must state 32/32 tests');
+    assert.ok(readmeEn.includes('37/37'), 'D-0021: README.md must state 37/37 tests');
+    assert.ok(readmeKo.includes('37/37'), 'D-0021: README.ko.md must state 37/37 tests');
     assert.equal(readmeEn.includes('getContextEstimate()'), false, 'D-0021: README.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeKo.includes('getContextEstimate()'), false, 'D-0021: README.ko.md must not reference non-existent getContextEstimate()');
     assert.equal(readmeEn.includes('agyCwLimit'), false, 'D-0021: README.md must not reference stale agyCwLimit key');
@@ -4748,5 +4748,727 @@ describe('D-0015..D-0021 full audit regressions', () => {
       false,
       'D-0020: cleanupStatusBar must delete window.__agyTrustedHtmlPolicy when companion is inactive'
     );
+  });
+
+  it('D-0034 (SB-TC-036): Remote Control web co-loading preserves RC.prototype.onIframeLoad suppression wrapper and synchronizes companion loading flags', async () => {
+    const { createHostBridge } = require('../src/host-bridge');
+
+    let nativeOnIframeLoadCalls = 0;
+    function SharedRemoteControl() {}
+    SharedRemoteControl.prototype.proxyCommand = async () => ({ payload: new Uint8Array(0) });
+    SharedRemoteControl.prototype.handleIframeMessage = function () {};
+    SharedRemoteControl.prototype.handleUrlChanged = function () {};
+    SharedRemoteControl.prototype.onIframeLoad = async function () {
+      nativeOnIframeLoadCalls += 1;
+      return 'NATIVE_IFRAME_LOAD';
+    };
+
+    const rcInst = new SharedRemoteControl();
+    // Simulate another companion having previously left stale __agyOrig_onIframeLoad AND an active suppression wrapper on RC.prototype
+    SharedRemoteControl.prototype.__agyOrig_onIframeLoad = SharedRemoteControl.prototype.onIframeLoad;
+    const prevOnLoad = SharedRemoteControl.prototype.onIframeLoad;
+    SharedRemoteControl.prototype.onIframeLoad = function (...args) {
+      if (this && this.__agySuppressAutoIframeLoad) return Promise.resolve('SUPPRESSED');
+      return prevOnLoad.apply(this, args);
+    };
+    rcInst.__agySuppressAutoIframeLoad = true;
+
+    const rcWin = {
+      location: { hostname: 'antigravity.google.com', origin: 'https://antigravity.google.com', href: 'https://antigravity.google.com/r/test-v2' },
+      __agyRemoteControlInstance: rcInst,
+      localStorage: { getItem: () => null, setItem() {} },
+    };
+    const rcDoc = {
+      querySelector(sel) {
+        if (sel === 'ga-remote-control') {
+          return {
+            querySelector: () => null,
+            appendChild() {},
+          };
+        }
+        return null;
+      },
+      querySelectorAll: () => [],
+      createElement: () => ({ className: '', setAttribute() {}, getAttribute: () => null, appendChild() {} }),
+    };
+
+    const bridge = createHostBridge({
+      window: rcWin,
+      document: rcDoc,
+      localStorage: rcWin.localStorage,
+      fetchFn: async () => ({ ok: true, json: async () => ({}) }),
+      cwStore: { normalize: (x) => x, getSavedContextWindow: () => '256K', getLimit: () => 256000 },
+    });
+    bridge.getRemoteControlInstance();
+
+    await SharedRemoteControl.prototype.onIframeLoad.call(rcInst);
+    assert.equal(
+      nativeOnIframeLoadCalls,
+      0,
+      'D-0034: statusbar hookRemoteControlPrototype must NOT overwrite active __agySuppressAutoIframeLoad wrapper via shared __agyOrig_onIframeLoad'
+    );
+
+    // Even when statusbar hooks a fresh RC.prototype first, its own onIframeLoad wrapper must honor __agySuppressAutoIframeLoad
+    let freshNativeCalls = 0;
+    function FreshRemoteControl() {}
+    FreshRemoteControl.prototype.proxyCommand = async () => ({ payload: new Uint8Array(0) });
+    FreshRemoteControl.prototype.onIframeLoad = async function () {
+      freshNativeCalls += 1;
+    };
+    const freshInst = new FreshRemoteControl();
+    freshInst.__agySuppressAutoIframeLoad = true;
+    const freshWin = {
+      location: { hostname: 'antigravity.google.com', origin: 'https://antigravity.google.com', href: 'https://antigravity.google.com/r/test-v2' },
+      __agyRemoteControlInstance: freshInst,
+      localStorage: { getItem: () => null, setItem() {} },
+    };
+    const freshBridge = createHostBridge({
+      window: freshWin,
+      document: rcDoc,
+      localStorage: freshWin.localStorage,
+      fetchFn: async () => ({ ok: true, json: async () => ({}) }),
+      cwStore: { normalize: (x) => x, getSavedContextWindow: () => '256K', getLimit: () => 256000 },
+    });
+    freshBridge.getRemoteControlInstance();
+    await FreshRemoteControl.prototype.onIframeLoad.call(freshInst);
+    assert.equal(
+      freshNativeCalls,
+      0,
+      'D-0034: statusbar RC.prototype.onIframeLoad wrapper itself must suppress auto-load while __agySuppressAutoIframeLoad is true'
+    );
+
+    // Check companion loading flag alias synchronization during async companion load
+    let sawBothKoFlagsDuringLoad = false;
+    const flagWin = {
+      location: { hostname: 'antigravity.google.com' },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: false,
+        hasKoTranslator: true,
+        koTranslatorCode: '',
+      },
+    };
+    const flagDoc = {
+      head: {
+        appendChild() {
+          if (flagWin.__agyLoadingKoTranslatorCompanion && flagWin.__agyLoadingKoThoughtCompanion) {
+            sawBothKoFlagsDuringLoad = true;
+          }
+          flagWin.__agyKoLocalizerActive = 'v2';
+        },
+      },
+      createElement: () => ({ text: '' }),
+      querySelector: () => null,
+    };
+    await ensureRemoteCompanionScripts(
+      flagWin,
+      flagDoc,
+      async () => ({ ok: true, async text() { return '// ko'; } }),
+      null
+    );
+    assert.equal(
+      sawBothKoFlagsDuringLoad,
+      true,
+      'D-0034: ensureRemoteCompanionScripts must set both __agyLoadingKoTranslatorCompanion and __agyLoadingKoThoughtCompanion while loading ko-thought-translator'
+    );
+
+    bridge.dispose();
+    freshBridge.dispose();
+  });
+
+  it('SB-TC-037 (D-0025, D-0032, D-0034): Real Headless Chromium E2E test on https://antigravity.google.com/r/...-v2 with live HTTP CSP, TrustedTypes, and 3-plugin bookmarklet co-loading', async (t) => {
+    const https = require('node:https');
+    const crypto = require('node:crypto');
+    const os = require('node:os');
+    const { spawn } = require('node:child_process');
+    const { createRfc6455WebSocketClient } = require('../scripts/ensure_statusbar_patch');
+
+    const chromeCandidates = [
+      process.env.CHROME_BIN,
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    ].filter(Boolean);
+    const chromeBin = chromeCandidates.find((p) => fs.existsSync(p));
+    if (!chromeBin) {
+      t.skip('No local Chromium/Edge binary found for real-browser E2E test');
+      return;
+    }
+
+    const derLen = (n) => {
+      if (n < 0x80) return Buffer.from([n]);
+      const hex = n.toString(16).padStart(n > 0xff ? 4 : 2, '0');
+      const bytes = Buffer.from(hex, 'hex');
+      return Buffer.concat([Buffer.from([0x80 | bytes.length]), bytes]);
+    };
+    const derTlv = (tag, body) => Buffer.concat([Buffer.from([tag]), derLen(body.length), body]);
+    const generateSelfSignedTls = () => {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      const algId = derTlv(0x30, Buffer.from('06082a8648ce3d040302', 'hex'));
+      const ver = Buffer.from('a003020102', 'hex');
+      const serialBytes = crypto.randomBytes(8);
+      serialBytes[0] = (serialBytes[0] & 0x7f) | 0x01;
+      const serial = derTlv(0x02, serialBytes);
+      const cnAttr = derTlv(0x30, Buffer.concat([Buffer.from('0603550403', 'hex'), derTlv(0x0c, Buffer.from('localhost', 'utf8'))]));
+      const name = derTlv(0x30, derTlv(0x31, cnAttr));
+      const validity = derTlv(
+        0x30,
+        Buffer.concat([
+          derTlv(0x17, Buffer.from('250101000000Z', 'ascii')),
+          derTlv(0x18, Buffer.from('20500101000000Z', 'ascii')),
+        ])
+      );
+      const spki = publicKey.export({ type: 'spki', format: 'der' });
+      const tbs = derTlv(0x30, Buffer.concat([ver, serial, algId, name, validity, name, spki]));
+      const sig = crypto.sign('sha256', tbs, privateKey);
+      const certDer = derTlv(0x30, Buffer.concat([tbs, algId, derTlv(0x03, Buffer.concat([Buffer.from([0x00]), sig]))]));
+      const cert = `-----BEGIN CERTIFICATE-----\n${certDer.toString('base64').match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
+      const key = privateKey.export({ type: 'pkcs8', format: 'pem' });
+      return { key, cert };
+    };
+
+    const tlsOpts = generateSelfSignedTls();
+    const builtBundle = fs.readFileSync(path.join(__dirname, '..', 'dist', 'statusbar_autoinject.js'), 'utf8');
+    const readmeMd = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+    const bmMatch = readmeMd.match(/javascript:\(\(\)=>\{[^\r\n]+\}\)\(\);/);
+    assert.ok(bmMatch, 'SB-TC-037: README.md must contain valid single-line bookmarklet');
+    const bookmarkletExpr = bmMatch[0].slice('javascript:'.length);
+
+    const hostNonce = '6MrTi0i9YKUcbrCAvGN0sg';
+    const iframeNonce = 'jJgu3ijJjeWjBiu4jYPUZg';
+
+    // Simulated companion scripts exercising real TrustedTypes, RC.prototype.onIframeLoad suppression, zero-sink cd.open()+cd.close() URL promotion, and TanStack Router History.replaceState!
+    const companionKoJs = `(() => {
+      const rc = window.__agyRemoteControlInstance;
+      const iframe = document.querySelector('ga-remote-control iframe');
+      if (rc && iframe && !iframe.__agyKoPromoted) {
+        iframe.__agyKoPromoted = true;
+        rc.__agySuppressAutoIframeLoadCount = (rc.__agySuppressAutoIframeLoadCount || 0) + 1;
+        rc.__agySuppressAutoIframeLoad = true;
+        const origDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+        const n = [...document.scripts].map(x => x.nonce || x.getAttribute('nonce')).find(Boolean) || '';
+        const pol = window.trustedTypes.createPolicy('agy-ko-e2e', { createScriptURL: u => u });
+        let blankHandled = false;
+        const onBlank = () => {
+          if (blankHandled) return;
+          let cw, cd;
+          try {
+            cw = iframe.contentWindow;
+            cd = iframe.contentDocument;
+            if (!cw || !cd) return;
+            blankHandled = true;
+          } catch {
+            return;
+          }
+          cd.open();
+          cd.close();
+          cd.addEventListener('securitypolicyviolation', (e) => {
+            (window.__e2eCspViolations = window.__e2eCspViolations || []).push('child:' + e.violatedDirective + ':' + e.blockedURI);
+          });
+          cw.addEventListener('error', (e) => {
+            (window.__e2eErrors = window.__e2eErrors || []).push('child:' + String(e.message || e));
+          });
+          const root = cd.createElement('div');
+          root.id = 'root';
+          cd.body.appendChild(root);
+          const ms = cd.createElement('script');
+          if (n) { ms.nonce = n; ms.setAttribute('nonce', n); }
+          ms.src = pol.createScriptURL('https://www.gstatic.com/antigravity/web/2.33.0/main.js');
+          ms.onload = () => {
+            rc.__agySuppressAutoIframeLoadCount = Math.max(0, (rc.__agySuppressAutoIframeLoadCount || 1) - 1);
+            rc.__agySuppressAutoIframeLoad = rc.__agySuppressAutoIframeLoadCount > 0;
+            rc.onIframeLoad();
+          };
+          cd.head.appendChild(ms);
+        };
+        iframe.addEventListener('load', onBlank, { once: true });
+        origDesc.set.call(iframe, 'about:blank');
+        Object.defineProperty(iframe, 'src', {
+          configurable: true,
+          enumerable: true,
+          get: () => 'https://antigravity.google.com/web/2.33.0/?hostTheme=dark&iframe=true',
+          set: (v) => origDesc.set.call(iframe, v)
+        });
+      }
+      window.__agyKoLocalizerActive = 'v2-e2e';
+    })();`;
+
+    const companionMcpJs = `(() => {
+      const rc = window.__agyRemoteControlInstance;
+      if (rc) {
+        const proto = Object.getPrototypeOf(rc);
+        const prev = proto.onIframeLoad;
+        proto.onIframeLoad = function (...args) {
+          if (this && (this.__agySuppressAutoIframeLoad || this.__agySuppressAutoIframeLoadCount > 0)) return Promise.resolve();
+          return prev.apply(this, args);
+        };
+      }
+      window.agyMcpManager = { version: 'v1.5.0-e2e' };
+    })();`;
+
+    const workbenchMainJs = `(() => {
+      // Simulate real Antigravity 2.33.0 TanStack Router startup calling History.replaceState with https://antigravity.google.com/... URL!
+      window.history.replaceState({}, '', 'https://antigravity.google.com/web/2.33.0/?hostTheme=dark&iframe=true');
+      window.__e2eChildHref = window.location.href;
+      window.addEventListener('message', (ev) => {
+        if (ev.data && ev.data.type === 'INITIAL_CONFIG' && ev.ports && ev.ports[0]) {
+          window.__e2ePortSessionId = ev.data.portSessionId;
+          const port = ev.ports[0];
+          port.start?.();
+          const root = document.getElementById('root');
+          if (root) {
+            const view = document.createElement('div');
+            view.setAttribute('data-testid', 'conversation-view');
+            view.setAttribute('data-cascade-id', '547d3ff8-7d19-415f-a68a-9bbf28c06f5f');
+            view.textContent = 'REMOTE_WORKBENCH_READY';
+            const box = document.createElement('div');
+            box.setAttribute('data-testid', 'agent-input-box');
+            view.appendChild(box);
+            root.appendChild(view);
+          }
+        }
+      });
+    })();`;
+
+    const hostServer = https.createServer(tlsOpts, (req, res) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Content-Security-Policy', [
+        "require-trusted-types-for 'script'",
+        `script-src 'nonce-${hostNonce}' 'unsafe-inline';object-src 'none';base-uri 'self';worker-src 'self'`,
+      ]);
+      res.end(`<!doctype html><html><head>
+        <script nonce="${hostNonce}">
+          window.__e2eCspViolations = [];
+          window.__e2eErrors = [];
+          document.addEventListener('securitypolicyviolation', (e) => {
+            window.__e2eCspViolations.push(e.violatedDirective + ':' + e.blockedURI);
+          });
+          window.addEventListener('error', (e) => { window.__e2eErrors.push(String(e.message || e)); });
+          window.addEventListener('unhandledrejection', (e) => { window.__e2eErrors.push(String(e.reason || e)); });
+        </script>
+      </head><body style="background:#0d0d0d;color:#fff;margin:0">
+        <ga-remote-control>
+          <div class="app-container">
+            <iframe src="https://antigravity.static.usercontent.goog/web/2.32.1/?hostTheme=dark&iframe=true" style="width:100%;height:600px;border:0"></iframe>
+          </div>
+        </ga-remote-control>
+        <script nonce="${hostNonce}">
+          class RemoteControlComponent {
+            constructor(iframeEl) {
+              this.destroyed = false;
+              this.hubFrame = { nativeElement: iframeEl };
+              this.proxyPortSessionCounter = 0;
+              this.proxyPort = null;
+              this.proxyPortSessionId = undefined;
+              this.iframeLoading = { set() {} };
+              this.iframeUiReady = { set() {} };
+              this.localUserInfo = { selectedGeminiDir: '/home/user/.gemini' };
+            }
+            selectedInstanceUuid() { return 'inst-uuid-0001'; }
+            iframeSrc() { return 'https://antigravity.static.usercontent.goog/web/2.32.1/?hostTheme=dark&iframe=true'; }
+            async initXChannelServer() { await Promise.resolve(); }
+            async onIframeLoad() {
+              const c = this.hubFrame.nativeElement;
+              await this.initXChannelServer();
+              const d = window.location.origin;
+              const f = (new URL(c.src)).origin;
+              if (this.proxyPort) { this.proxyPort.close(); }
+              const m = new MessageChannel();
+              this.proxyPort = m.port1;
+              this.proxyPortSessionId = 'rc-' + (++this.proxyPortSessionCounter);
+              c.contentWindow.postMessage({
+                type: 'INITIAL_CONFIG',
+                parentOrigin: d,
+                instanceId: this.selectedInstanceUuid(),
+                initialPath: '/',
+                remoteControlVersion: 'v2',
+                messagePortEnabled: true,
+                portSessionId: this.proxyPortSessionId
+              }, f, [m.port2]);
+            }
+            async proxyCommand(rpcPath) {
+              const enc = (obj) => ({ payload: new TextEncoder().encode(JSON.stringify(obj)) });
+              if (rpcPath.endsWith('/GetCustomizationStates')) {
+                return enc({ states: [
+                  { path: '/home/user/.gemini/config/plugins/antigravity-statusbar/SKILL.md' },
+                  { path: '/home/user/.gemini/config/plugins/antigravity-mcp-manager/SKILL.md' },
+                  { path: '/home/user/.gemini/config/plugins/ko-thought-translator/SKILL.md' }
+                ] });
+              }
+              if (rpcPath.endsWith('/GetAllPlugins')) return enc({ plugins: [] });
+              if (rpcPath.endsWith('/ReadFile')) return enc({ content: '' });
+              if (rpcPath.endsWith('/RetrieveUserQuotaSummary')) {
+                return enc({ quotaSummary: { fiveHourRemainingFraction: 0.98, sevenDayRemainingFraction: 0.68 } });
+              }
+              if (rpcPath.endsWith('/GetAllCascadeTrajectories')) {
+                return enc({
+                  trajectorySummaries: {
+                    '547d3ff8-7d19-415f-a68a-9bbf28c06f5f': {
+                      stepCount: 12,
+                      lastModifiedTime: '2026-11-17T12:00:00Z'
+                    }
+                  }
+                });
+              }
+              if (rpcPath.endsWith('/GetCascadeTrajectoryGeneratorMetadata')) {
+                return enc({
+                  generatorMetadata: [{
+                    stepIndices: [11],
+                    chatModel: {
+                      chatStartMetadata: {
+                        contextWindowMetadata: { estimatedTokensUsed: 189440, maxContextTokens: 256000 }
+                      },
+                      usage: { inputTokens: 3800, cacheReadTokens: 185640, outputTokens: 1200 }
+                    }
+                  }]
+                });
+              }
+              return enc({});
+            }
+          }
+          const ifr = document.querySelector('ga-remote-control iframe');
+          const rcInst = new RemoteControlComponent(ifr);
+          window.__agyRemoteControlInstance = rcInst;
+          ifr.addEventListener('load', () => { rcInst.onIframeLoad(); });
+        </script>
+      </body></html>`);
+    });
+
+    const cdnServer = https.createServer(tlsOpts, (req, res) => {
+      const u = new URL(req.url, 'https://localhost');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Cache-Control', 'no-store');
+      if (u.pathname.endsWith('/statusbar_autoinject.js')) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end(builtBundle);
+        return;
+      }
+      if (u.pathname.endsWith('/mcp_manager_autoinject.js')) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end(companionMcpJs);
+        return;
+      }
+      if (u.pathname.endsWith('/ko_thought_autoinject.js')) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end(companionKoJs);
+        return;
+      }
+      if (u.pathname.endsWith('/main.js')) {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.end(workbenchMainJs);
+        return;
+      }
+      if (u.pathname.endsWith('/prism_bundle.js')) {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.end('// prism');
+        return;
+      }
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Content-Security-Policy', [
+        `script-src 'nonce-${iframeNonce}' 'strict-dynamic' 'unsafe-eval' 'unsafe-inline' http: https:; object-src 'none'; base-uri 'none'`,
+        "require-trusted-types-for 'script'",
+      ]);
+      res.end(`<!doctype html><html><head></head><body><div id="root"></div><script nonce="${iframeNonce}" src="https://antigravity.static.usercontent.goog/web/2.32.1/main.js"></script></body></html>`);
+    });
+
+    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sb-chrome-'));
+    let chromeProc = null;
+    let cdpWs = null;
+    try {
+      await new Promise((r) => hostServer.listen(0, '127.0.0.1', r));
+      await new Promise((r) => cdnServer.listen(0, '127.0.0.1', r));
+      hostServer.unref();
+      cdnServer.unref();
+      const hostPort = hostServer.address().port;
+      const cdnPort = cdnServer.address().port;
+      const wsUrlPromise = new Promise((resolve, reject) => {
+        chromeProc = spawn(
+          chromeBin,
+          [
+            '--headless=new',
+            '--no-sandbox',
+            '--disable-gpu',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--ignore-certificate-errors',
+            '--remote-debugging-port=0',
+            `--user-data-dir=${profileDir}`,
+            `--host-resolver-rules=MAP antigravity.google.com 127.0.0.1:${hostPort},MAP antigravity.static.usercontent.goog 127.0.0.1:${cdnPort},MAP www.gstatic.com 127.0.0.1:${cdnPort},MAP raw.githubusercontent.com 127.0.0.1:${cdnPort}`,
+            'about:blank',
+          ],
+          { stdio: ['ignore', 'ignore', 'pipe'] }
+        );
+        let stderrBuf = '';
+        const timer = setTimeout(() => reject(new Error(`Chrome startup timeout: ${stderrBuf}`)), 10000);
+        chromeProc.stderr.on('data', (chunk) => {
+          stderrBuf += chunk.toString('utf8');
+          const m = stderrBuf.match(/DevTools listening on (ws:\/\/[^\r\n]+)/);
+          if (m) {
+            clearTimeout(timer);
+            resolve(m[1].trim());
+          }
+        });
+        chromeProc.once('exit', (code) => {
+          clearTimeout(timer);
+          reject(new Error(`Chrome exited early (${code}): ${stderrBuf}`));
+        });
+      });
+
+      const browserWsUrl = await wsUrlPromise;
+      cdpWs = createRfc6455WebSocketClient(browserWsUrl);
+      let msgId = 0;
+      const pending = new Map();
+      cdpWs.onmessage = (ev) => {
+        const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString('utf8'));
+        if (msg.id && pending.has(msg.id)) {
+          const { resolve, reject } = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) reject(new Error(msg.error.message));
+          else resolve(msg.result);
+        }
+      };
+      await new Promise((res, rej) => {
+        cdpWs.onopen = res;
+        cdpWs.onerror = rej;
+      });
+      const sendCdp = (method, params = {}, sessionId = undefined) =>
+        new Promise((resolve, reject) => {
+          const id = ++msgId;
+          pending.set(id, { resolve, reject });
+          const payload = { id, method, params };
+          if (sessionId) payload.sessionId = sessionId;
+          cdpWs.send(JSON.stringify(payload));
+        });
+
+      const { targetInfos } = await sendCdp('Target.getTargets');
+      const pageTarget = targetInfos.find((ti) => ti.type === 'page');
+      assert.ok(pageTarget, 'SB-TC-037: page target must exist');
+      const { sessionId } = await sendCdp('Target.attachToTarget', { targetId: pageTarget.targetId, flatten: true });
+      await sendCdp('Page.enable', {}, sessionId);
+      await sendCdp('Runtime.enable', {}, sessionId);
+
+      await sendCdp(
+        'Page.navigate',
+        { url: 'https://antigravity.google.com/r/547d3ff8-7d19-415f-a68a-9bbf28c06f5f-v2' },
+        sessionId
+      );
+
+      // Wait for initial cross-origin iframe load (rc-1)
+      for (let i = 0; i < 40; i++) {
+        const r = await sendCdp(
+          'Runtime.evaluate',
+          { expression: 'window.__agyRemoteControlInstance?.proxyPortSessionCounter || 0', returnByValue: true },
+          sessionId
+        );
+        if (r?.result?.value >= 1) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+
+      // Click the exact README.md bookmarklet on live https://antigravity.google.com/r/...-v2!
+      const bmEval = await sendCdp(
+        'Runtime.evaluate',
+        { expression: bookmarkletExpr, returnByValue: true },
+        sessionId
+      );
+      assert.equal(bmEval.exceptionDetails, undefined, 'SB-TC-037: bookmarklet evaluation must not throw');
+
+      let snapshot = null;
+      for (let i = 0; i < 60; i++) {
+        const r = await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              const bar = document.querySelector('.agy-ctx-statusbar');
+              const ifr = document.querySelector('ga-remote-control iframe');
+              let innerText = '';
+              let childPortSession = '';
+              try {
+                innerText = ifr?.contentDocument?.getElementById('root')?.textContent || '';
+                childPortSession = ifr?.contentWindow?.__e2ePortSessionId || '';
+              } catch {}
+              return {
+                hasBar: Boolean(bar),
+                barText: bar ? bar.textContent : '',
+                hasKo: Boolean(window.__agyKoLocalizerActive),
+                hasMcp: Boolean(window.agyMcpManager),
+                innerText,
+                childPortSession,
+                hostPortSession: window.__agyRemoteControlInstance?.proxyPortSessionId || '',
+                cspViolations: window.__e2eCspViolations || [],
+                errors: window.__e2eErrors || []
+              };
+            })()`,
+            returnByValue: true,
+          },
+          sessionId
+        );
+        snapshot = r?.result?.value;
+        if (
+          snapshot &&
+          snapshot.hasBar &&
+          snapshot.hasKo &&
+          snapshot.hasMcp &&
+          snapshot.innerText.includes('REMOTE_WORKBENCH_READY') &&
+          snapshot.barText.includes('cache 98%')
+        ) {
+          break;
+        }
+        await new Promise((res) => setTimeout(res, 60));
+      }
+
+      assert.ok(snapshot, 'SB-TC-037: browser state snapshot must be collected');
+      assert.deepEqual(snapshot.cspViolations, [], 'SB-TC-037: zero CSP or TrustedTypes violations on live CSP headers');
+      assert.deepEqual(snapshot.errors, [], 'SB-TC-037: zero uncaught errors during bookmarklet & companion co-loading');
+      assert.equal(snapshot.hasBar, true, 'SB-TC-037: statusbar must mount on <ga-remote-control>');
+      assert.ok(snapshot.barText.includes('cache 98%'), `SB-TC-037: statusbar must display live context metrics, got: ${snapshot.barText}`);
+      assert.equal(snapshot.hasKo, true, 'SB-TC-037: ko-thought-translator companion must co-load');
+      assert.equal(snapshot.hasMcp, true, 'SB-TC-037: mcp-manager companion must co-load');
+      assert.equal(
+        snapshot.innerText,
+        'REMOTE_WORKBENCH_READY',
+        `SB-TC-037: inner workbench #root must render cleanly, snapshot=${JSON.stringify(snapshot)}`
+      );
+      assert.equal(
+        snapshot.childPortSession,
+        snapshot.hostPortSession,
+        'SB-TC-037: child workbench must hold the active -v2 MessagePort session without premature consumption'
+      );
+    } finally {
+      try { cdpWs?.close(); } catch {}
+      try { chromeProc?.kill(); } catch {}
+      try { hostServer.closeAllConnections?.(); } catch {}
+      try { cdnServer.closeAllConnections?.(); } catch {}
+      await new Promise((r) => hostServer.close(() => r()));
+      await new Promise((r) => cdnServer.close(() => r()));
+      try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  it('SB-TC-038: v1.4.0 SOLID subsystem boundary unit tests (protobuf-checkpoint-codec, remote-runtime, companion-loader, desktop-react-bridge)', async () => {
+    const codecMod = require('../src/protobuf-checkpoint-codec');
+    const runtimeMod = require('../src/remote-runtime');
+    const loaderMod = require('../src/companion-loader');
+    const reactBridgeMod = require('../src/desktop-react-bridge');
+
+    // 1. protobuf-checkpoint-codec: pure binary/JSON wire codec with zero DOM/window dependency
+    const textCodec = codecMod.createTextCodec(null);
+    const sendPath = '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage';
+    const rawJson = JSON.stringify({ cascadeId: '11111111-2222-3333-4444-555555555555', text: 'hi' });
+    const injectedJson = JSON.parse(
+      codecMod.injectCheckpointPayload({
+        path: sendPath,
+        body: rawJson,
+        contextWindow: '512K',
+        maxTokenLimit: 524288,
+        codec: textCodec,
+      })
+    );
+    assert.equal(injectedJson.cascadeConfig?.checkpointConfig?.maxTokenLimit, 524288);
+
+    // 2. remote-runtime: isolated multi-lease prototype chaining & reference-counted suppression
+    let baseLoadCount = 0;
+    function RcProtoFixture() {}
+    RcProtoFixture.prototype.proxyCommand = async () => ({ payload: new Uint8Array(0) });
+    RcProtoFixture.prototype.onIframeLoad = async function () {
+      baseLoadCount += 1;
+    };
+    const inst = new RcProtoFixture();
+    inst.__agySuppressAutoIframeLoadCount = 2;
+    assert.equal(runtimeMod.isAutoIframeLoadSuppressed(inst), true);
+
+    const winFixture = {
+      location: { hostname: 'antigravity.google.com', origin: 'https://antigravity.google.com' },
+      __agyRemoteControlInstance: inst,
+    };
+    const leaseA = runtimeMod.acquireRemoteRuntimeLease({ window: winFixture, document: {} });
+    const leaseB = runtimeMod.acquireRemoteRuntimeLease({ window: winFixture, document: {} });
+    leaseA.resolveInstance();
+    leaseB.resolveInstance();
+    await RcProtoFixture.prototype.onIframeLoad.call(inst);
+    assert.equal(baseLoadCount, 0, 'SB-TC-038: reference-counted __agySuppressAutoIframeLoadCount > 0 must suppress auto-load');
+    inst.__agySuppressAutoIframeLoadCount = 0;
+    await RcProtoFixture.prototype.onIframeLoad.call(inst);
+    assert.equal(baseLoadCount, 1, 'SB-TC-038: releasing reference count must allow onIframeLoad');
+    leaseB.release();
+    leaseA.release();
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(RcProtoFixture.prototype, '__agyOrig_onIframeLoad'),
+      false,
+      'SB-TC-038: remote-runtime must never write shared __agyOrig_* properties onto RC.prototype'
+    );
+
+    const parsedManifest = runtimeMod.parseAutoinjectCompanionManifest(
+      'function mountStatusBar() {}\n// === BEGIN_AGY_MCP_MANAGER ===\nconst m = 1;\n// === END_AGY_MCP_MANAGER ===\n',
+      new Set(['ko-thought-translator'])
+    );
+    assert.equal(parsedManifest.hasStatusbar, true);
+    assert.equal(parsedManifest.hasMcpManager, true);
+    assert.equal(parsedManifest.hasKoTranslator, true);
+    assert.equal(parsedManifest.mcpManagerCode.includes('const m = 1;'), true);
+
+    // 3. companion-loader: duplicate <script data-agy-companion="mcp-manager"> guard and failed tag removal
+    let headTags = [];
+    const dupDoc = {
+      head: {
+        appendChild(el) {
+          headTags.push(el);
+          setTimeout(() => el._err?.(), 2);
+        },
+      },
+      createElement(tag) {
+        const attrs = {};
+        return {
+          tagName: tag.toUpperCase(),
+          attrs,
+          setAttribute(k, v) { attrs[k] = String(v); },
+          getAttribute(k) { return attrs[k] ?? null; },
+          addEventListener(ev, fn) { if (ev === 'error') this._err = fn; },
+          remove() { headTags = headTags.filter((x) => x !== this); },
+        };
+      },
+      querySelector(sel) {
+        if (sel === 'script[data-agy-companion="mcp-manager"]') {
+          return {
+            tagName: 'SCRIPT',
+            getAttribute: (k) => (k === 'data-agy-companion' ? 'mcp-manager' : null),
+          };
+        }
+        return null;
+      },
+      querySelectorAll: () => [],
+    };
+    const dupWin = {
+      location: { hostname: 'antigravity.google.com' },
+      __agyHostInstalledPlugins: {
+        resolved: true,
+        hasStatusbar: true,
+        hasMcpManager: true,
+        hasKoTranslator: true,
+      },
+    };
+    await loaderMod.ensureRemoteCompanionScripts(dupWin, dupDoc, null, null);
+    assert.equal(
+      dupWin.__agyLoadingMcpManagerCompanion,
+      undefined,
+      'SB-TC-038: existing <script data-agy-companion="mcp-manager"> must prevent duplicate injection'
+    );
+    assert.equal(headTags.length, 0, 'SB-TC-038: failed ko-thought-translator script tag must be removed from head on error');
+
+    // 4. desktop-react-bridge: bounded map 200-entry ceiling
+    const mapWin = {};
+    for (let i = 0; i < 210; i++) {
+      reactBridgeMod.setBoundedMapRecord(mapWin, '__testMap', `cid-${i}`, i);
+    }
+    assert.equal(Object.keys(mapWin.__testMap).length, 200);
+    assert.equal(mapWin.__testMap['cid-0'], undefined);
+    assert.equal(mapWin.__testMap['cid-209'], 209);
   });
 });

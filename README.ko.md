@@ -1,8 +1,8 @@
-# antigravity-statusbar (`v1.3.26` / `v32`)
+# antigravity-statusbar (`v1.4.0` / `v34`)
 
 **언어 (Languages):** **[English (README.md)](./README.md)** | **한국어 ([README.ko.md](./README.ko.md))**
 
-**Google Antigravity IDE (`v2.26.x` – `v2.32.x+`)** 채팅 입력창 하단에 장착되는 커스텀 컨텍스트 상태바(`.agy-ctx-statusbar`), 세션별 자유 토큰 한도 설정기(`32K`–`980K`) 및 백엔드 체크포인터(`max_token_limit`) 실시간 동기화, 플러그형 **`StatusBarAdapter`** 확장 API, 무결성 보존(`0` 오프셋) `app.asar` + 실시간 CDP 자동 패처, 그리고 **원격 제어 웹(`https://antigravity.google.com/r/...`) 북마클릿·유저스크립트**를 제공하는 통합 확장 도구입니다.
+**Google Antigravity IDE (`v2.26.x` – `v2.33.x+`)** 채팅 입력창 하단에 장착되는 커스텀 컨텍스트 상태바(`.agy-ctx-statusbar`), 세션별 자유 토큰 한도 설정기(`32K`–`980K`) 및 백엔드 체크포인터(`max_token_limit`) 실시간 동기화, 플러그형 **`StatusBarAdapter`** 확장 API, 무결성 보존(`0` 오프셋) `app.asar` + 실시간 CDP 자동 패처, 그리고 **원격 제어 웹(`https://antigravity.google.com/r/...`) 북마클릿·유저스크립트**를 제공하는 통합 확장 도구입니다.
 
 ---
 
@@ -46,7 +46,7 @@
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
 
-# 1. 단위 테스트 및 번들 통합 회귀 테스트 실행 (32/32 통과)
+# 1. 단위·번들 통합 및 헤드리스 크롬 E2E 회귀 테스트 실행 (37/37 통과)
 npm test
 
 # 2. dist/statusbar_autoinject.js 빌드, ~/.gemini/antigravity 설치, app.asar 패치 및 CDP 즉시 주입
@@ -67,7 +67,7 @@ npm run status
 아래 한 줄짜리 `javascript:` 코드를 복사하여 브라우저 북마크(즐겨찾기)의 **URL(주소)** 칸에 붙여넣으세요:
 
 ```javascript
-javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>r.text()).then(c=>{const s=document.createElement('script'),n=document.querySelector('script[nonce]')?.nonce,p=window.trustedTypes?.createPolicy('agy-'+Date.now(),{createScript:x=>x});if(n)s.nonce=n;s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
+javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>{if(!r.ok)throw new Error(r.status);return r.text()}).then(c=>{const s=document.createElement('script'),n=[...document.scripts].map(x=>x.nonce||x.getAttribute('nonce')).find(Boolean);let p=null;try{p=window.trustedTypes?.createPolicy('agy-sb-'+Date.now(),{createScript:x=>x})}catch{}if(n){s.nonce=n;s.setAttribute('nonce',n)}s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
 ```
 
 #### 데스크톱 브라우저(Chrome / Edge / Brave) 북마크바 등록 및 실행 방법
@@ -148,30 +148,34 @@ dispose(); // 또는 window.agyStatusBar.unregisterAdapter('my-custom-btn');
 ```text
 antigravity-statusbar/
 ├── src/
-│   ├── index.js                   # 모듈 조립 루트, 원격 동반 플러그인 로더 및 수명주기 관찰자
-│   ├── host-adapter-config.js     # 호스트 RPC 경로·CSRF 헤더·원격 도메인·동반 스크립트 URL 어댑터 설정
-│   ├── context-window-policy.js   # 컨텍스트 한도 정규화(32K-980K) 및 세션별 영속 저장소
-│   ├── host-bridge.js             # React Fiber / Redux / 원격 proxyCommand / Connect 프레임 & Protobuf 훅
-│   ├── rpc-client.js              # LanguageServer RPC 클라이언트, singleflight 중복 방지 및 LRU 캐시
-│   ├── dom-styles.js              # CSS 스타일시트, <=256K 경고 숨김 동적 CSS, TrustedHTML 및 포맷터
-│   ├── adapter-registry.js        # StatusBarAdapter 레지스트리 및 정렬 슬롯 렌더러
+│   ├── index.js                      # 모듈 조립 루트 및 수명주기 관찰자
+│   ├── host-adapter-config.js        # 호스트 RPC 경로·CSRF 헤더·원격 도메인·동반 스크립트 URL 어댑터 설정
+│   ├── protobuf-checkpoint-codec.js  # 순수 Protobuf / Connect 프레임 SendUserCascadeMessage 코덱
+│   ├── remote-runtime.js             # 격리된 RemoteControlComponent 프로토타입 리스 및 동반 블록 파서
+│   ├── companion-loader.js           # CSP 논스 및 범위 제한 TrustedTypes 동반 스크립트 로더
+│   ├── desktop-react-bridge.js       # React Fiber / Redux modelSelection / Lexical 압축 엔진 어댑터
+│   ├── context-window-policy.js      # 컨텍스트 한도 정규화(32K-980K) 및 세션별 영속 저장소
+│   ├── host-bridge.js                # 호스트 브릿지 퍼사드 조정자
+│   ├── rpc-client.js                 # LanguageServer RPC 클라이언트, singleflight 중복 방지 및 LRU 캐시
+│   ├── dom-styles.js                 # CSS 스타일시트, <=256K 경고 숨김 동적 CSS, 무싱크 DOM 빌더 및 포맷터
+│   ├── adapter-registry.js           # StatusBarAdapter 레지스트리 및 정렬 슬롯 렌더러
 │   └── adapters/
-│       ├── core-metrics.js        # 좌측 슬롯 지표 + 세션별 컨텍스트 한도 드롭다운 메뉴
-│       ├── compact-button.js      # 우측 슬롯 `[ compact ]` 버튼 어댑터
-│       └── context-button.js      # 우측 슬롯 `[ context ]` 버튼 어댑터 + Trajectory 디버그 모달
+│       ├── core-metrics.js           # 좌측 슬롯 지표 + 세션별 컨텍스트 한도 드롭다운 메뉴
+│       ├── compact-button.js         # 우측 슬롯 `[ compact ]` 버튼 어댑터
+│       └── context-button.js         # 우측 슬롯 `[ context ]` 버튼 어댑터 + Trajectory 디버그 모달
 ├── dist/
-│   └── statusbar_autoinject.js    # Electron / CDP / UserScript 겸용 단일 파일 런타임 번들 산출물
+│   └── statusbar_autoinject.js       # Electron / CDP / UserScript 겸용 단일 파일 런타임 번들 산출물
 ├── docs/
-│   ├── TEST_CASES.md              # 사전 테스트케이스 명세 및 결함 추적 매트릭스
-│   └── templates/                 # 공개 문서(README·릴리즈노트) 표준 템플릿
+│   ├── TEST_CASES.md                 # 사전 테스트케이스 명세 및 결함 추적 매트릭스
+│   └── templates/                    # 공개 문서(README·릴리즈노트) 표준 템플릿
 ├── scripts/
-│   ├── build.js                   # 무의존성 CommonJS 번들러 (src/ -> dist/statusbar_autoinject.js)
-│   ├── ensure_statusbar_patch.js  # 오프셋 보존 ASAR 패처 + app_storage 동기화 + 실시간 CDP 주입기
-│   └── install.js                 # 번들 빌드 후 ~/.gemini/antigravity 설치 및 패처 실행
+│   ├── build.js                      # 무의존성 CommonJS 번들러 (src/ -> dist/statusbar_autoinject.js)
+│   ├── ensure_statusbar_patch.js     # 오프셋 보존 ASAR 패처 + app_storage 동기화 + 실시간 CDP 주입기
+│   └── install.js                    # 번들 빌드 후 ~/.gemini/antigravity 설치 및 패처 실행
 ├── test/
-│   └── statusbar.test.js          # 개별 모듈 단위 테스트 + 런타임 번들 통합·회귀 테스트 (32/32)
-├── README.md                      # 영문 안내 문서 (English)
-├── README.ko.md                   # 국문 안내 문서 (Korean)
+│   └── statusbar.test.js             # 개별 모듈 단위 + 번들 통합 + 크롬 E2E 테스트 (37/37)
+├── README.md                         # 영문 안내 문서 (English)
+├── README.ko.md                      # 국문 안내 문서 (Korean)
 └── package.json
 ```
 
@@ -180,7 +184,7 @@ antigravity-statusbar/
 ## 검증 및 테스트
 
 ```bash
-# dist/statusbar_autoinject.js 빌드 및 32개 단위·통합 회귀 테스트 실행 (32/32)
+# dist/statusbar_autoinject.js 빌드 및 37개 단위·통합·크롬 E2E 회귀 테스트 실행 (37/37)
 npm test
 ```
 

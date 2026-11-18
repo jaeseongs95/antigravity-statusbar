@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.3.26
+// @version      1.4.0
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -18,6 +18,7 @@
     const DEFAULT_HOST_ADAPTER_CONFIG = Object.freeze({
       rpcServicePrefix: '/exa.language_server_pb.LanguageServerService',
       csrfHeaderName: 'x-codeium-csrf-token',
+      remoteCsrfToken: ['csrf', 'token'].join('_'),
       remoteHostDomains: Object.freeze(['antigravity.google.com']),
       staticCdnOrigins: Object.freeze(['https://antigravity.static.usercontent.goog']),
       cdnOrigin: 'https://www.gstatic.com/antigravity',
@@ -64,6 +65,7 @@
         ? src.staticCdnOrigins.map((o) => String(o).trim()).filter(Boolean)
         : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
       const cdnOrigin = normalizeHttpsBaseUrl(src.cdnOrigin, DEFAULT_HOST_ADAPTER_CONFIG.cdnOrigin);
+      const remoteCsrfToken = String(src.remoteCsrfToken || DEFAULT_HOST_ADAPTER_CONFIG.remoteCsrfToken);
       const companionScripts = {
         ...DEFAULT_HOST_ADAPTER_CONFIG.companionScripts,
         ...(winCfg?.companionScripts || {}),
@@ -72,6 +74,7 @@
       return {
         rpcServicePrefix,
         csrfHeaderName,
+        remoteCsrfToken,
         remoteHostDomains,
         staticCdnOrigins,
         cdnOrigin,
@@ -97,6 +100,1318 @@
     module.exports = {
       DEFAULT_HOST_ADAPTER_CONFIG,
       resolveHostAdapterConfig,
+    };
+  },
+  "./protobuf-checkpoint-codec": function(module, exports, __require) {
+    const require = (spec) => __require(".", spec);
+    'use strict';
+    /**
+     * Pure Protobuf wire & Connect-RPC 5-byte envelope codec for
+     * `SendUserCascadeMessageRequest` checkpoint limit injection and cascade UUID extraction.
+     * Zero DOM or window coupling.
+     */
+    const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const PROTO_UUID_RE = /\x0a\x24([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+    const CONVO_RPC_RE =
+      /\/(StreamAgentStateUpdates|RequestAgentStatePageUpdate|StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|GetCascadeModelConfigData|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
+    function toUint8Slice(body) {
+      if (!body) return null;
+      if (body instanceof Uint8Array) return body;
+      if (body instanceof ArrayBuffer) return new Uint8Array(body);
+      if (ArrayBuffer.isView(body)) {
+        return new Uint8Array(body.buffer, body.byteOffset || 0, body.byteLength ?? body.buffer.byteLength);
+      }
+      if (body.buffer instanceof ArrayBuffer) {
+        return new Uint8Array(body.buffer, body.byteOffset || 0, body.byteLength ?? body.buffer.byteLength);
+      }
+      return null;
+    }
+    function createTextCodec(envWin) {
+      let sharedDecoder = null;
+      let sharedEncoder = null;
+      function decodeBytesToText(body) {
+        if (!body) return '';
+        if (typeof body === 'string') return body;
+        try {
+          if (!sharedDecoder) {
+            const TD = envWin?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
+            if (TD) sharedDecoder = new TD('utf-8');
+          }
+          if (sharedDecoder) {
+            const u8 = toUint8Slice(body) || new Uint8Array(body);
+            return sharedDecoder.decode(u8);
+          }
+        } catch {}
+        return '';
+      }
+      function encodeTextToBytes(str) {
+        if (!sharedEncoder) {
+          const TE = envWin?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
+          if (TE) sharedEncoder = new TE();
+        }
+        if (sharedEncoder) return sharedEncoder.encode(str);
+        return Uint8Array.from(String(str).split('').map((c) => c.charCodeAt(0) & 0xff));
+      }
+      function decodeBase64ToUtf8(b64) {
+        if (!b64 || typeof b64 !== 'string') return '';
+        try {
+          if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+            return Buffer.from(b64, 'base64').toString('utf8');
+          }
+          const atobFn = envWin?.atob || (typeof atob === 'function' ? atob : null);
+          if (atobFn) {
+            const bin = atobFn(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
+            return decodeBytesToText(bytes);
+          }
+        } catch {}
+        return '';
+      }
+      return {
+        toUint8Slice,
+        decodeBytesToText,
+        encodeTextToBytes,
+        decodeBase64ToUtf8,
+      };
+    }
+    function encodeVarint(val) {
+      const out = [];
+      let v = Math.max(0, Math.floor(Number(val) || 0)) >>> 0;
+      while (v >= 0x80) {
+        out.push((v & 0x7f) | 0x80);
+        v >>>= 7;
+      }
+      out.push(v & 0x7f);
+      return out;
+    }
+    function readProtobufVarint(buf, startOffset) {
+      let val = 0;
+      let shift = 0;
+      let nonZero = false;
+      for (let i = 0; i < 10; i++) {
+        const idx = startOffset + i;
+        if (idx >= buf.length) return null;
+        const b = buf[idx];
+        if ((b & 0x7f) !== 0) nonZero = true;
+        if (shift < 53) {
+          val += (b & 0x7f) * (2 ** shift);
+        }
+        if ((b & 0x80) === 0) {
+          return { value: val, nonZero, nextOffset: idx + 1 };
+        }
+        shift += 7;
+      }
+      return null;
+    }
+    function scanProtobufFields(buf) {
+      const fields = [];
+      let pos = 0;
+      while (pos < buf.length) {
+        const fieldStart = pos;
+        const tagVar = readProtobufVarint(buf, pos);
+        if (!tagVar || tagVar.value <= 0) return null;
+        const wireType = tagVar.value & 0x07;
+        const fieldNumber = Math.floor(tagVar.value / 8);
+        if (fieldNumber <= 0) return null;
+        pos = tagVar.nextOffset;
+        if (wireType === 0) {
+          const v = readProtobufVarint(buf, pos);
+          if (!v) return null;
+          pos = v.nextOffset;
+          fields.push({ fieldNumber, wireType, varintNonZero: v.nonZero, rawSlice: buf.subarray(fieldStart, pos) });
+        } else if (wireType === 1) {
+          if (pos + 8 > buf.length) return null;
+          pos += 8;
+          fields.push({ fieldNumber, wireType, rawSlice: buf.subarray(fieldStart, pos) });
+        } else if (wireType === 2) {
+          const lenVar = readProtobufVarint(buf, pos);
+          if (!lenVar || lenVar.value < 0 || lenVar.nextOffset + lenVar.value > buf.length) return null;
+          const dataStart = lenVar.nextOffset;
+          pos = dataStart + lenVar.value;
+          fields.push({
+            fieldNumber,
+            wireType,
+            payloadSlice: buf.subarray(dataStart, pos),
+            rawSlice: buf.subarray(fieldStart, pos),
+          });
+        } else if (wireType === 5) {
+          if (pos + 4 > buf.length) return null;
+          pos += 4;
+          fields.push({ fieldNumber, wireType, rawSlice: buf.subarray(fieldStart, pos) });
+        } else {
+          return null;
+        }
+      }
+      return fields;
+    }
+    function concatUint8Arrays(chunks) {
+      let total = 0;
+      for (const c of chunks) total += c.length;
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) {
+        out.set(c, off);
+        off += c.length;
+      }
+      return out;
+    }
+    function buildSendMessageCheckpointSuffix(maxTokenLimit, contextWindow, encodeTextFn) {
+      const encodeFn =
+        typeof encodeTextFn === 'function'
+          ? encodeTextFn
+          : (s) => Uint8Array.from(String(s).split('').map((c) => c.charCodeAt(0) & 0xff));
+      const cpBytes = [0x28, ...encodeVarint(maxTokenLimit)];
+      if (contextWindow && typeof contextWindow === 'string') {
+        const cwBytes = Array.from(encodeFn(contextWindow));
+        cpBytes.push(0xa2, 0x02, ...encodeVarint(cwBytes.length), ...cwBytes);
+      }
+      const ccBytes = [0x12, ...encodeVarint(cpBytes.length), ...cpBytes];
+      return new Uint8Array([0x2a, ...encodeVarint(ccBytes.length), ...ccBytes]);
+    }
+    function isValidCheckpointSuffixAt(buf, pos) {
+      if (pos < 0 || pos >= buf.length || buf[pos] !== 0x2a) return false;
+      const ccLenVar = readProtobufVarint(buf, pos + 1);
+      if (!ccLenVar || ccLenVar.nextOffset + ccLenVar.value !== buf.length) return false;
+      const innerPos = ccLenVar.nextOffset;
+      if (innerPos >= buf.length || buf[innerPos] !== 0x12) return false;
+      const cpLenVar = readProtobufVarint(buf, innerPos + 1);
+      if (!cpLenVar || cpLenVar.nextOffset + cpLenVar.value !== buf.length) return false;
+      const fieldPos = cpLenVar.nextOffset;
+      if (fieldPos >= buf.length || buf[fieldPos] !== 0x28) return false;
+      const limitVar = readProtobufVarint(buf, fieldPos + 1);
+      if (!limitVar || limitVar.value <= 0) return false;
+      if (limitVar.nextOffset === buf.length) return true;
+      const cwTagPos = limitVar.nextOffset;
+      if (cwTagPos + 2 > buf.length || buf[cwTagPos] !== 0xa2 || buf[cwTagPos + 1] !== 0x02) return false;
+      const cwLenVar = readProtobufVarint(buf, cwTagPos + 2);
+      return Boolean(cwLenVar && cwLenVar.value >= 1 && cwLenVar.value <= 16 && cwLenVar.nextOffset + cwLenVar.value === buf.length);
+    }
+    function stripTrailingCheckpointSuffix(bytes) {
+      if (!bytes || bytes.length < 6) return bytes;
+      let cur = bytes;
+      let stripped = true;
+      while (stripped && cur.length >= 6) {
+        stripped = false;
+        for (let pos = Math.max(0, cur.length - 32); pos <= cur.length - 6; pos++) {
+          if (isValidCheckpointSuffixAt(cur, pos)) {
+            cur = cur.subarray(0, pos);
+            stripped = true;
+            break;
+          }
+        }
+      }
+      return cur;
+    }
+    function findFirstNonWsByte(u8) {
+      if (!u8 || u8.length === 0) return -1;
+      let i = 0;
+      if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
+        i = 3;
+      }
+      while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x09 || u8[i] === 0x0a || u8[i] === 0x0d)) {
+        i++;
+      }
+      return i < u8.length ? u8[i] : -1;
+    }
+    function endsWithByteSequence(u8, seq) {
+      if (!u8 || !seq || u8.length < seq.length) return false;
+      const offset = u8.length - seq.length;
+      for (let i = 0; i < seq.length; i++) {
+        if (u8[offset + i] !== seq[i]) return false;
+      }
+      return true;
+    }
+    function buildConnectFramedBytes(flagByte, payloadBytes) {
+      const len = payloadBytes.length;
+      const framed = new Uint8Array(5 + len);
+      framed[0] = flagByte & 0xff;
+      framed[1] = (len >>> 24) & 0xff;
+      framed[2] = (len >>> 16) & 0xff;
+      framed[3] = (len >>> 8) & 0xff;
+      framed[4] = len & 0xff;
+      framed.set(payloadBytes, 5);
+      return framed;
+    }
+    function mergeCheckpointIntoProtobufBytes(rawPayload, maxTokenLimit, contextWindow, encodeTextFn) {
+      const suffix = buildSendMessageCheckpointSuffix(maxTokenLimit, contextWindow, encodeTextFn);
+      const cleanBytes = stripTrailingCheckpointSuffix(rawPayload);
+      const topFields = scanProtobufFields(cleanBytes);
+      if (topFields) {
+        if (topFields.some((f) => f.fieldNumber === 20 && f.wireType === 0 && f.varintNonZero)) {
+          return null;
+        }
+        const existingCascadeFields = topFields.filter((f) => f.fieldNumber === 5 && f.wireType === 2);
+        if (existingCascadeFields.length > 0) {
+          const preservedCcSubSlices = [];
+          const preservedCpSubSlices = [];
+          let allSubParsed = true;
+          for (const ccField of existingCascadeFields) {
+            const ccSubs = scanProtobufFields(ccField.payloadSlice);
+            if (!ccSubs) {
+              allSubParsed = false;
+              break;
+            }
+            for (const sub of ccSubs) {
+              if (sub.fieldNumber === 2 && sub.wireType === 2) {
+                const cpSubs = scanProtobufFields(sub.payloadSlice);
+                if (!cpSubs) {
+                  allSubParsed = false;
+                  break;
+                }
+                for (const cpSub of cpSubs) {
+                  if (cpSub.fieldNumber !== 5 && cpSub.fieldNumber !== 36) {
+                    preservedCpSubSlices.push(cpSub.rawSlice);
+                  }
+                }
+              } else {
+                preservedCcSubSlices.push(sub.rawSlice);
+              }
+            }
+            if (!allSubParsed) break;
+          }
+          if (allSubParsed) {
+            const cpTail = [0x28, ...encodeVarint(maxTokenLimit)];
+            if (contextWindow && typeof contextWindow === 'string') {
+              const cwBytes = Array.from(encodeTextFn(contextWindow));
+              cpTail.push(0xa2, 0x02, ...encodeVarint(cwBytes.length), ...cwBytes);
+            }
+            const mergedCpPayload = concatUint8Arrays([...preservedCpSubSlices, new Uint8Array(cpTail)]);
+            const cpFieldBytes = concatUint8Arrays([
+              new Uint8Array([0x12, ...encodeVarint(mergedCpPayload.length)]),
+              mergedCpPayload,
+            ]);
+            const mergedCcPayload = concatUint8Arrays([...preservedCcSubSlices, cpFieldBytes]);
+            const singleField5Bytes = concatUint8Arrays([
+              new Uint8Array([0x2a, ...encodeVarint(mergedCcPayload.length)]),
+              mergedCcPayload,
+            ]);
+            const nonCascadeSlices = topFields
+              .filter((f) => !(f.fieldNumber === 5 && f.wireType === 2))
+              .map((f) => f.rawSlice);
+            return concatUint8Arrays([...nonCascadeSlices, singleField5Bytes]);
+          }
+        }
+      }
+      if (endsWithByteSequence(rawPayload, suffix)) {
+        return null;
+      }
+      const merged = new Uint8Array(cleanBytes.length + suffix.length);
+      merged.set(cleanBytes, 0);
+      merged.set(suffix, cleanBytes.length);
+      return merged;
+    }
+    function extractCascadeIdFromBody(body, ignoreUuid, codec) {
+      const u8 = toUint8Slice(body);
+      if (!u8 && body && typeof body === 'object') {
+        const cid = body.cascadeId || body.conversationId;
+        if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
+      }
+      let targetBody = u8 || body;
+      if (u8 && u8.length >= 5 && u8[0] === 0) {
+        const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
+        if (frameLen === u8.length - 5) {
+          targetBody = u8.subarray(5);
+        }
+      }
+      const text = codec ? codec.decodeBytesToText(targetBody) : '';
+      if (!text) return null;
+      const trimmed = text.trim();
+      if (trimmed.startsWith('{')) {
+        try {
+          const j = JSON.parse(trimmed);
+          const cid = j.cascadeId || j.conversationId;
+          if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
+        } catch {}
+      }
+      const pm = text.match(PROTO_UUID_RE);
+      if (pm && pm[1] && pm[1] !== ignoreUuid) return pm[1];
+      const um = text.match(UUID_RE);
+      if (um && um[0] && um[0] !== ignoreUuid) return um[0];
+      return null;
+    }
+    function injectCheckpointPayload({ path, body, contextWindow, maxTokenLimit, codec }) {
+      if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body) {
+        return body;
+      }
+      if (!contextWindow || !maxTokenLimit || maxTokenLimit <= 0) return body;
+      const isContinueAfterInjectionObj = (obj) =>
+        Boolean(obj && typeof obj === 'object' && (obj.continueAfterInjection === true || obj.continue_after_injection === true));
+      const applyCheckpointToJsonObj = (j) => {
+        if (!j || typeof j !== 'object') return j;
+        if (isContinueAfterInjectionObj(j)) return j;
+        j.cascadeConfig = j.cascadeConfig || {};
+        j.cascadeConfig.checkpointConfig = {
+          ...(j.cascadeConfig.checkpointConfig || {}),
+          contextWindow,
+          maxTokenLimit,
+        };
+        return j;
+      };
+      try {
+        if (typeof body === 'string') {
+          const trimmed = body.trim();
+          if (trimmed.startsWith('{')) {
+            const parsedObj = JSON.parse(trimmed);
+            if (isContinueAfterInjectionObj(parsedObj)) return body;
+            return JSON.stringify(applyCheckpointToJsonObj(parsedObj));
+          }
+          return body;
+        }
+        const u8 = toUint8Slice(body);
+        if (!u8) {
+          if (typeof body === 'object') {
+            if (isContinueAfterInjectionObj(body)) return body;
+            const cloned =
+              typeof body.clone === 'function'
+                ? body.clone()
+                : Object.assign(Object.create(Object.getPrototypeOf(body)), body);
+            const prevCc = body.cascadeConfig;
+            const nextCc =
+              prevCc && typeof prevCc === 'object'
+                ? (typeof prevCc.clone === 'function'
+                    ? prevCc.clone()
+                    : Object.assign(Object.create(Object.getPrototypeOf(prevCc)), prevCc))
+                : {};
+            const prevCp = prevCc?.checkpointConfig;
+            const nextCp =
+              prevCp && typeof prevCp === 'object'
+                ? (typeof prevCp.clone === 'function'
+                    ? prevCp.clone()
+                    : Object.assign(Object.create(Object.getPrototypeOf(prevCp)), prevCp))
+                : {};
+            nextCp.contextWindow = contextWindow;
+            nextCp.maxTokenLimit = maxTokenLimit;
+            nextCc.checkpointConfig = nextCp;
+            cloned.cascadeConfig = nextCc;
+            return cloned;
+          }
+          return body;
+        }
+        if (u8.length === 0) return body;
+        if (findFirstNonWsByte(u8) === 0x7b) {
+          const text = codec.decodeBytesToText(u8);
+          const parsedObj = JSON.parse(text);
+          if (isContinueAfterInjectionObj(parsedObj)) return body;
+          return codec.encodeTextToBytes(JSON.stringify(applyCheckpointToJsonObj(parsedObj)));
+        }
+        const frameLen =
+          u8.length >= 5
+            ? (((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4])
+            : -1;
+        const isConnectFrame = u8.length >= 5 && (u8[0] < 8 || (u8[0] & 0x80) !== 0 || frameLen === u8.length - 5);
+        if (isConnectFrame) {
+          if (frameLen !== u8.length - 5 || u8[0] !== 0) {
+            return body;
+          }
+          const payload = u8.subarray(5);
+          if (findFirstNonWsByte(payload) === 0x7b) {
+            const text = codec.decodeBytesToText(payload);
+            const parsedObj = JSON.parse(text);
+            if (isContinueAfterInjectionObj(parsedObj)) return body;
+            const j = applyCheckpointToJsonObj(parsedObj);
+            return buildConnectFramedBytes(0, codec.encodeTextToBytes(JSON.stringify(j)));
+          }
+          const nextPayload = mergeCheckpointIntoProtobufBytes(
+            payload,
+            maxTokenLimit,
+            contextWindow,
+            codec.encodeTextToBytes
+          );
+          if (!nextPayload) return body;
+          return buildConnectFramedBytes(0, nextPayload);
+        }
+        const nextUnframed = mergeCheckpointIntoProtobufBytes(
+          u8,
+          maxTokenLimit,
+          contextWindow,
+          codec.encodeTextToBytes
+        );
+        return nextUnframed || body;
+      } catch {
+        return body;
+      }
+    }
+    module.exports = {
+      UUID_RE,
+      PROTO_UUID_RE,
+      CONVO_RPC_RE,
+      toUint8Slice,
+      createTextCodec,
+      encodeVarint,
+      readProtobufVarint,
+      scanProtobufFields,
+      buildSendMessageCheckpointSuffix,
+      stripTrailingCheckpointSuffix,
+      mergeCheckpointIntoProtobufBytes,
+      buildConnectFramedBytes,
+      extractCascadeIdFromBody,
+      injectCheckpointPayload,
+    };
+  },
+  "./remote-runtime": function(module, exports, __require) {
+    const require = (spec) => __require(".", spec);
+    'use strict';
+    /**
+     * Shared Remote Control Runtime Kernel (`window.__agyRemoteRuntime`, v1).
+     *
+     * Responsibilities:
+     * 1. Isolated WeakMap-based `RemoteControlComponent.prototype` chaining with reference-counted
+     *    lease teardown (zero shared `__agyOrig_*` clobbering across plugins).
+     * 2. Preservation of active `onIframeLoad` suppression (`__agySuppressAutoIframeLoad` /
+     *    `__agySuppressAutoIframeLoadCount > 0`) so `-v2` MessagePort handshakes never tear down prematurely.
+     * 3. Angular 19 Ivy component discovery (`ng.getComponent`, `LView` BFS, `ɵgetLContext`, guarded fallback probe).
+     * 4. Canonical `statusbar_autoinject.js` anchored companion block parser.
+     */
+    const { resolveHostAdapterConfig } = require('./host-adapter-config');
+    const RC_TAP_METHODS = Object.freeze([
+      'handleIframeMessage',
+      'proxyCommand',
+      'streamProxyCommand',
+      'handlePortRequest',
+      'handleUrlChanged',
+      'managePolling',
+      'shouldPoll',
+      'loadInstances',
+      'isDisconnected',
+      'onIframeLoad',
+      'onWindowOnline',
+      'onWindowOffline',
+      'isOffline',
+      'isDirectIngressMode',
+      'isTabHidden',
+      'getSelectedInstance',
+      'instanceInfos',
+      'remoteConversationsInfos',
+    ]);
+    function isAutoIframeLoadSuppressed(rcInst) {
+      return Boolean(
+        rcInst &&
+          (rcInst.__agySuppressAutoIframeLoad ||
+            (typeof rcInst.__agySuppressAutoIframeLoadCount === 'number' && rcInst.__agySuppressAutoIframeLoadCount > 0))
+      );
+    }
+    function isRcComponentInstance(obj) {
+      return Boolean(
+        obj &&
+          typeof obj === 'object' &&
+          !obj.destroyed &&
+          (typeof obj.proxyCommand === 'function' ||
+            typeof obj.onIframeLoad === 'function' ||
+            typeof obj.handleIframeMessage === 'function')
+      );
+    }
+    function extractRcFromAngularLContext(lCtx) {
+      if (!lCtx || typeof lCtx !== 'object') return null;
+      if (isRcComponentInstance(lCtx)) return lCtx;
+      if (isRcComponentInstance(lCtx.component)) return lCtx.component;
+      const lView = lCtx.lView;
+      if (Array.isArray(lView)) {
+        try {
+          const tView = lView[1];
+          const nodeIndex = typeof lCtx.nodeIndex === 'number' ? lCtx.nodeIndex : -1;
+          const tNode = nodeIndex >= 0 && Array.isArray(tView?.data) ? tView.data[nodeIndex] : null;
+          if (
+            tNode &&
+            typeof tNode.directiveStart === 'number' &&
+            typeof tNode.componentOffset === 'number' &&
+            tNode.componentOffset > -1
+          ) {
+            const comp = lView[tNode.directiveStart + tNode.componentOffset];
+            if (isRcComponentInstance(comp)) return comp;
+          }
+        } catch {}
+        for (let i = 0; i < Math.min(lView.length, 300); i++) {
+          if (isRcComponentInstance(lView[i])) return lView[i];
+        }
+      }
+      return null;
+    }
+    function searchAngularContextBfs(ctx) {
+      if (!ctx || typeof ctx !== 'object') return null;
+      const direct = extractRcFromAngularLContext(ctx);
+      if (direct) return direct;
+      const visited = new Set();
+      const queue = [ctx];
+      let steps = 0;
+      while (queue.length > 0 && steps < 400) {
+        const cur = queue.shift();
+        if (!cur || typeof cur !== 'object' || visited.has(cur)) continue;
+        visited.add(cur);
+        steps += 1;
+        const extracted = extractRcFromAngularLContext(cur);
+        if (extracted) return extracted;
+        if (Array.isArray(cur)) {
+          const scanLen = Math.min(cur.length, 300);
+          for (let i = 0; i < scanLen; i++) {
+            if (isRcComponentInstance(cur[i])) return cur[i];
+          }
+          for (let i = 0; i < scanLen; i++) {
+            const item = cur[i];
+            if (item && typeof item === 'object' && (Array.isArray(item) || isRcComponentInstance(item.component))) {
+              queue.push(item);
+            }
+          }
+        } else {
+          for (const k of ['component', 'lView', 'data', 'context', '_lView']) {
+            if (cur[k] && typeof cur[k] === 'object') queue.push(cur[k]);
+          }
+        }
+      }
+      return null;
+    }
+    function findAnchoredMarkerSpan(text, beginRe, endRe) {
+      beginRe.lastIndex = 0;
+      const bMatch = beginRe.exec(text);
+      if (!bMatch) return { start: -1, end: -1 };
+      const start = bMatch.index;
+      endRe.lastIndex = bMatch.index + bMatch[0].length;
+      const eMatch = endRe.exec(text);
+      if (!eMatch) return { start, end: -1 };
+      let end = eMatch.index + eMatch[0].length;
+      while (true) {
+        const afterEnd = text.slice(end);
+        const nlMatch = /^(?:\r?\n)+/.exec(afterEnd);
+        if (!nlMatch) break;
+        const nextLineIdx = end + nlMatch[0].length;
+        endRe.lastIndex = nextLineIdx;
+        const nextEnd = endRe.exec(text);
+        if (nextEnd && nextEnd.index === nextLineIdx) {
+          end = nextEnd.index + nextEnd[0].length;
+        } else {
+          break;
+        }
+      }
+      return { start, end };
+    }
+    function parseAutoinjectCompanionManifest(bundleText, discoveredPluginNames) {
+      const text = typeof bundleText === 'string' ? bundleText : '';
+      const pluginNames = discoveredPluginNames instanceof Set ? discoveredPluginNames : new Set(discoveredPluginNames || []);
+      const mcpBeginStr = ['BEGIN_AGY_MCP', 'MANAGER'].join('_');
+      const mcpEndStr = ['END_AGY_MCP', 'MANAGER'].join('_');
+      const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER'].join('_');
+      const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER'].join('_');
+      const mcpBeginRe = new RegExp(`^(?:\\/\\/ === ${mcpBeginStr}(?:_V\\d+)? ===|\\/\\* === ${mcpBeginStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+      const mcpEndRe = new RegExp(`^(?:\\/\\/ === ${mcpEndStr}(?:_V\\d+)? ===|\\/\\* === ${mcpEndStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+      const koBeginRe = new RegExp(`^(?:\\/\\/ === ${koBeginStr}(?:_V\\d+)? ===|\\/\\* === ${koBeginStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+      const koEndRe = new RegExp(`^(?:\\/\\/ === ${koEndStr}(?:_V\\d+)? ===|\\/\\* === ${koEndStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
+      const mcpSpan = findAnchoredMarkerSpan(text, mcpBeginRe, mcpEndRe);
+      const koSpan = findAnchoredMarkerSpan(text, koBeginRe, koEndRe);
+      const mcpManagerCode = mcpSpan.start !== -1 && mcpSpan.end > mcpSpan.start ? text.slice(mcpSpan.start, mcpSpan.end).trim() : '';
+      const koTranslatorCode = koSpan.start !== -1 && koSpan.end > koSpan.start ? text.slice(koSpan.start, koSpan.end).trim() : '';
+      const firstMarkerIdx = [mcpSpan.start, koSpan.start].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? text.length;
+      const baseSegment = text.slice(0, firstMarkerIdx).trim();
+      const sbFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'StatusBar'].join('')}\\s*\\(`, 'm');
+      const mcpFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'McpManager'].join('')}\\s*\\(`, 'm');
+      const hasStatusbarMarker = sbFuncRe.test(baseSegment);
+      const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
+      const hasKoMarker = Boolean(koTranslatorCode);
+      return {
+        hasStatusbar: hasStatusbarMarker || pluginNames.has('antigravity-statusbar'),
+        hasMcpManager: hasMcpMarker || pluginNames.has('antigravity-mcp-manager'),
+        hasKoTranslator: hasKoMarker || pluginNames.has('ko-thought-translator'),
+        statusbarBlock: hasStatusbarMarker ? baseSegment : '',
+        mcpManagerCode,
+        koTranslatorCode,
+      };
+    }
+    function acquireRemoteRuntimeLease({ window: win, document: doc, hostConfig, hooks = {} }) {
+      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
+      const hookedPrototypes = new Map();
+      let disposed = false;
+      function tapPrototype(proto) {
+        if (!proto || proto === Object.prototype || disposed) return;
+        if (hookedPrototypes.has(proto)) return;
+        let protoDisposed = false;
+        const wrappedMethods = new Map();
+        const wrapMethod = (mName, buildWrapper) => {
+          if (typeof proto[mName] !== 'function') return;
+          const prevFn = proto[mName];
+          const wrappedFn = buildWrapper(prevFn, () => protoDisposed || disposed);
+          proto[mName] = wrappedFn;
+          wrappedMethods.set(mName, { prevFn, wrappedFn });
+        };
+        wrapMethod('handleIframeMessage', (prevFn, isOff) => function (ev) {
+          if (isOff()) return prevFn.apply(this, arguments);
+          if (win && this && !this.destroyed) win.__agyRemoteControlInstance = this;
+          if (ev && ev.data === '__agy_probe__') return;
+          if (typeof hooks.onIframeMessage === 'function') {
+            try {
+              hooks.onIframeMessage(ev, this);
+            } catch {}
+          }
+          return prevFn.apply(this, arguments);
+        });
+        for (const mName of ['proxyCommand', 'streamProxyCommand']) {
+          wrapMethod(mName, (prevFn, isOff) => function (path, body, ...rest) {
+            if (isOff()) return prevFn.call(this, path, body, ...rest);
+            if (win && this && !this.destroyed) win.__agyRemoteControlInstance = this;
+            let nextBody = body;
+            if (typeof hooks.transformRpcRequest === 'function') {
+              try {
+                nextBody = hooks.transformRpcRequest(path, body, this);
+              } catch {
+                nextBody = body;
+              }
+            }
+            return prevFn.call(this, path, nextBody, ...rest);
+          });
+        }
+        wrapMethod('handlePortRequest', (prevFn, isOff) => function (msg) {
+          if (isOff()) return prevFn.call(this, msg);
+          if (win && this && !this.destroyed) win.__agyRemoteControlInstance = this;
+          let nextMsg = msg;
+          if (msg && typeof msg.path === 'string' && typeof hooks.transformPortRequest === 'function') {
+            try {
+              nextMsg = hooks.transformPortRequest(msg, this) || msg;
+            } catch {
+              nextMsg = msg;
+            }
+          }
+          return prevFn.call(this, nextMsg);
+        });
+        for (const mName of RC_TAP_METHODS) {
+          if (mName === 'handleIframeMessage' || mName === 'proxyCommand' || mName === 'streamProxyCommand' || mName === 'handlePortRequest') {
+            continue;
+          }
+          wrapMethod(mName, (prevFn, isOff) => function () {
+            if (mName === 'onIframeLoad' && isAutoIframeLoadSuppressed(this)) {
+              return Promise.resolve();
+            }
+            if (isOff()) return prevFn.apply(this, arguments);
+            if (win && this && !this.destroyed) {
+              win.__agyRemoteControlInstance = this;
+            }
+            if (
+              win?.__agyProbingRcInstance &&
+              (mName === 'handleUrlChanged' || mName === 'onIframeLoad' || mName === 'onWindowOnline' || mName === 'loadInstances')
+            ) {
+              return;
+            }
+            if (mName === 'handleUrlChanged' && typeof hooks.onUrlChanged === 'function') {
+              try {
+                hooks.onUrlChanged(arguments[0], this);
+              } catch {}
+            }
+            return prevFn.apply(this, arguments);
+          });
+        }
+        hookedPrototypes.set(proto, {
+          release() {
+            protoDisposed = true;
+            for (const [mName, entry] of wrappedMethods.entries()) {
+              if (proto[mName] === entry.wrappedFn) {
+                proto[mName] = entry.prevFn;
+              }
+            }
+            wrappedMethods.clear();
+          },
+        });
+      }
+      function resolveInstance() {
+        if (!win || disposed) return null;
+        if (win.__agyRemoteControlInstance && !win.__agyRemoteControlInstance.destroyed) {
+          tapPrototype(Object.getPrototypeOf(win.__agyRemoteControlInstance));
+          return win.__agyRemoteControlInstance;
+        }
+        const effDoc = doc || win.document;
+        const rcEl = effDoc?.querySelector?.('ga-remote-control') || null;
+        const gaRootEl = effDoc?.querySelector?.('ga-root') || null;
+        if (rcEl) {
+          const ngFn = win.ng && typeof win.ng.getComponent === 'function' ? win.ng.getComponent : null;
+          if (ngFn) {
+            try {
+              const comp = ngFn(rcEl);
+              if (isRcComponentInstance(comp)) {
+                win.__agyRemoteControlInstance = comp;
+                tapPrototype(Object.getPrototypeOf(comp));
+                return comp;
+              }
+            } catch {}
+          }
+          const ctxKey = Object.keys(rcEl).find((k) => k.startsWith('__ngContext'));
+          const found = searchAngularContextBfs(rcEl.__ngContext__ || (ctxKey ? rcEl[ctxKey] : null));
+          if (found) {
+            win.__agyRemoteControlInstance = found;
+            tapPrototype(Object.getPrototypeOf(found));
+            return found;
+          }
+        }
+        if (gaRootEl) {
+          const rootCtxKey = Object.keys(gaRootEl).find((k) => k.startsWith('__ngContext'));
+          const foundFromRoot = searchAngularContextBfs(gaRootEl.__ngContext__ || (rootCtxKey ? gaRootEl[rootCtxKey] : null));
+          if (foundFromRoot) {
+            win.__agyRemoteControlInstance = foundFromRoot;
+            tapPrototype(Object.getPrototypeOf(foundFromRoot));
+            return foundFromRoot;
+          }
+        }
+        const nsRoot = win.default_GoogleAntigravity;
+        if (nsRoot && typeof nsRoot === 'object') {
+          const targetCandidates = [];
+          if (rcEl) {
+            targetCandidates.push(rcEl);
+            if (rcEl.firstElementChild) targetCandidates.push(rcEl.firstElementChild);
+            if (typeof rcEl.querySelector === 'function') {
+              const innerContainer = rcEl.querySelector('.app-container, .iframe-panel, iframe');
+              if (innerContainer && !targetCandidates.includes(innerContainer)) {
+                targetCandidates.push(innerContainer);
+              }
+            }
+          }
+          if (gaRootEl) {
+            targetCandidates.push(gaRootEl);
+            if (gaRootEl.firstElementChild) targetCandidates.push(gaRootEl.firstElementChild);
+          }
+          for (const k of Object.keys(nsRoot)) {
+            const mod = nsRoot[k];
+            if (!mod || (typeof mod !== 'object' && typeof mod !== 'function')) continue;
+            for (const targetEl of targetCandidates) {
+              if (!targetEl) continue;
+              try {
+                if (typeof mod.getDebugNode === 'function') {
+                  const dbgNode = mod.getDebugNode(targetEl);
+                  const dbgComp = dbgNode?.componentInstance || dbgNode?.context;
+                  if (isRcComponentInstance(dbgComp)) {
+                    win.__agyRemoteControlInstance = dbgComp;
+                    tapPrototype(Object.getPrototypeOf(dbgComp));
+                    return dbgComp;
+                  }
+                  const foundFromDbg = searchAngularContextBfs(dbgComp || dbgNode);
+                  if (foundFromDbg) {
+                    win.__agyRemoteControlInstance = foundFromDbg;
+                    tapPrototype(Object.getPrototypeOf(foundFromDbg));
+                    return foundFromDbg;
+                  }
+                }
+                if (typeof mod.getComponent === 'function') {
+                  const comp = mod.getComponent(targetEl);
+                  if (isRcComponentInstance(comp)) {
+                    win.__agyRemoteControlInstance = comp;
+                    tapPrototype(Object.getPrototypeOf(comp));
+                    return comp;
+                  }
+                }
+                const getLCtx = mod['\u0275getLContext'] || mod.getLContext;
+                if (typeof getLCtx === 'function') {
+                  const lCtx = getLCtx(targetEl);
+                  const foundFromLCtx = extractRcFromAngularLContext(lCtx) || searchAngularContextBfs(lCtx?.lView || lCtx);
+                  if (foundFromLCtx) {
+                    win.__agyRemoteControlInstance = foundFromLCtx;
+                    tapPrototype(Object.getPrototypeOf(foundFromLCtx));
+                    return foundFromLCtx;
+                  }
+                }
+              } catch {}
+            }
+            const RC = mod.RemoteControlComponent || (typeof mod.prototype?.proxyCommand === 'function' ? mod : null);
+            if (RC && RC.prototype && typeof RC.prototype.proxyCommand === 'function') {
+              tapPrototype(RC.prototype);
+            }
+          }
+        }
+        win.__agyProbingRcInstance = true;
+        try {
+          const BaseEvt = win.Event || (typeof Event !== 'undefined' ? Event : null);
+          if (!win.__agyRemoteControlInstance && BaseEvt && typeof effDoc?.dispatchEvent === 'function') {
+            effDoc.dispatchEvent(new BaseEvt('visibilitychange'));
+          }
+          if (!win.__agyRemoteControlInstance && BaseEvt && typeof win.dispatchEvent === 'function') {
+            win.dispatchEvent(new BaseEvt('online'));
+          }
+          if (!win.__agyRemoteControlInstance && typeof win.dispatchEvent === 'function') {
+            const Evt = win.MessageEvent || (typeof MessageEvent !== 'undefined' ? MessageEvent : null);
+            if (Evt) {
+              const iframeEl = rcEl?.querySelector?.('iframe') || effDoc?.querySelector?.('ga-remote-control iframe') || null;
+              let iframeWin = null;
+              try {
+                iframeWin = iframeEl?.contentWindow || null;
+              } catch {}
+              const rawIframeSrc = iframeEl?.getAttribute?.('src') || iframeEl?.src || '';
+              const candidateOrigins = [];
+              const defaultRemoteOrigin = `https://${resolvedHostConfig.remoteHostDomains[0] || 'antigravity.google.com'}`;
+              try {
+                if (rawIframeSrc) {
+                  candidateOrigins.push(new URL(rawIframeSrc, win.location?.href || defaultRemoteOrigin).origin);
+                }
+              } catch {}
+              if (win.location?.origin && !candidateOrigins.includes(win.location.origin)) {
+                candidateOrigins.push(win.location.origin);
+              }
+              for (const cdnOrig of resolvedHostConfig.staticCdnOrigins) {
+                if (cdnOrig && !candidateOrigins.includes(cdnOrig)) {
+                  candidateOrigins.push(cdnOrig);
+                }
+              }
+              for (const orig of candidateOrigins) {
+                if (win.__agyRemoteControlInstance) break;
+                win.dispatchEvent(
+                  new Evt('message', {
+                    data: { type: 'URL_CHANGED', path: '' },
+                    origin: orig,
+                    source: iframeWin,
+                  })
+                );
+              }
+              if (!win.__agyRemoteControlInstance) {
+                win.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
+              }
+            }
+          }
+        } catch {} finally {
+          win.__agyProbingRcInstance = false;
+        }
+        return win.__agyRemoteControlInstance && !win.__agyRemoteControlInstance.destroyed
+          ? win.__agyRemoteControlInstance
+          : null;
+      }
+      function release() {
+        if (disposed) return;
+        disposed = true;
+        for (const [, rec] of hookedPrototypes.entries()) {
+          try {
+            rec.release();
+          } catch {}
+        }
+        hookedPrototypes.clear();
+        if (win) {
+          try {
+            delete win.__agyProbingRcInstance;
+          } catch {}
+        }
+      }
+      return {
+        resolvedHostConfig,
+        tapPrototype,
+        resolveInstance,
+        release,
+      };
+    }
+    module.exports = {
+      isAutoIframeLoadSuppressed,
+      parseAutoinjectCompanionManifest,
+      acquireRemoteRuntimeLease,
+    };
+  },
+  "./companion-loader": function(module, exports, __require) {
+    const require = (spec) => __require(".", spec);
+    'use strict';
+    /**
+     * Strict CSP / TrustedTypes Companion Script Loader for Remote Control Web.
+     *
+     * Enforces:
+     * - Scoped policy names (`agy-statusbar*` only; `createHTML === undefined`).
+     * - HTTPS + path allowlist for external script URLs and one-shot token revocation for inline/Blob scripts.
+     * - Cryptographic CSP nonce propagation across IDL `.nonce` and `nonce` attribute.
+     * - Cross-plugin `<script data-agy-companion="...">` and loading-flag synchronization.
+     */
+    const { resolveHostAdapterConfig } = require('./host-adapter-config');
+    const OFFICIAL_COMPANION_URLS = Object.freeze([
+      'https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js',
+      'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+      'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
+    ]);
+    const companionPolicyControllers = typeof WeakMap === 'function' ? new WeakMap() : null;
+    function isAllowedStatusBarScriptUrl(rawUrl, resolvedHostConfig) {
+      let parsed;
+      try {
+        parsed = new URL(String(rawUrl));
+      } catch {
+        return false;
+      }
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname.includes('..')) {
+        return false;
+      }
+      const candidateUrls = [
+        ...OFFICIAL_COMPANION_URLS,
+        ...Object.values(resolvedHostConfig?.companionScripts || {}),
+      ];
+      for (const cand of candidateUrls) {
+        if (!cand) continue;
+        try {
+          const cu = new URL(String(cand));
+          if (cu.protocol === 'https:' && parsed.origin === cu.origin && parsed.pathname === cu.pathname) {
+            return true;
+          }
+        } catch {}
+      }
+      if (/\/(?:prism_bundle|main)\.js$/.test(parsed.pathname)) {
+        const cdnBase = String(resolvedHostConfig?.cdnOrigin || 'https://www.gstatic.com/antigravity').replace(/\/+$/, '');
+        try {
+          const cdnUrl = new URL(cdnBase);
+          if (
+            cdnUrl.protocol === 'https:' &&
+            parsed.origin === cdnUrl.origin &&
+            (cdnUrl.pathname === '/' || parsed.pathname.startsWith(`${cdnUrl.pathname}/`))
+          ) {
+            return true;
+          }
+        } catch {}
+        for (const staticOrig of resolvedHostConfig?.staticCdnOrigins || []) {
+          try {
+            const su = new URL(String(staticOrig));
+            if (su.protocol === 'https:' && parsed.origin === su.origin) {
+              return true;
+            }
+          } catch {}
+        }
+        if (resolvedHostConfig?.isRemoteHost?.(parsed.hostname)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
+      if (!win || typeof win !== 'object') return null;
+      if (companionPolicyControllers && companionPolicyControllers.has(win)) {
+        const existing = companionPolicyControllers.get(win);
+        existing.updateHostConfig(resolvedHostConfig);
+        return existing;
+      }
+      let latestHostConfig = resolvedHostConfig;
+      const allowedInlineScripts = new Set();
+      const allowedBlobUrls = new Set();
+      let policy = null;
+      if (win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
+        const names = ['agy-statusbar', 'agy-statusbar-companion', 'agy-statusbar-' + Date.now()];
+        for (const name of names) {
+          try {
+            const created = win.trustedTypes.createPolicy(name, {
+              createScript: (s) => {
+                const code = String(s ?? '');
+                if (allowedInlineScripts.has(code)) return code;
+                throw new TypeError('Untrusted inline script rejected by TrustedTypes policy');
+              },
+              createScriptURL: (u) => {
+                const raw = String(u ?? '');
+                if (raw.startsWith('blob:')) {
+                  if (allowedBlobUrls.has(raw)) return raw;
+                  throw new TypeError('Untrusted blob script URL rejected by TrustedTypes policy');
+                }
+                if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
+                  return raw;
+                }
+                throw new TypeError('Untrusted script URL rejected by TrustedTypes policy');
+              },
+            });
+            if (created) {
+              policy = created;
+              break;
+            }
+          } catch {}
+        }
+      }
+      const ctrl = {
+        updateHostConfig(nextCfg) {
+          if (nextCfg) latestHostConfig = nextCfg;
+        },
+        allowInline(code) {
+          allowedInlineScripts.add(String(code ?? ''));
+        },
+        revokeInline(code) {
+          allowedInlineScripts.delete(String(code ?? ''));
+        },
+        allowBlob(blobUrl) {
+          allowedBlobUrls.add(String(blobUrl ?? ''));
+        },
+        revokeBlob(blobUrl) {
+          allowedBlobUrls.delete(String(blobUrl ?? ''));
+        },
+        toScript(code) {
+          if (policy && typeof policy.createScript === 'function') {
+            return policy.createScript(code);
+          }
+          if (!allowedInlineScripts.has(String(code ?? ''))) {
+            throw new TypeError('Untrusted inline script rejected');
+          }
+          return code;
+        },
+        toScriptURL(rawUrl) {
+          if (policy && typeof policy.createScriptURL === 'function') {
+            return policy.createScriptURL(rawUrl);
+          }
+          const raw = String(rawUrl ?? '');
+          if (raw.startsWith('blob:')) {
+            if (allowedBlobUrls.has(raw)) return raw;
+            throw new TypeError('Untrusted blob script URL rejected');
+          }
+          if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
+            return raw;
+          }
+          throw new TypeError('Untrusted script URL rejected');
+        },
+      };
+      if (policy && companionPolicyControllers) {
+        companionPolicyControllers.set(win, ctrl);
+      }
+      return ctrl;
+    }
+    function disposeCompanionPolicyController(win) {
+      if (win && companionPolicyControllers) {
+        companionPolicyControllers.delete(win);
+      }
+    }
+    function getScriptNonce(doc) {
+      if (!doc) return '';
+      const nonceEl = doc.querySelector?.('script[nonce]');
+      if (nonceEl) {
+        const n = nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '';
+        if (n) return n;
+      }
+      const scripts = doc.querySelectorAll?.('script') || [];
+      for (let i = 0; i < scripts.length; i++) {
+        const s = scripts[i];
+        const n = s && (s.nonce || s.getAttribute?.('nonce') || '');
+        if (n) return n;
+      }
+      return '';
+    }
+    function appendScriptSrcAsync(win, doc, rawUrl, policyCtrl, companionId, onDoneCleanup) {
+      return new Promise((resolve) => {
+        let s = null;
+        try {
+          s = doc.createElement('script');
+          if (companionId) s.setAttribute?.('data-agy-companion', companionId);
+          const nonce = getScriptNonce(doc);
+          if (nonce) {
+            s.nonce = nonce;
+            s.setAttribute?.('nonce', nonce);
+          }
+          s.src = policyCtrl ? policyCtrl.toScriptURL(rawUrl) : rawUrl;
+          if (typeof s.addEventListener !== 'function') {
+            doc.head.appendChild(s);
+            if (typeof onDoneCleanup === 'function') onDoneCleanup();
+            resolve(true);
+            return;
+          }
+          let settled = false;
+          const setTimeoutFn = win?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+          const clearTimeoutFn = win?.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
+          let timer = null;
+          const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            if (!ok && s) {
+              try {
+                if (typeof s.remove === 'function') s.remove();
+                else if (s.parentNode) s.parentNode.removeChild(s);
+              } catch {}
+            }
+            if (timer && clearTimeoutFn) {
+              try { clearTimeoutFn(timer); } catch {}
+            }
+            if (typeof onDoneCleanup === 'function') {
+              try { onDoneCleanup(); } catch {}
+            }
+            resolve(ok);
+          };
+          s.addEventListener('load', () => finish(true), { once: true });
+          s.addEventListener('error', () => finish(false), { once: true });
+          if (setTimeoutFn) {
+            timer = setTimeoutFn(() => finish(false), 4000);
+            if (timer && typeof timer.unref === 'function') timer.unref();
+          }
+          doc.head.appendChild(s);
+        } catch {
+          if (s) {
+            try {
+              if (typeof s.remove === 'function') s.remove();
+              else if (s.parentNode) s.parentNode.removeChild(s);
+            } catch {}
+          }
+          if (typeof onDoneCleanup === 'function') {
+            try { onDoneCleanup(); } catch {}
+          }
+          resolve(false);
+        }
+      });
+    }
+    async function injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, companionId, checkLoaded) {
+      const isLoaded = typeof checkLoaded === 'function' ? checkLoaded : () => false;
+      if (code && doc?.head) {
+        let inlineEl = null;
+        try {
+          inlineEl = doc.createElement('script');
+          if (companionId) inlineEl.setAttribute?.('data-agy-companion', companionId);
+          const nonce = getScriptNonce(doc);
+          if (nonce) {
+            inlineEl.nonce = nonce;
+            inlineEl.setAttribute?.('nonce', nonce);
+          }
+          policyCtrl?.allowInline(code);
+          try {
+            inlineEl.text = policyCtrl ? policyCtrl.toScript(code) : code;
+            doc.head.appendChild(inlineEl);
+          } finally {
+            policyCtrl?.revokeInline(code);
+          }
+          if (isLoaded() || typeof inlineEl.addEventListener !== 'function') {
+            return true;
+          }
+          try {
+            if (typeof inlineEl.remove === 'function') inlineEl.remove();
+            else if (inlineEl.parentNode) inlineEl.parentNode.removeChild(inlineEl);
+          } catch {}
+        } catch {
+          if (inlineEl) {
+            try {
+              if (typeof inlineEl.remove === 'function') inlineEl.remove();
+              else if (inlineEl.parentNode) inlineEl.parentNode.removeChild(inlineEl);
+            } catch {}
+          }
+        }
+        try {
+          const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
+          const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
+          if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
+            const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
+            policyCtrl?.allowBlob(blobUrl);
+            const revoke = () => {
+              policyCtrl?.revokeBlob(blobUrl);
+              try { UrlApi.revokeObjectURL(blobUrl); } catch {}
+            };
+            const blobOk = await appendScriptSrcAsync(win, doc, blobUrl, policyCtrl, companionId, revoke);
+            if (blobOk && (isLoaded() || typeof doc.createElement('script')?.addEventListener !== 'function')) {
+              return true;
+            }
+          }
+        } catch {}
+      }
+      if (url && doc?.head) {
+        const sep = url.includes('?') ? '&' : '?';
+        const remoteUrl = `${url}${sep}t=${Date.now()}`;
+        const remoteOk = await appendScriptSrcAsync(win, doc, remoteUrl, policyCtrl, companionId, null);
+        if (remoteOk) {
+          return true;
+        }
+      }
+      return false;
+    }
+    function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
+      try {
+        const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
+        const isRemoteWeb = resolvedHostConfig.isRemoteHost(win?.location?.hostname);
+        if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
+        const effFetch = fetchFn || win?.fetch;
+        const setFlagGroup = (keys, val) => {
+          for (const k of keys) {
+            win[k] = val;
+          }
+        };
+        const hasExistingCompanionTag = (companionId) => {
+          try {
+            if (!companionId || typeof doc.querySelector !== 'function') return false;
+            const el = doc.querySelector(`script[data-agy-companion="${companionId}"]`);
+            return Boolean(
+              el &&
+                String(el.tagName || '').toUpperCase() === 'SCRIPT' &&
+                typeof el.getAttribute === 'function' &&
+                el.getAttribute('data-agy-companion') === companionId
+            );
+          } catch {
+            return false;
+          }
+        };
+        const loadScript = async (companionId, flagKeys, url, fallbackCode, checkLoaded) => {
+          const keys = Array.isArray(flagKeys) ? flagKeys : [flagKeys];
+          if (keys.some((k) => Boolean(win[k])) || hasExistingCompanionTag(companionId)) return false;
+          setFlagGroup(keys, true);
+          const policyCtrl = getOrCreateCompanionPolicyController(win, resolvedHostConfig);
+          try {
+            if (fallbackCode) {
+              const ok = await injectCompanionCodeOrUrl(win, doc, fallbackCode, url, policyCtrl, companionId, checkLoaded);
+              if (!ok) setFlagGroup(keys, false);
+              return ok;
+            }
+            if (typeof effFetch === 'function' && url) {
+              const sep = url.includes('?') ? '&' : '?';
+              const r = await Promise.resolve(effFetch(`${url}${sep}t=${Date.now()}`)).catch(() => null);
+              const code = r && r.ok !== false && typeof r.text === 'function' ? await r.text() : '';
+              if (code) {
+                const ok = await injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, companionId, checkLoaded);
+                if (!ok) setFlagGroup(keys, false);
+                return ok;
+              }
+            }
+            if (url) {
+              const ok = await injectCompanionCodeOrUrl(win, doc, '', url, policyCtrl, companionId, checkLoaded);
+              if (!ok) setFlagGroup(keys, false);
+              return ok;
+            }
+            setFlagGroup(keys, false);
+            return false;
+          } catch {
+            setFlagGroup(keys, false);
+            return false;
+          }
+        };
+        const resolveHostInfo = async () => {
+          if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
+            return { resolved: true, ...win.__agyHostInstalledPlugins };
+          }
+          if (hostBridge && typeof hostBridge.fetchHostInstalledPluginInfo === 'function') {
+            const info = await hostBridge.fetchHostInstalledPluginInfo(
+              win.__APP_CONFIG__?.csrfToken,
+              doc.querySelector?.('[data-testid="conversation-view"]')
+            );
+            if (info && info.resolved) {
+              win.__agyHostInstalledPlugins = info;
+              return info;
+            }
+            if (info) {
+              return info;
+            }
+          }
+          return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
+        };
+        let attempts = 0;
+        const tryLoadInstalledCompanions = async () => {
+          attempts += 1;
+          const info = await resolveHostInfo();
+          if (!info.resolved) {
+            if (attempts < 5) {
+              const setTimeoutFn = win.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+              if (setTimeoutFn) {
+                const t = setTimeoutFn(tryLoadInstalledCompanions, 1500);
+                if (t && typeof t.unref === 'function') t.unref();
+              }
+            }
+            if (!info.hasMcpManager && !info.hasKoTranslator) {
+              return info;
+            }
+          }
+          if (info.hasMcpManager && !win.agyMcpManager && !win.__agyKoFetchingMcpManager) {
+            await loadScript(
+              'mcp-manager',
+              ['__agyLoadingMcpManagerCompanion'],
+              resolvedHostConfig.companionScripts.mcpManagerUrl,
+              info.mcpManagerCode,
+              () => Boolean(win.agyMcpManager)
+            );
+          }
+          if (info.hasKoTranslator && !win.__agyKoLocalizerActive && !win.__agyKoThoughtCleanup) {
+            await loadScript(
+              'ko-thought-translator',
+              ['__agyLoadingKoTranslatorCompanion', '__agyLoadingKoThoughtCompanion'],
+              resolvedHostConfig.companionScripts.koTranslatorUrl,
+              info.koTranslatorCode,
+              () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
+            );
+          }
+          return info;
+        };
+        return tryLoadInstalledCompanions();
+      } catch {
+        return Promise.resolve(null);
+      }
+    }
+    module.exports = {
+      OFFICIAL_COMPANION_URLS,
+      isAllowedStatusBarScriptUrl,
+      getOrCreateCompanionPolicyController,
+      disposeCompanionPolicyController,
+      getScriptNonce,
+      ensureRemoteCompanionScripts,
     };
   },
   "./context-window-policy": function(module, exports, __require) {
@@ -1607,12 +2922,20 @@
       createRpcClient,
     };
   },
-  "./host-bridge": function(module, exports, __require) {
+  "./desktop-react-bridge": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
+    /**
+     * Desktop Electron / React Fiber / Redux / Lexical Engine Adapter.
+     *
+     * Isolates all workbench React context traversal, Redux `modelSelection` state synchronization,
+     * poisoned `trajectorySync` sanitization, and Lexical editor `/compact` command dispatch
+     * away from Remote Control RPC & binary wire concerns.
+     */
     const { PRESET_CONTEXT_WINDOWS } = require('./context-window-policy');
-    const { resolveHostAdapterConfig } = require('./host-adapter-config');
     const MAX_CASCADE_MAP_ENTRIES = 200;
+    const COMPACT_ARGS =
+      '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
     function setBoundedMapRecord(win, propName, key, val) {
       if (!win || !key) return;
       if (!win[propName] || typeof win[propName] !== 'object') {
@@ -1630,7 +2953,6 @@
         }
       }
     }
-    const COMPACT_ARGS = '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
     function cleanupLegacyObjectPrototypeCwGetters(extraWin) {
       const protos = [Object.prototype];
       try {
@@ -1661,9 +2983,60 @@
         }
       }
     }
-    function createHostBridge({ window, document, localStorage, fetchFn, cwStore, hostConfig }) {
-      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
-      const cleanupCallbacks = [];
+    function extractModelValFromModelOrAlias(moa) {
+      if (!moa || typeof moa !== 'object') return undefined;
+      if (moa.model !== undefined) return moa.model;
+      if (moa.choice && (moa.choice.case === 'model' || moa.choice.case === 'alias') && moa.choice.value !== undefined) {
+        return moa.choice.value;
+      }
+      return undefined;
+    }
+    function resolveModelValueFromLabel(state, label) {
+      if (!label || typeof label !== 'string') return undefined;
+      const trimmed = label.trim();
+      if (!trimmed) return undefined;
+      const configs = state?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+      if (!Array.isArray(configs)) return undefined;
+      for (const cfg of configs) {
+        if (cfg && cfg.label === trimmed) {
+          const v = extractModelValFromModelOrAlias(cfg.modelOrAlias);
+          if (v !== undefined) return v;
+        }
+      }
+      return undefined;
+    }
+    function extractLabelFromSyncedKey(syncedKey) {
+      if (typeof syncedKey !== 'string' || !syncedKey) return undefined;
+      const parts = syncedKey.split(':');
+      if (parts.length >= 4) {
+        const label = parts.slice(2, parts.length - 1).join(':').trim();
+        if (label) return label;
+      }
+      if (parts.length === 3) {
+        const label = parts[1].trim();
+        if (label) return label;
+      }
+      return undefined;
+    }
+    function setTriggerCwAttribute(triggerEl, cwStr) {
+      if (!triggerEl || typeof triggerEl.setAttribute !== 'function') return;
+      const str = String(cwStr);
+      if (triggerEl.getAttribute('data-context-window') !== str) {
+        triggerEl.__agyInternalDomCw = str;
+        triggerEl.setAttribute('data-context-window', str);
+      }
+    }
+    function createDesktopReactBridge({
+      window,
+      document,
+      localStorage,
+      cwStore,
+      ensureFetchHook,
+      getAccessibleRemoteIframeWin,
+      getAccessibleRemoteIframeDoc,
+      getRemoteRpcServiceForElement,
+      cleanupCallbacks,
+    }) {
       cleanupLegacyObjectPrototypeCwGetters();
       try {
         const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
@@ -1690,7 +3063,11 @@
             const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
             if (decorated && typeof decorated === 'object') {
               window.__agyCapturedLsClient = decorated;
-              if (typeof decorated.subscribeToPlugins === 'function' && typeof decorated.getAllPlugins === 'function' && !decorated.__agyPluginsStreamPatched) {
+              if (
+                typeof decorated.subscribeToPlugins === 'function' &&
+                typeof decorated.getAllPlugins === 'function' &&
+                !decorated.__agyPluginsStreamPatched
+              ) {
                 decorated.__agyPluginsStreamPatched = true;
                 const origSubRaw = decorated.subscribeToPlugins;
                 const origSub = origSubRaw.bind(decorated);
@@ -1766,36 +3143,6 @@
           });
         }
       } catch {}
-      function getAccessibleRemoteIframeWin() {
-        try {
-          const iframe = document?.querySelector?.('ga-remote-control iframe');
-          if (!iframe || iframe.__agyCrossOriginInaccessible) return null;
-          const cwin = iframe.contentWindow;
-          if (!cwin) return null;
-          void cwin.document;
-          return cwin;
-        } catch {
-          try {
-            const iframe = document?.querySelector?.('ga-remote-control iframe');
-            if (iframe) iframe.__agyCrossOriginInaccessible = true;
-          } catch {}
-          return null;
-        }
-      }
-      function getAccessibleRemoteIframeDoc() {
-        try {
-          const iframe = document?.querySelector?.('ga-remote-control iframe');
-          if (!iframe || iframe.__agyCrossOriginInaccessible) return null;
-          const cdoc = iframe.contentDocument || iframe.contentWindow?.document;
-          return cdoc || null;
-        } catch {
-          try {
-            const iframe = document?.querySelector?.('ga-remote-control iframe');
-            if (iframe) iframe.__agyCrossOriginInaccessible = true;
-          } catch {}
-          return null;
-        }
-      }
       function resolveEffectiveView(view) {
         if (view && view.classList?.contains?.('agy-rc-host-view')) {
           const cdoc = getAccessibleRemoteIframeDoc();
@@ -1826,9 +3173,7 @@
       function ensureModelContextWindowOptions(modelObj, extraCw, forceClone = false) {
         if (!modelObj || typeof modelObj !== 'object') return modelObj;
         const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
-        const existingNames = new Set(
-          curArr.map((o) => o && o.name).filter(Boolean)
-        );
+        const existingNames = new Set(curArr.map((o) => o && o.name).filter(Boolean));
         const wanted = [...PRESET_CONTEXT_WINDOWS];
         if (extraCw && !wanted.includes(extraCw)) {
           wanted.push(extraCw);
@@ -2184,82 +3529,422 @@
         }
         return null;
       }
-      const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-      const PROTO_UUID_RE = /\x0a\x24([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-      const CONVO_RPC_RE = /\/(StreamAgentStateUpdates|RequestAgentStatePageUpdate|StreamCascadeReactiveUpdates|GetCascadeTrajectory|GetCascadeTrajectorySteps|GetCascadeTrajectoryGeneratorMetadata|GetCascadeModelConfigData|SendUserCascadeMessage|UpdateConversationAnnotations|StartCascade)$/i;
+      function getSelectedModelKey(view, cascadeId, infoOpt) {
+        const info = infoOpt || getModelSelectorContextForView(view);
+        const state = info?.reduxStore ? info.reduxStore.getState() : null;
+        const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
+        const sm = info?.msCtx?.selectedModel;
+        const raw =
+          byConvo?.model ??
+          (sm && typeof sm === 'object' ? (sm.value ?? sm.label) : sm) ??
+          state?.modelSelection?.default?.model ??
+          info?.legacyCtx?.getModelConfigForConversation?.(cascadeId)?.value ??
+          '';
+        return `${cascadeId || ''}:${String(raw ?? '')}`;
+      }
+      function sanitizePoisonedModelSelection(reduxStore) {
+        if (!reduxStore || typeof reduxStore.getState !== 'function' || typeof reduxStore.dispatch !== 'function') {
+          return;
+        }
+        try {
+          if (reduxStore.__agyPoisonSanitizedV25) return;
+          const st = reduxStore.getState();
+          const ms = st?.modelSelection;
+          if (!ms || typeof ms !== 'object') return;
+          const syncMap = ms.trajectorySync;
+          const byConvoMap = ms.byConversation;
+          if (!syncMap || typeof syncMap !== 'object') return;
+          const overrideDefaultModel = extractModelValFromModelOrAlias(
+            st?.userStatus?.cascadeModelConfigData?.defaultOverrideModelConfig?.modelOrAlias
+          );
+          let cleanConvoModel = undefined;
+          for (const cid of Object.keys(syncMap)) {
+            const entry = syncMap[cid];
+            const step = entry?.pick?.atStep;
+            if (step === undefined || step === -1) {
+              const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+              const mVal = resolveModelValueFromLabel(st, syncedLabel);
+              if (mVal !== undefined) {
+                cleanConvoModel = mVal;
+                if (syncedLabel && /\(medium\)/i.test(syncedLabel)) break;
+              }
+            }
+          }
+          const preferredModel = overrideDefaultModel ?? cleanConvoModel;
+          if (preferredModel === undefined) return;
+          const poisonedCids = [];
+          let recoveredTargetModel = undefined;
+          for (const cid of Object.keys(syncMap)) {
+            const entry = syncMap[cid];
+            const step = entry?.pick?.atStep;
+            const hasSyncedKey = typeof entry?.syncedKey === 'string' && entry.syncedKey.length > 0;
+            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+            const isV24Relocked =
+              hasSyncedKey &&
+              (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined));
+            const isPoisoned = step === 999999 || isV24Relocked;
+            if (isPoisoned) {
+              poisonedCids.push(cid);
+              const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
+              if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
+                recoveredTargetModel = syncedModelVal;
+              }
+            }
+          }
+          if (poisonedCids.length === 0 && ms.default?.model === preferredModel) {
+            reduxStore.__agyPoisonSanitizedV25 = true;
+            return;
+          }
+          reduxStore.__agyPoisonSanitizedV25 = true;
+          const currentDefaultModel = ms.default?.model;
+          const currentDefaultCustomLabel = ms.default?.customLabel;
+          const desiredDefaultCw = cwStore?.hasExplicitDefaultCw?.()
+            ? cwStore.getDefaultCw()
+            : (ms.default?.contextWindow || '256K');
+          const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
+          for (const cid of poisonedCids) {
+            const entry = syncMap[cid];
+            const convo = byConvoMap?.[cid];
+            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+            const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
+            const targetModel =
+              syncedLabel && !/\(low\)/i.test(syncedLabel) && syncedModelVal !== undefined
+                ? syncedModelVal
+                : (preferredModel ?? syncedModelVal ?? safeDefaultModel ?? convo?.model);
+            const targetCw = cwStore?.getSavedContextWindow?.(cid) || convo?.contextWindow || desiredDefaultCw;
+            if (targetModel !== undefined) {
+              reduxStore.dispatch({
+                type: 'modelSelection/modelPicked',
+                payload: {
+                  conversationId: cid,
+                  model: targetModel,
+                  customLabel: undefined,
+                  contextWindow: targetCw,
+                  pick: { atStep: -1, queuedMessageIds: [] },
+                },
+              });
+            }
+          }
+          if (safeDefaultModel !== undefined) {
+            reduxStore.dispatch({
+              type: 'modelSelection/modelPicked',
+              payload: {
+                conversationId: undefined,
+                model: safeDefaultModel,
+                customLabel: safeDefaultModel === currentDefaultModel ? currentDefaultCustomLabel : undefined,
+                contextWindow: desiredDefaultCw,
+              },
+            });
+          }
+        } catch {}
+      }
+      function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
+        const targetCw = cwStore.normalize(rawTargetCw);
+        if (!view || !cascadeId || !targetCw) return false;
+        const info = getModelSelectorContextForView(view, targetCw);
+        if (!info) return false;
+        const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
+        if (reduxStore) {
+          sanitizePoisonedModelSelection(reduxStore);
+        }
+        if (triggerEl) {
+          const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
+          if (triggerEl.getAttribute('data-agy-cw-warn') !== warnAttr) {
+            triggerEl.setAttribute('data-agy-cw-warn', warnAttr);
+          }
+        }
+        const currentInDom = triggerEl ? cwStore.normalize(triggerEl.getAttribute('data-context-window')) : null;
+        const selectedModel = getSelectedModelKey(view, cascadeId, info);
+        const applyKey = (selectedModel || '') + ':' + String(targetCw);
+        window.__agyLastAppliedContextWindowByCascade = window.__agyLastAppliedContextWindowByCascade || {};
+        const lastAppliedForCascade = window.__agyLastAppliedContextWindowByCascade[cascadeId];
+        const initialState = reduxStore ? reduxStore.getState() : null;
+        const initialByConvo = initialState?.modelSelection?.byConversation?.[cascadeId];
+        const defaultReduxCw = cwStore.normalize(initialState?.modelSelection?.default?.contextWindow) || '256K';
+        const effectiveInitialReduxCw = cwStore.normalize(initialByConvo?.contextWindow) || defaultReduxCw;
+        const reduxAlreadyMatches = !reduxStore || effectiveInitialReduxCw === targetCw;
+        if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
+          window.__agyLastAppliedContextWindow = applyKey;
+          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
+          setTriggerCwAttribute(triggerEl, targetCw);
+          return true;
+        }
+        if (msCtx || reduxStore) {
+          const state = initialState;
+          const byConvo = initialByConvo;
+          const currentInRedux = reduxStore
+            ? effectiveInitialReduxCw
+            : (cwStore.normalize(msCtx?.contextWindow?.selected) || currentInDom || '256K');
+          const selectedModelObj = msCtx?.selectedModel;
+          if (selectedModelObj) {
+            ensureModelContextWindowOptions(selectedModelObj, targetCw);
+          }
+          let dispatched = false;
+          if (currentInRedux !== targetCw || force) {
+            const prevDefault = state?.modelSelection?.default;
+            const prevDefaultModel = prevDefault?.model;
+            const prevDefaultCustomLabel = prevDefault?.customLabel;
+            const prevDefaultCw = prevDefault?.contextWindow;
+            if (reduxStore) {
+              const syncEntry = state?.modelSelection?.trajectorySync?.[cascadeId];
+              const syncedModelVal =
+                syncEntry?.pick?.atStep === 999999
+                  ? resolveModelValueFromLabel(state, extractLabelFromSyncedKey(syncEntry?.syncedKey))
+                  : undefined;
+              const modelVal = syncedModelVal ?? byConvo?.model ?? selectedModelObj?.value ?? prevDefaultModel;
+              const isCustomModel = Boolean(selectedModelObj?.isCustom && selectedModelObj?.value === modelVal);
+              const customLabel = isCustomModel ? selectedModelObj?.label : undefined;
+              if (modelVal !== undefined) {
+                reduxStore.dispatch({
+                  type: 'modelSelection/modelPicked',
+                  payload: {
+                    conversationId: cascadeId,
+                    model: modelVal,
+                    customLabel,
+                    contextWindow: targetCw,
+                  },
+                });
+                dispatched = true;
+              }
+            } else if (msCtx?.contextWindow && typeof msCtx.contextWindow.select === 'function' && selectedModelObj) {
+              msCtx.contextWindow.select(selectedModelObj, targetCw);
+              dispatched = true;
+            } else if (typeof setSelectedModelWithCw === 'function' && selectedModelObj) {
+              setSelectedModelWithCw(selectedModelObj, targetCw);
+              dispatched = true;
+            } else if (typeof msCtx?.setSelectedModel === 'function' && selectedModelObj) {
+              msCtx.setSelectedModel(selectedModelObj, targetCw);
+              dispatched = true;
+            }
+            if (dispatched && reduxStore) {
+              const nextState = reduxStore.getState();
+              const defObj = nextState?.modelSelection?.default;
+              const desiredDefaultCw =
+                prevDefaultCw !== undefined
+                  ? prevDefaultCw
+                  : (cwStore.hasExplicitDefaultCw?.() ? cwStore.getDefaultCw() : '256K');
+              const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
+              const desiredDefaultCustomLabel =
+                prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
+              const defCwNormalized = cwStore.normalize(defObj?.contextWindow) || '256K';
+              const desiredCwNormalized = cwStore.normalize(desiredDefaultCw) || '256K';
+              if (
+                defObj &&
+                (defObj.model !== desiredDefaultModel ||
+                  defObj.customLabel !== desiredDefaultCustomLabel ||
+                  defCwNormalized !== desiredCwNormalized)
+              ) {
+                reduxStore.dispatch({
+                  type: 'modelSelection/modelPicked',
+                  payload: {
+                    conversationId: undefined,
+                    model: desiredDefaultModel,
+                    customLabel: desiredDefaultCustomLabel,
+                    contextWindow: desiredDefaultCw,
+                  },
+                });
+              }
+            }
+          }
+          if (dispatched || currentInRedux === targetCw) {
+            window.__agyLastAppliedContextWindow = applyKey;
+            setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
+            setTriggerCwAttribute(triggerEl, targetCw);
+            return true;
+          }
+          return false;
+        }
+        if (legacyCtx) {
+          const modelCfg = legacyCtx.getModelConfigForConversation(cascadeId);
+          if (!modelCfg || modelCfg.value === undefined) return false;
+          const currentInEngine = legacyCtx.getContextWindowForConversation(cascadeId) || '256K';
+          if (currentInEngine !== targetCw || force) {
+            if (currentInEngine === targetCw && currentInDom !== targetCw) {
+              const tempCw = targetCw === '256K' ? '512K' : '256K';
+              legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, tempCw);
+            }
+            legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, targetCw);
+          }
+          window.__agyLastAppliedContextWindow = applyKey;
+          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
+          setTriggerCwAttribute(triggerEl, targetCw);
+          return true;
+        }
+        return false;
+      }
+      async function runCompactForInputBox(inputBox) {
+        const effBox = resolveEffectiveInputBox(inputBox);
+        if (!effBox) return;
+        const editable = effBox.querySelector('[contenteditable="true"]');
+        if (!editable || !editable.__lexicalEditor) {
+          const svc = getRemoteRpcServiceForElement(effBox);
+          const cid =
+            window?.__agySniffedCascadeId ||
+            document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id') ||
+            effBox.closest?.('[data-cascade-id]')?.getAttribute?.('data-cascade-id');
+          if (svc && typeof svc.sendUserCascadeMessage === 'function' && cid && cid !== 'remote-session') {
+            try {
+              await svc.sendUserCascadeMessage({
+                cascadeId: cid,
+                items: [
+                  {
+                    item: {
+                      slashCommand: {
+                        info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
+                      },
+                    },
+                  },
+                  {
+                    text: ' ' + COMPACT_ARGS,
+                  },
+                ],
+              });
+            } catch {}
+          }
+          return;
+        }
+        const ed = editable.__lexicalEditor;
+        const PClass = ed._nodes.get('paragraph')?.klass;
+        const MClass = ed._nodes.get('contextScopeItemMention')?.klass;
+        const TClass = ed._nodes.get('text')?.klass;
+        if (!PClass || !MClass || !TClass) return;
+        ed.update(() => {
+          const root = ed.getEditorState()._nodeMap.get('root').getWritable();
+          root.clear();
+          const p = PClass.importJSON({
+            direction: null, format: '', indent: 0, type: 'paragraph', version: 1, textFormat: 0, textStyle: '',
+          });
+          const mention = MClass.importJSON({
+            trigger: '@',
+            value: 'contextScopeItemMention',
+            data: {
+              mentionText: 'compact',
+              data: JSON.stringify({
+                slashCommand: {
+                  info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
+                },
+              }),
+            },
+            type: 'contextScopeItemMention',
+            version: 1,
+          });
+          const text = TClass.importJSON({
+            detail: 0, format: 0, mode: 'normal', style: '', text: ' ' + COMPACT_ARGS, type: 'text', version: 1,
+          });
+          p.append(mention, text);
+          root.append(p);
+        });
+        await new Promise((r) => setTimeout(r, 60));
+        const fiberKey = Object.keys(editable).find((k) => k.startsWith('__reactFiber$'));
+        let curr = fiberKey ? editable[fiberKey] : null;
+        while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter !== 'function')) {
+          curr = curr.return;
+        }
+        if (curr && curr.memoizedProps && typeof curr.memoizedProps.handleEnter === 'function') {
+          const Evt = typeof KeyboardEvent === 'function' ? KeyboardEvent : function (t, o) { Object.assign(this, o, { type: t }); };
+          await curr.memoizedProps.handleEnter(new Evt('keydown', { key: 'Enter' }), ed);
+        } else {
+          const sendBtn = effBox.querySelector('[data-testid="send-button"]');
+          if (sendBtn && !sendBtn.disabled) sendBtn.click();
+        }
+      }
+      return {
+        resolveEffectiveView,
+        resolveEffectiveInputBox,
+        ensureContextWindowSelectorFlag,
+        ensureCustomizationsStoreLoaded,
+        getModelSelectorContextForView,
+        getCascadeContextForElement,
+        getSelectedModelKey,
+        applyContextWindowToEngine,
+        runCompactForInputBox,
+      };
+    }
+    module.exports = {
+      MAX_CASCADE_MAP_ENTRIES,
+      COMPACT_ARGS,
+      setBoundedMapRecord,
+      cleanupLegacyObjectPrototypeCwGetters,
+      registerCustomCwInPrototype,
+      createDesktopReactBridge,
+    };
+  },
+  "./host-bridge": function(module, exports, __require) {
+    const require = (spec) => __require(".", spec);
+    'use strict';
+    /**
+     * Host Bridge Coordinator Facade.
+     *
+     * Composes three strictly bounded subsystems:
+     * - `protobuf-checkpoint-codec`: pure Protobuf / Connect-RPC wire transformation
+     * - `remote-runtime`: WeakMap-isolated `RemoteControlComponent` runtime lease & companion manifest parser
+     * - `desktop-react-bridge`: Electron workbench React Fiber / Redux / Lexical engine adapter
+     */
+    const { resolveHostAdapterConfig } = require('./host-adapter-config');
+    const {
+      UUID_RE,
+      CONVO_RPC_RE,
+      createTextCodec,
+      buildSendMessageCheckpointSuffix: buildSuffixWithEncoder,
+      extractCascadeIdFromBody: extractCidWithCodec,
+      injectCheckpointPayload,
+    } = require('./protobuf-checkpoint-codec');
+    const {
+      parseAutoinjectCompanionManifest,
+      acquireRemoteRuntimeLease,
+    } = require('./remote-runtime');
+    const {
+      COMPACT_ARGS,
+      setBoundedMapRecord,
+      registerCustomCwInPrototype,
+      createDesktopReactBridge,
+    } = require('./desktop-react-bridge');
+    function createHostBridge({ window, document, localStorage, fetchFn, cwStore, hostConfig }) {
+      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
+      const codec = createTextCodec(window);
+      const cleanupCallbacks = [];
+      const pendingSniffTimers = new Set();
       let lastRcTrajectoryPollTs = 0;
       let rcTrajectoryPollInFlight = false;
-      function toUint8Slice(body) {
-        if (!body) return null;
-        if (body instanceof Uint8Array) return body;
-        if (body instanceof ArrayBuffer) return new Uint8Array(body);
-        if (ArrayBuffer.isView(body)) {
-          return new Uint8Array(body.buffer, body.byteOffset || 0, body.byteLength ?? body.buffer.byteLength);
-        }
-        if (body.buffer instanceof ArrayBuffer) {
-          return new Uint8Array(body.buffer, body.byteOffset || 0, body.byteLength ?? body.buffer.byteLength);
-        }
-        return null;
-      }
-      let sharedTextDecoder = null;
-      let sharedTextEncoder = null;
-      function decodeBytesToText(body) {
-        if (!body) return '';
-        if (typeof body === 'string') return body;
+      let lastDesktopTrajectorySyncTs = 0;
+      let desktopTrajectorySyncInFlight = false;
+      function getAccessibleRemoteIframeWin() {
         try {
-          if (!sharedTextDecoder) {
-            const TD = window?.TextDecoder || (typeof TextDecoder !== 'undefined' ? TextDecoder : null);
-            if (TD) sharedTextDecoder = new TD('utf-8');
-          }
-          if (sharedTextDecoder) {
-            const u8 = toUint8Slice(body) || new Uint8Array(body);
-            return sharedTextDecoder.decode(u8);
-          }
-        } catch {}
-        return '';
-      }
-      function encodeTextToBytes(str) {
-        if (!sharedTextEncoder) {
-          const TE = window?.TextEncoder || (typeof TextEncoder !== 'undefined' ? TextEncoder : null);
-          if (TE) sharedTextEncoder = new TE();
+          const iframe = document?.querySelector?.('ga-remote-control iframe');
+          if (!iframe) return null;
+          const cwin = iframe.contentWindow;
+          if (!cwin) return null;
+          void cwin.document;
+          iframe.__agyCrossOriginInaccessible = false;
+          return cwin;
+        } catch {
+          try {
+            const iframe = document?.querySelector?.('ga-remote-control iframe');
+            if (iframe) iframe.__agyCrossOriginInaccessible = true;
+          } catch {}
+          return null;
         }
-        if (sharedTextEncoder) return sharedTextEncoder.encode(str);
-        return Uint8Array.from(String(str).split('').map((c) => c.charCodeAt(0) & 0xff));
       }
-      function decodeBase64ToUtf8(b64) {
-        if (!b64 || typeof b64 !== 'string') return '';
+      function getAccessibleRemoteIframeDoc() {
         try {
-          if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
-            return Buffer.from(b64, 'base64').toString('utf8');
-          }
-          const atobFn = window?.atob || (typeof atob === 'function' ? atob : null);
-          if (atobFn) {
-            const bin = atobFn(b64);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
-            return decodeBytesToText(bytes);
-          }
-        } catch {}
-        return '';
-      }
-      function encodeVarint(val) {
-        const out = [];
-        let v = Math.max(0, Math.floor(Number(val) || 0)) >>> 0;
-        while (v >= 0x80) {
-          out.push((v & 0x7f) | 0x80);
-          v >>>= 7;
+          const iframe = document?.querySelector?.('ga-remote-control iframe');
+          if (!iframe) return null;
+          const cdoc = iframe.contentDocument || iframe.contentWindow?.document;
+          if (cdoc) iframe.__agyCrossOriginInaccessible = false;
+          return cdoc || null;
+        } catch {
+          try {
+            const iframe = document?.querySelector?.('ga-remote-control iframe');
+            if (iframe) iframe.__agyCrossOriginInaccessible = true;
+          } catch {}
+          return null;
         }
-        out.push(v & 0x7f);
-        return out;
       }
       function buildSendMessageCheckpointSuffix(maxTokenLimit, contextWindow) {
-        const cpBytes = [0x28, ...encodeVarint(maxTokenLimit)];
-        if (contextWindow && typeof contextWindow === 'string') {
-          const cwBytes = Array.from(encodeTextToBytes(contextWindow));
-          cpBytes.push(0xa2, 0x02, ...encodeVarint(cwBytes.length), ...cwBytes);
-        }
-        const ccBytes = [0x12, ...encodeVarint(cpBytes.length), ...cpBytes];
-        return new Uint8Array([0x2a, ...encodeVarint(ccBytes.length), ...ccBytes]);
+        return buildSuffixWithEncoder(maxTokenLimit, contextWindow, codec.encodeTextToBytes);
+      }
+      function extractCascadeIdFromBody(body, ignoreUuid) {
+        return extractCidWithCodec(body, ignoreUuid, codec);
       }
       function resolveEffectiveCascadeId(body, rcInst) {
         const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
@@ -2273,36 +3958,6 @@
         if (domCid && domCid !== 'remote-session') return domCid;
         return null;
       }
-      function findFirstNonWsByte(u8) {
-        if (!u8 || u8.length === 0) return -1;
-        let i = 0;
-        if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) {
-          i = 3;
-        }
-        while (i < u8.length && (u8[i] === 0x20 || u8[i] === 0x09 || u8[i] === 0x0a || u8[i] === 0x0d)) {
-          i++;
-        }
-        return i < u8.length ? u8[i] : -1;
-      }
-      function endsWithByteSequence(u8, seq) {
-        if (!u8 || !seq || u8.length < seq.length) return false;
-        const offset = u8.length - seq.length;
-        for (let i = 0; i < seq.length; i++) {
-          if (u8[offset + i] !== seq[i]) return false;
-        }
-        return true;
-      }
-      function buildConnectFramedBytes(flagByte, payloadBytes) {
-        const len = payloadBytes.length;
-        const framed = new Uint8Array(5 + len);
-        framed[0] = flagByte & 0xff;
-        framed[1] = (len >>> 24) & 0xff;
-        framed[2] = (len >>> 16) & 0xff;
-        framed[3] = (len >>> 8) & 0xff;
-        framed[4] = len & 0xff;
-        framed.set(payloadBytes, 5);
-        return framed;
-      }
       function injectCheckpointLimitIntoSendRequest(path, body, rcInst) {
         if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body || !cwStore) {
           return body;
@@ -2312,260 +3967,92 @@
           const cw = cwStore.getSavedContextWindow(cid);
           const limit = cwStore.getLimit(cw);
           if (!cw || !limit || limit <= 0) return body;
-          const isContinueAfterInjectionObj = (obj) =>
-            Boolean(obj && typeof obj === 'object' && (obj.continueAfterInjection === true || obj.continue_after_injection === true));
-          const applyCheckpointToJsonObj = (j) => {
-            if (!j || typeof j !== 'object') return j;
-            if (isContinueAfterInjectionObj(j)) return j;
-            j.cascadeConfig = j.cascadeConfig || {};
-            j.cascadeConfig.checkpointConfig = {
-              ...(j.cascadeConfig.checkpointConfig || {}),
-              contextWindow: cw,
-              maxTokenLimit: limit,
-            };
-            return j;
-          };
-          if (typeof body === 'string') {
-            const trimmed = body.trim();
-            if (trimmed.startsWith('{')) {
-              const parsedObj = JSON.parse(trimmed);
-              if (isContinueAfterInjectionObj(parsedObj)) return body;
-              return JSON.stringify(applyCheckpointToJsonObj(parsedObj));
-            }
-            return body;
-          }
-          const u8 = toUint8Slice(body);
-          if (!u8) {
-            if (typeof body === 'object') {
-              if (isContinueAfterInjectionObj(body)) return body;
-              const cloned = typeof body.clone === 'function'
-                ? body.clone()
-                : Object.assign(Object.create(Object.getPrototypeOf(body)), body);
-              const prevCc = body.cascadeConfig;
-              const nextCc = prevCc && typeof prevCc === 'object'
-                ? (typeof prevCc.clone === 'function' ? prevCc.clone() : Object.assign(Object.create(Object.getPrototypeOf(prevCc)), prevCc))
-                : {};
-              const prevCp = prevCc?.checkpointConfig;
-              const nextCp = prevCp && typeof prevCp === 'object'
-                ? (typeof prevCp.clone === 'function' ? prevCp.clone() : Object.assign(Object.create(Object.getPrototypeOf(prevCp)), prevCp))
-                : {};
-              nextCp.contextWindow = cw;
-              nextCp.maxTokenLimit = limit;
-              nextCc.checkpointConfig = nextCp;
-              cloned.cascadeConfig = nextCc;
-              return cloned;
-            }
-            return body;
-          }
-          if (u8.length === 0) return body;
-          if (findFirstNonWsByte(u8) === 0x7b) {
-            const text = decodeBytesToText(u8);
-            const parsedObj = JSON.parse(text);
-            if (isContinueAfterInjectionObj(parsedObj)) return body;
-            return encodeTextToBytes(JSON.stringify(applyCheckpointToJsonObj(parsedObj)));
-          }
-          const suffix = buildSendMessageCheckpointSuffix(limit, cw);
-          const readProtobufVarint = (buf, startOffset) => {
-            let val = 0;
-            let shift = 0;
-            let nonZero = false;
-            for (let i = 0; i < 10; i++) {
-              const idx = startOffset + i;
-              if (idx >= buf.length) return null;
-              const b = buf[idx];
-              if ((b & 0x7f) !== 0) nonZero = true;
-              if (shift < 53) {
-                val += (b & 0x7f) * (2 ** shift);
-              }
-              if ((b & 0x80) === 0) {
-                return { value: val, nonZero, nextOffset: idx + 1 };
-              }
-              shift += 7;
-            }
-            return null;
-          };
-          const scanProtobufFields = (buf) => {
-            const fields = [];
-            let pos = 0;
-            while (pos < buf.length) {
-              const fieldStart = pos;
-              const tagVar = readProtobufVarint(buf, pos);
-              if (!tagVar || tagVar.value <= 0) return null;
-              const wireType = tagVar.value & 0x07;
-              const fieldNumber = Math.floor(tagVar.value / 8);
-              if (fieldNumber <= 0) return null;
-              pos = tagVar.nextOffset;
-              if (wireType === 0) {
-                const v = readProtobufVarint(buf, pos);
-                if (!v) return null;
-                pos = v.nextOffset;
-                fields.push({ fieldNumber, wireType, varintNonZero: v.nonZero, rawSlice: buf.subarray(fieldStart, pos) });
-              } else if (wireType === 1) {
-                if (pos + 8 > buf.length) return null;
-                pos += 8;
-                fields.push({ fieldNumber, wireType, rawSlice: buf.subarray(fieldStart, pos) });
-              } else if (wireType === 2) {
-                const lenVar = readProtobufVarint(buf, pos);
-                if (!lenVar || lenVar.value < 0 || lenVar.nextOffset + lenVar.value > buf.length) return null;
-                const dataStart = lenVar.nextOffset;
-                pos = dataStart + lenVar.value;
-                fields.push({
-                  fieldNumber,
-                  wireType,
-                  payloadSlice: buf.subarray(dataStart, pos),
-                  rawSlice: buf.subarray(fieldStart, pos),
-                });
-              } else if (wireType === 5) {
-                if (pos + 4 > buf.length) return null;
-                pos += 4;
-                fields.push({ fieldNumber, wireType, rawSlice: buf.subarray(fieldStart, pos) });
-              } else {
-                return null;
-              }
-            }
-            return fields;
-          };
-          const concatUint8Arrays = (chunks) => {
-            let total = 0;
-            for (const c of chunks) total += c.length;
-            const out = new Uint8Array(total);
-            let off = 0;
-            for (const c of chunks) {
-              out.set(c, off);
-              off += c.length;
-            }
-            return out;
-          };
-          const isValidCheckpointSuffixAt = (buf, pos) => {
-            if (pos < 0 || pos >= buf.length || buf[pos] !== 0x2a) return false;
-            const ccLenVar = readProtobufVarint(buf, pos + 1);
-            if (!ccLenVar || ccLenVar.nextOffset + ccLenVar.value !== buf.length) return false;
-            const innerPos = ccLenVar.nextOffset;
-            if (innerPos >= buf.length || buf[innerPos] !== 0x12) return false;
-            const cpLenVar = readProtobufVarint(buf, innerPos + 1);
-            if (!cpLenVar || cpLenVar.nextOffset + cpLenVar.value !== buf.length) return false;
-            const fieldPos = cpLenVar.nextOffset;
-            if (fieldPos >= buf.length || buf[fieldPos] !== 0x28) return false;
-            const limitVar = readProtobufVarint(buf, fieldPos + 1);
-            if (!limitVar || limitVar.value <= 0) return false;
-            if (limitVar.nextOffset === buf.length) return true;
-            const cwTagPos = limitVar.nextOffset;
-            if (cwTagPos + 2 > buf.length || buf[cwTagPos] !== 0xa2 || buf[cwTagPos + 1] !== 0x02) return false;
-            const cwLenVar = readProtobufVarint(buf, cwTagPos + 2);
-            return Boolean(cwLenVar && cwLenVar.value >= 1 && cwLenVar.value <= 16 && cwLenVar.nextOffset + cwLenVar.value === buf.length);
-          };
-          const stripTrailingCheckpointSuffix = (bytes) => {
-            if (!bytes || bytes.length < 6) return bytes;
-            let cur = bytes;
-            let stripped = true;
-            while (stripped && cur.length >= 6) {
-              stripped = false;
-              for (let pos = Math.max(0, cur.length - 32); pos <= cur.length - 6; pos++) {
-                if (isValidCheckpointSuffixAt(cur, pos)) {
-                  cur = cur.subarray(0, pos);
-                  stripped = true;
-                  break;
-                }
-              }
-            }
-            return cur;
-          };
-          const mergeCheckpointIntoProtobufBytes = (rawPayload) => {
-            const cleanBytes = stripTrailingCheckpointSuffix(rawPayload);
-            const topFields = scanProtobufFields(cleanBytes);
-            if (topFields) {
-              if (topFields.some((f) => f.fieldNumber === 20 && f.wireType === 0 && f.varintNonZero)) {
-                return null;
-              }
-              const existingCascadeFields = topFields.filter((f) => f.fieldNumber === 5 && f.wireType === 2);
-              if (existingCascadeFields.length > 0) {
-                const preservedCcSubSlices = [];
-                const preservedCpSubSlices = [];
-                let allSubParsed = true;
-                for (const ccField of existingCascadeFields) {
-                  const ccSubs = scanProtobufFields(ccField.payloadSlice);
-                  if (!ccSubs) {
-                    allSubParsed = false;
-                    break;
-                  }
-                  for (const sub of ccSubs) {
-                    if (sub.fieldNumber === 2 && sub.wireType === 2) {
-                      const cpSubs = scanProtobufFields(sub.payloadSlice);
-                      if (!cpSubs) {
-                        allSubParsed = false;
-                        break;
-                      }
-                      for (const cpSub of cpSubs) {
-                        if (cpSub.fieldNumber !== 5 && cpSub.fieldNumber !== 36) {
-                          preservedCpSubSlices.push(cpSub.rawSlice);
-                        }
-                      }
-                    } else {
-                      preservedCcSubSlices.push(sub.rawSlice);
-                    }
-                  }
-                  if (!allSubParsed) break;
-                }
-                if (allSubParsed) {
-                  const cpTail = [0x28, ...encodeVarint(limit)];
-                  if (cw && typeof cw === 'string') {
-                    const cwBytes = Array.from(encodeTextToBytes(cw));
-                    cpTail.push(0xa2, 0x02, ...encodeVarint(cwBytes.length), ...cwBytes);
-                  }
-                  const mergedCpPayload = concatUint8Arrays([...preservedCpSubSlices, new Uint8Array(cpTail)]);
-                  const cpFieldBytes = concatUint8Arrays([
-                    new Uint8Array([0x12, ...encodeVarint(mergedCpPayload.length)]),
-                    mergedCpPayload,
-                  ]);
-                  const mergedCcPayload = concatUint8Arrays([...preservedCcSubSlices, cpFieldBytes]);
-                  const singleField5Bytes = concatUint8Arrays([
-                    new Uint8Array([0x2a, ...encodeVarint(mergedCcPayload.length)]),
-                    mergedCcPayload,
-                  ]);
-                  const nonCascadeSlices = topFields
-                    .filter((f) => !(f.fieldNumber === 5 && f.wireType === 2))
-                    .map((f) => f.rawSlice);
-                  return concatUint8Arrays([...nonCascadeSlices, singleField5Bytes]);
-                }
-              }
-            }
-            if (endsWithByteSequence(rawPayload, suffix)) {
-              return null;
-            }
-            const merged = new Uint8Array(cleanBytes.length + suffix.length);
-            merged.set(cleanBytes, 0);
-            merged.set(suffix, cleanBytes.length);
-            return merged;
-          };
-          const frameLen = u8.length >= 5
-            ? (((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4])
-            : -1;
-          const isConnectFrame = u8.length >= 5 && (u8[0] < 8 || (u8[0] & 0x80) !== 0 || frameLen === u8.length - 5);
-          if (isConnectFrame) {
-            if (frameLen !== u8.length - 5 || u8[0] !== 0) {
-              return body;
-            }
-            const payload = u8.subarray(5);
-            if (findFirstNonWsByte(payload) === 0x7b) {
-              const text = decodeBytesToText(payload);
-              const parsedObj = JSON.parse(text);
-              if (isContinueAfterInjectionObj(parsedObj)) return body;
-              const j = applyCheckpointToJsonObj(parsedObj);
-              const newPayload = encodeTextToBytes(JSON.stringify(j));
-              return buildConnectFramedBytes(0, newPayload);
-            }
-            const nextPayload = mergeCheckpointIntoProtobufBytes(payload);
-            if (!nextPayload) return body;
-            return buildConnectFramedBytes(0, nextPayload);
-          }
-          const nextUnframed = mergeCheckpointIntoProtobufBytes(u8);
-          return nextUnframed || body;
+          return injectCheckpointPayload({
+            path,
+            body,
+            contextWindow: cw,
+            maxTokenLimit: limit,
+            codec,
+          });
         } catch {
           return body;
         }
       }
-      window.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
-      window.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
+      function sniffCascadeIdFromRpc(path, body, rcInst) {
+        if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        const cid = extractCascadeIdFromBody(body, ignoreUuid);
+        if (cid) {
+          const changed = window.__agySniffedCascadeId !== cid;
+          window.__agySniffedCascadeId = cid;
+          window.__agySniffedCascadeTs = Date.now();
+          if (/\/(SendUserCascadeMessage|StartCascade|StreamCascadeReactiveUpdates|StreamAgentStateUpdates)$/i.test(path)) {
+            lastRcTrajectoryPollTs = 0;
+            if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
+              const prevSteps = window?.__agyRcStepCountByCascade?.[cid] || 0;
+              setBoundedMapRecord(window, '__agyRcStepCountByCascade', cid, prevSteps + 1);
+            }
+            const t = setTimeout(() => {
+              pendingSniffTimers.delete(t);
+              lastRcTrajectoryPollTs = 0;
+              if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
+            }, 1200);
+            pendingSniffTimers.add(t);
+          }
+          if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
+            window.__agyOnCascadeSniffed(cid);
+          }
+        }
+      }
+      if (window) {
+        window.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
+        window.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
+      }
+      const runtimeLease = acquireRemoteRuntimeLease({
+        window,
+        document,
+        hostConfig: resolvedHostConfig,
+        hooks: {
+          onIframeMessage(ev, rcInst) {
+            if (ev && ev.data && typeof ev.data.path === 'string') {
+              const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+              const m = ev.data.path.match(UUID_RE);
+              if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
+                window.__agySniffedCascadeId = m[0];
+                window.__agySniffedCascadeTs = Date.now();
+                if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
+              }
+            }
+          },
+          transformRpcRequest(path, body, rcInst) {
+            const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
+            const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
+            sniffFn(path, body, rcInst);
+            return injectFn(path, body, rcInst);
+          },
+          transformPortRequest(msg, rcInst) {
+            const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
+            const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
+            sniffFn(msg.path, msg.body, rcInst);
+            if (/\/SendUserCascadeMessage$/i.test(msg.path) && msg.body) {
+              return { ...msg, body: injectFn(msg.path, msg.body, rcInst) };
+            }
+            return msg;
+          },
+          onUrlChanged(nextPath, rcInst) {
+            if (typeof nextPath === 'string' && nextPath) {
+              const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+              const m = nextPath.match(UUID_RE);
+              if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
+                window.__agySniffedCascadeId = m[0];
+                window.__agySniffedCascadeTs = Date.now();
+                if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
+              }
+            }
+          },
+        },
+      });
+      cleanupCallbacks.push(() => runtimeLease.release());
       function ensureFetchHook(targetWin) {
         try {
           const w = targetWin || window;
@@ -2644,11 +4131,7 @@
             lsClient.__agyOrigSendUserCascadeMessage = origSend;
             wrappedSend = function (req, ...rest) {
               const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-              const nextReq = injectFn(
-                resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
-                req,
-                null
-              );
+              const nextReq = injectFn(resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'), req, null);
               return origSend.call(this, nextReq, ...rest);
             };
             lsClient.sendUserCascadeMessage = wrappedSend;
@@ -2666,421 +4149,11 @@
         } catch {}
         return lsClient;
       }
-      function extractCascadeIdFromBody(body, ignoreUuid) {
-        const u8 = toUint8Slice(body);
-        if (!u8 && body && typeof body === 'object') {
-          const cid = body.cascadeId || body.conversationId;
-          if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
-        }
-        let targetBody = u8 || body;
-        if (u8 && u8.length >= 5 && u8[0] === 0) {
-          const frameLen = ((u8[1] << 24) >>> 0) + (u8[2] << 16) + (u8[3] << 8) + u8[4];
-          if (frameLen === u8.length - 5) {
-            targetBody = u8.subarray(5);
-          }
-        }
-        const text = decodeBytesToText(targetBody);
-        if (!text) return null;
-        const trimmed = text.trim();
-        if (trimmed.startsWith('{')) {
-          try {
-            const j = JSON.parse(trimmed);
-            const cid = j.cascadeId || j.conversationId;
-            if (typeof cid === 'string' && UUID_RE.test(cid) && cid !== ignoreUuid) return cid;
-          } catch {}
-        }
-        const pm = text.match(PROTO_UUID_RE);
-        if (pm && pm[1] && pm[1] !== ignoreUuid) return pm[1];
-        const um = text.match(UUID_RE);
-        if (um && um[0] && um[0] !== ignoreUuid) return um[0];
-        return null;
-      }
-      const pendingSniffTimers = new Set();
-      function sniffCascadeIdFromRpc(path, body, rcInst) {
-        if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
-        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-        const cid = extractCascadeIdFromBody(body, ignoreUuid);
-        if (cid) {
-          const changed = window.__agySniffedCascadeId !== cid;
-          window.__agySniffedCascadeId = cid;
-          window.__agySniffedCascadeTs = Date.now();
-          if (/\/(SendUserCascadeMessage|StartCascade|StreamCascadeReactiveUpdates|StreamAgentStateUpdates)$/i.test(path)) {
-            lastRcTrajectoryPollTs = 0;
-            if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
-              const prevSteps = window?.__agyRcStepCountByCascade?.[cid] || 0;
-              setBoundedMapRecord(window, '__agyRcStepCountByCascade', cid, prevSteps + 1);
-            }
-            const t = setTimeout(() => {
-              pendingSniffTimers.delete(t);
-              lastRcTrajectoryPollTs = 0;
-              if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
-            }, 1200);
-            pendingSniffTimers.add(t);
-          }
-          if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
-            window.__agyOnCascadeSniffed(cid);
-          }
-        }
-      }
-      function hookRemoteControlPrototype(proto) {
-        if (!proto || proto === Object.prototype) return;
-        proto.__agyTargetWin = window;
-        if (Object.prototype.hasOwnProperty.call(proto, '__agyHookV2')) return;
-        proto.__agyHooked = true;
-        proto.__agyHookV2 = true;
-        if (typeof proto.handleIframeMessage === 'function') {
-          const origMsg = proto.__agyOrigHandleIframeMessage || proto.handleIframeMessage;
-          proto.__agyOrigHandleIframeMessage = origMsg;
-          proto.handleIframeMessage = function (ev) {
-            window.__agyRemoteControlInstance = this;
-            if (ev && ev.data === '__agy_probe__') return;
-            if (ev && ev.data && typeof ev.data.path === 'string') {
-              const ignoreUuid = typeof this.selectedInstanceUuid === 'function' ? this.selectedInstanceUuid() : '';
-              const m = ev.data.path.match(UUID_RE);
-              if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
-                window.__agySniffedCascadeId = m[0];
-                window.__agySniffedCascadeTs = Date.now();
-                if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
-              }
-            }
-            return origMsg.apply(this, arguments);
-          };
-        }
-        for (const mName of ['proxyCommand', 'streamProxyCommand']) {
-          if (typeof proto[mName] === 'function') {
-            const origKey = `__agyOrig_${mName}`;
-            const origFn = proto[origKey] || proto[mName];
-            proto[origKey] = origFn;
-            proto[mName] = function (path, body, ...rest) {
-              window.__agyRemoteControlInstance = this;
-              const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
-              const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-              sniffFn(path, body, this);
-              const nextBody = injectFn(path, body, this);
-              return origFn.call(this, path, nextBody, ...rest);
-            };
-          }
-        }
-        if (typeof proto.handlePortRequest === 'function') {
-          const origPort = proto.__agyOrigHandlePortRequest || proto.handlePortRequest;
-          proto.__agyOrigHandlePortRequest = origPort;
-          proto.handlePortRequest = function (msg) {
-            window.__agyRemoteControlInstance = this;
-            if (msg && typeof msg.path === 'string') {
-              const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
-              const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-              sniffFn(msg.path, msg.body, this);
-              if (/\/SendUserCascadeMessage$/i.test(msg.path) && msg.body) {
-                msg = { ...msg, body: injectFn(msg.path, msg.body, this) };
-              }
-            }
-            return origPort.call(this, msg);
-          };
-        }
-        for (const mName of [
-          'handleUrlChanged',
-          'managePolling',
-          'shouldPoll',
-          'loadInstances',
-          'isDisconnected',
-          'onIframeLoad',
-          'onWindowOnline',
-          'onWindowOffline',
-          'isOffline',
-          'isDirectIngressMode',
-          'isTabHidden',
-          'getSelectedInstance',
-          'instanceInfos',
-          'remoteConversationsInfos',
-        ]) {
-          if (typeof proto[mName] === 'function') {
-            const origKey = `__agyOrig_${mName}`;
-            const origFn = proto[origKey] || proto[mName];
-            proto[origKey] = origFn;
-            proto[mName] = function () {
-              if (this && !this.destroyed) {
-                window.__agyRemoteControlInstance = this;
-              }
-              if (
-                window?.__agyProbingRcInstance &&
-                (mName === 'handleUrlChanged' || mName === 'onIframeLoad' || mName === 'onWindowOnline' || mName === 'loadInstances')
-              ) {
-                return;
-              }
-              if (mName === 'handleUrlChanged' && typeof arguments[0] === 'string' && arguments[0]) {
-                const ignoreUuid = typeof this?.selectedInstanceUuid === 'function' ? this.selectedInstanceUuid() : '';
-                const m = arguments[0].match(UUID_RE);
-                if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
-                  window.__agySniffedCascadeId = m[0];
-                  window.__agySniffedCascadeTs = Date.now();
-                  if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
-                }
-              }
-              return origFn.apply(this, arguments);
-            };
-          }
-        }
-        cleanupCallbacks.push(() => {
-          try {
-            if (proto.__agyOrigHandleIframeMessage) {
-              proto.handleIframeMessage = proto.__agyOrigHandleIframeMessage;
-              delete proto.__agyOrigHandleIframeMessage;
-            }
-            if (proto.__agyOrigHandlePortRequest) {
-              proto.handlePortRequest = proto.__agyOrigHandlePortRequest;
-              delete proto.__agyOrigHandlePortRequest;
-            }
-            for (const mName of [
-              'proxyCommand',
-              'streamProxyCommand',
-              'handleUrlChanged',
-              'managePolling',
-              'shouldPoll',
-              'loadInstances',
-              'isDisconnected',
-              'onIframeLoad',
-              'onWindowOnline',
-              'onWindowOffline',
-              'isOffline',
-              'isDirectIngressMode',
-              'isTabHidden',
-              'getSelectedInstance',
-              'instanceInfos',
-              'remoteConversationsInfos',
-            ]) {
-              const origKey = `__agyOrig_${mName}`;
-              if (proto[origKey]) {
-                proto[mName] = proto[origKey];
-                delete proto[origKey];
-              }
-            }
-            delete proto.__agyHooked;
-            delete proto.__agyHookV2;
-            delete proto.__agyTargetWin;
-          } catch {}
-        });
-      }
       function getRemoteControlInstance(onCascadeChange) {
-        if (typeof onCascadeChange === 'function') {
+        if (typeof onCascadeChange === 'function' && window) {
           window.__agyOnCascadeSniffed = onCascadeChange;
         }
-        if (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed) {
-          hookRemoteControlPrototype(Object.getPrototypeOf(window.__agyRemoteControlInstance));
-          return window.__agyRemoteControlInstance;
-        }
-        const isRcInstance = (obj) =>
-          Boolean(
-            obj &&
-              typeof obj === 'object' &&
-              !obj.destroyed &&
-              (typeof obj.proxyCommand === 'function' ||
-                typeof obj.onIframeLoad === 'function' ||
-                typeof obj.handleIframeMessage === 'function')
-          );
-        const extractFromLContext = (lCtx) => {
-          if (!lCtx || typeof lCtx !== 'object') return null;
-          if (isRcInstance(lCtx)) return lCtx;
-          if (isRcInstance(lCtx.component)) return lCtx.component;
-          const lView = lCtx.lView;
-          if (Array.isArray(lView)) {
-            try {
-              const tView = lView[1];
-              const nodeIndex = typeof lCtx.nodeIndex === 'number' ? lCtx.nodeIndex : -1;
-              const tNode = nodeIndex >= 0 && Array.isArray(tView?.data) ? tView.data[nodeIndex] : null;
-              if (
-                tNode &&
-                typeof tNode.directiveStart === 'number' &&
-                typeof tNode.componentOffset === 'number' &&
-                tNode.componentOffset > -1
-              ) {
-                const comp = lView[tNode.directiveStart + tNode.componentOffset];
-                if (isRcInstance(comp)) return comp;
-              }
-            } catch {}
-            for (let i = 0; i < Math.min(lView.length, 300); i++) {
-              if (isRcInstance(lView[i])) return lView[i];
-            }
-          }
-          return null;
-        };
-        const searchNgContext = (ctx) => {
-          if (!ctx || typeof ctx !== 'object') return null;
-          const direct = extractFromLContext(ctx);
-          if (direct) return direct;
-          const visited = new Set();
-          const queue = [ctx];
-          let steps = 0;
-          while (queue.length > 0 && steps < 400) {
-            const cur = queue.shift();
-            if (!cur || typeof cur !== 'object' || visited.has(cur)) continue;
-            visited.add(cur);
-            steps++;
-            const extracted = extractFromLContext(cur);
-            if (extracted) return extracted;
-            if (Array.isArray(cur)) {
-              const scanLen = Math.min(cur.length, 300);
-              for (let i = 0; i < scanLen; i++) {
-                if (isRcInstance(cur[i])) return cur[i];
-              }
-              for (let i = 0; i < scanLen; i++) {
-                const item = cur[i];
-                if (item && typeof item === 'object' && (Array.isArray(item) || isRcInstance(item.component))) {
-                  queue.push(item);
-                }
-              }
-            } else {
-              for (const k of ['component', 'lView', 'data', 'context', '_lView']) {
-                if (cur[k] && typeof cur[k] === 'object') queue.push(cur[k]);
-              }
-            }
-          }
-          return null;
-        };
-        const rcEl = document?.querySelector?.('ga-remote-control') || null;
-        const gaRootEl = document?.querySelector?.('ga-root') || null;
-        if (rcEl) {
-          const ngFn = window?.ng && typeof window.ng.getComponent === 'function' ? window.ng.getComponent : null;
-          if (ngFn) {
-            try {
-              const comp = ngFn(rcEl);
-              if (isRcInstance(comp)) {
-                window.__agyRemoteControlInstance = comp;
-                hookRemoteControlPrototype(Object.getPrototypeOf(comp));
-                return comp;
-              }
-            } catch {}
-          }
-          const ctxKey = Object.keys(rcEl).find((k) => k.startsWith('__ngContext'));
-          const found = searchNgContext(rcEl.__ngContext__ || (ctxKey ? rcEl[ctxKey] : null));
-          if (found) {
-            window.__agyRemoteControlInstance = found;
-            hookRemoteControlPrototype(Object.getPrototypeOf(found));
-            return found;
-          }
-        }
-        if (gaRootEl) {
-          const rootCtxKey = Object.keys(gaRootEl).find((k) => k.startsWith('__ngContext'));
-          const foundFromRoot = searchNgContext(gaRootEl.__ngContext__ || (rootCtxKey ? gaRootEl[rootCtxKey] : null));
-          if (foundFromRoot) {
-            window.__agyRemoteControlInstance = foundFromRoot;
-            hookRemoteControlPrototype(Object.getPrototypeOf(foundFromRoot));
-            return foundFromRoot;
-          }
-        }
-        const nsRoot = window?.default_GoogleAntigravity;
-        if (nsRoot && typeof nsRoot === 'object') {
-          const targetCandidates = [];
-          if (rcEl) {
-            targetCandidates.push(rcEl);
-            if (rcEl.firstElementChild) targetCandidates.push(rcEl.firstElementChild);
-            if (typeof rcEl.querySelector === 'function') {
-              const innerContainer = rcEl.querySelector('.app-container, .iframe-panel, iframe');
-              if (innerContainer && !targetCandidates.includes(innerContainer)) {
-                targetCandidates.push(innerContainer);
-              }
-            }
-          }
-          if (gaRootEl) {
-            targetCandidates.push(gaRootEl);
-            if (gaRootEl.firstElementChild) targetCandidates.push(gaRootEl.firstElementChild);
-          }
-          for (const k of Object.keys(nsRoot)) {
-            const mod = nsRoot[k];
-            if (!mod || (typeof mod !== 'object' && typeof mod !== 'function')) continue;
-            for (const targetEl of targetCandidates) {
-              if (!targetEl) continue;
-              try {
-                if (typeof mod.getDebugNode === 'function') {
-                  const dbgNode = mod.getDebugNode(targetEl);
-                  const dbgComp = dbgNode?.componentInstance || dbgNode?.context;
-                  if (isRcInstance(dbgComp)) {
-                    window.__agyRemoteControlInstance = dbgComp;
-                    hookRemoteControlPrototype(Object.getPrototypeOf(dbgComp));
-                    return dbgComp;
-                  }
-                  const foundFromDbg = searchNgContext(dbgComp || dbgNode);
-                  if (foundFromDbg) {
-                    window.__agyRemoteControlInstance = foundFromDbg;
-                    hookRemoteControlPrototype(Object.getPrototypeOf(foundFromDbg));
-                    return foundFromDbg;
-                  }
-                }
-                if (typeof mod.getComponent === 'function') {
-                  const comp = mod.getComponent(targetEl);
-                  if (isRcInstance(comp)) {
-                    window.__agyRemoteControlInstance = comp;
-                    hookRemoteControlPrototype(Object.getPrototypeOf(comp));
-                    return comp;
-                  }
-                }
-                const getLCtx = mod['\u0275getLContext'] || mod.getLContext;
-                if (typeof getLCtx === 'function') {
-                  const lCtx = getLCtx(targetEl);
-                  const foundFromLCtx = extractFromLContext(lCtx) || searchNgContext(lCtx?.lView || lCtx);
-                  if (foundFromLCtx) {
-                    window.__agyRemoteControlInstance = foundFromLCtx;
-                    hookRemoteControlPrototype(Object.getPrototypeOf(foundFromLCtx));
-                    return foundFromLCtx;
-                  }
-                }
-              } catch {}
-            }
-            const RC = mod.RemoteControlComponent || (typeof mod.prototype?.proxyCommand === 'function' ? mod : null);
-            if (RC && RC.prototype && typeof RC.prototype.proxyCommand === 'function') {
-              hookRemoteControlPrototype(RC.prototype);
-            }
-          }
-        }
-        if (window) window.__agyProbingRcInstance = true;
-        try {
-          const BaseEvt = window?.Event || (typeof Event !== 'undefined' ? Event : null);
-          if (!window?.__agyRemoteControlInstance && BaseEvt && typeof document?.dispatchEvent === 'function') {
-            document.dispatchEvent(new BaseEvt('visibilitychange'));
-          }
-          if (!window?.__agyRemoteControlInstance && BaseEvt && typeof window?.dispatchEvent === 'function') {
-            window.dispatchEvent(new BaseEvt('online'));
-          }
-          if (!window?.__agyRemoteControlInstance && typeof window?.dispatchEvent === 'function') {
-            const Evt = window.MessageEvent || (typeof MessageEvent !== 'undefined' ? MessageEvent : null);
-            if (Evt) {
-              const iframeEl = rcEl?.querySelector?.('iframe') || document?.querySelector?.('ga-remote-control iframe') || null;
-              const iframeWin = iframeEl?.contentWindow || null;
-              const rawIframeSrc = iframeEl?.getAttribute?.('src') || iframeEl?.src || '';
-              const candidateOrigins = [];
-              try {
-                if (rawIframeSrc) {
-                  candidateOrigins.push(new URL(rawIframeSrc, window.location?.href || 'https://antigravity.google.com').origin);
-                }
-              } catch {}
-              if (window.location?.origin && !candidateOrigins.includes(window.location.origin)) {
-                candidateOrigins.push(window.location.origin);
-              }
-              for (const cdnOrig of resolvedHostConfig.staticCdnOrigins) {
-                if (cdnOrig && !candidateOrigins.includes(cdnOrig)) {
-                  candidateOrigins.push(cdnOrig);
-                }
-              }
-              for (const orig of candidateOrigins) {
-                if (window.__agyRemoteControlInstance) break;
-                window.dispatchEvent(
-                  new Evt('message', {
-                    data: { type: 'URL_CHANGED', path: '' },
-                    origin: orig,
-                    source: iframeWin,
-                  })
-                );
-              }
-              if (!window.__agyRemoteControlInstance) {
-                window.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
-              }
-            }
-          }
-        } catch {} finally {
-          if (window) window.__agyProbingRcInstance = false;
-        }
-        return (window?.__agyRemoteControlInstance && !window.__agyRemoteControlInstance.destroyed)
-          ? window.__agyRemoteControlInstance
-          : null;
+        return runtimeLease.resolveInstance();
       }
       function createRcServiceAdapter(rcInst) {
         async function callJson(rpcPath, reqObj) {
@@ -3088,10 +4161,10 @@
           const payloadObj = /\/SendUserCascadeMessage$/i.test(rpcPath)
             ? injectCheckpointLimitIntoSendRequest(rpcPath, reqObj || {}, rcInst)
             : (reqObj || {});
-          const bytes = encodeTextToBytes(JSON.stringify(payloadObj));
+          const bytes = codec.encodeTextToBytes(JSON.stringify(payloadObj));
           const res = await rcInst.proxyCommand(rpcPath, bytes);
           if (!res || !res.payload) return null;
-          const text = decodeBytesToText(res.payload);
+          const text = codec.decodeBytesToText(res.payload);
           return text ? JSON.parse(text) : null;
         }
         return {
@@ -3137,16 +4210,64 @@
           },
         };
       }
-      function extractAnchoredMarkerBlock(bundleText, beginRe, endRe) {
-        if (!bundleText || typeof bundleText !== 'string') return '';
-        const bMatch = beginRe.exec(bundleText);
-        if (!bMatch) return '';
-        const startIdx = bMatch.index;
-        const afterStart = bundleText.slice(startIdx);
-        const eMatch = endRe.exec(afterStart);
-        if (!eMatch) return afterStart;
-        return afterStart.slice(0, eMatch.index + eMatch[0].length);
+      let desktopBridge = null;
+      function getRemoteRpcServiceForElement(el) {
+        if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
+          return hookLsClient(window.__agyCapturedLsClient);
+        }
+        const cwin = getAccessibleRemoteIframeWin();
+        if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
+          return hookLsClient(cwin.__agyCapturedLsClient);
+        }
+        const cdoc = getAccessibleRemoteIframeDoc();
+        const effBox = desktopBridge ? desktopBridge.resolveEffectiveInputBox(desktopBridge.resolveEffectiveView(el)) : el;
+        const candidates = [
+          effBox,
+          el,
+          document?.querySelector?.('[data-testid="conversation-view"]'),
+          cdoc?.querySelector?.('[data-testid="conversation-view"]'),
+        ].filter(Boolean);
+        for (const startEl of candidates) {
+          const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
+          let curr = fk ? startEl[fk] : null;
+          while (curr) {
+            const val = curr.memoizedProps?.value;
+            if (val && typeof val === 'object') {
+              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function' || typeof val.getCustomizationStates === 'function' || typeof val.readFile === 'function') {
+                return hookLsClient(val);
+              }
+              const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
+              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function' || typeof lsClient.getCustomizationStates === 'function' || typeof lsClient.readFile === 'function')) {
+                return hookLsClient(lsClient);
+              }
+            }
+            curr = curr.return;
+          }
+        }
+        const rcInst = getRemoteControlInstance();
+        if (rcInst && typeof rcInst.proxyCommand === 'function') {
+          return createRcServiceAdapter(rcInst);
+        }
+        try {
+          const parentWin = window?.parent !== window ? window?.parent : null;
+          const pRc = parentWin?.__agyRemoteControlInstance;
+          if (pRc && !pRc.destroyed && typeof pRc.proxyCommand === 'function') {
+            return createRcServiceAdapter(pRc);
+          }
+        } catch {}
+        return null;
       }
+      desktopBridge = createDesktopReactBridge({
+        window,
+        document,
+        localStorage,
+        cwStore,
+        ensureFetchHook,
+        getAccessibleRemoteIframeWin,
+        getAccessibleRemoteIframeDoc,
+        getRemoteRpcServiceForElement,
+        cleanupCallbacks,
+      });
       async function fetchHostInstalledPluginInfo(csrf, viewOrEl) {
         const svc = getRemoteRpcServiceForElement(viewOrEl);
         const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
@@ -3241,85 +4362,44 @@
         let hostBundleText = '';
         let readAttemptedAndFailed = false;
         if (geminiDir) {
+          const fsPath = `${geminiDir}/antigravity/statusbar_autoinject.js`;
           const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
-          const uri = `${uriPrefix}${geminiDir}/antigravity/statusbar_autoinject.js`;
-          const rf = await callRpc('readFile', resolvedHostConfig.buildRpcPath('ReadFile'), { uri });
-          const rfRaw = rf?.content !== undefined ? rf.content : rf?.contents;
+          const uri = `${uriPrefix}${fsPath}`;
+          const rf = await callRpc('readFile', resolvedHostConfig.buildRpcPath('ReadFile'), {
+            uri,
+            path: fsPath,
+            filePath: fsPath,
+            absolutePath: fsPath,
+          });
+          const rfRaw = rf?.content !== undefined ? rf.content : (rf?.contents !== undefined ? rf.contents : rf?.data);
           if (rf instanceof Uint8Array || ArrayBuffer.isView(rf) || rf instanceof ArrayBuffer) {
-            hostBundleText = decodeBytesToText(rf);
+            hostBundleText = codec.decodeBytesToText(rf);
           } else if (typeof rf === 'string' && rf.length > 0) {
             hostBundleText = rf;
+          } else if (typeof rf?.text === 'string' && rf.text.length > 0) {
+            hostBundleText = rf.text;
           } else if (rfRaw instanceof Uint8Array || ArrayBuffer.isView(rfRaw) || rfRaw instanceof ArrayBuffer) {
-            hostBundleText = decodeBytesToText(rfRaw);
+            hostBundleText = codec.decodeBytesToText(rfRaw);
           } else if (typeof rfRaw === 'string' && rfRaw.length > 0) {
-            hostBundleText = decodeBase64ToUtf8(rfRaw);
+            hostBundleText = codec.decodeBase64ToUtf8(rfRaw);
           }
           if (!hostBundleText) {
             readAttemptedAndFailed = true;
           }
         }
-        const mcpBeginStr = ['BEGIN_AGY_MCP', 'MANAGER'].join('_');
-        const mcpEndStr = ['END_AGY_MCP', 'MANAGER'].join('_');
-        const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER'].join('_');
-        const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER'].join('_');
-        const mcpBeginRe = new RegExp(`^(?:\\/\\/ === ${mcpBeginStr}(?:_V\\d+)? ===|\\/\\* === ${mcpBeginStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-        const mcpEndRe = new RegExp(`^(?:\\/\\/ === ${mcpEndStr}(?:_V\\d+)? ===|\\/\\* === ${mcpEndStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-        const koBeginRe = new RegExp(`^(?:\\/\\/ === ${koBeginStr}(?:_V\\d+)? ===|\\/\\* === ${koBeginStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-        const koEndRe = new RegExp(`^(?:\\/\\/ === ${koEndStr}(?:_V\\d+)? ===|\\/\\* === ${koEndStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-        const findAnchoredSpan = (text, beginRe, endRe) => {
-          beginRe.lastIndex = 0;
-          const bMatch = beginRe.exec(text);
-          if (!bMatch) return { start: -1, end: -1 };
-          const start = bMatch.index;
-          endRe.lastIndex = bMatch.index + bMatch[0].length;
-          let eMatch = endRe.exec(text);
-          if (!eMatch) return { start, end: -1 };
-          let end = eMatch.index + eMatch[0].length;
-          while (true) {
-            const afterEnd = text.slice(end);
-            const nlMatch = /^(?:\r?\n)+/.exec(afterEnd);
-            if (!nlMatch) break;
-            const nextLineIdx = end + nlMatch[0].length;
-            endRe.lastIndex = nextLineIdx;
-            const nextEnd = endRe.exec(text);
-            if (nextEnd && nextEnd.index === nextLineIdx) {
-              end = nextEnd.index + nextEnd[0].length;
-            } else {
-              break;
-            }
-          }
-          return { start, end };
-        };
-        const mcpSpan = findAnchoredSpan(hostBundleText, mcpBeginRe, mcpEndRe);
-        const koSpan = findAnchoredSpan(hostBundleText, koBeginRe, koEndRe);
-        const mcpB = mcpSpan.start;
-        const koB = koSpan.start;
-        const mcpManagerCode = mcpSpan.start !== -1 && mcpSpan.end > mcpSpan.start ? hostBundleText.slice(mcpSpan.start, mcpSpan.end).trim() : '';
-        const koTranslatorCode = koSpan.start !== -1 && koSpan.end > koSpan.start ? hostBundleText.slice(koSpan.start, koSpan.end).trim() : '';
-        const firstMarkerIdx = [mcpB, koB].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? hostBundleText.length;
-        const baseSegment = hostBundleText.slice(0, firstMarkerIdx).trim();
-        const sbFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'StatusBar'].join('')}\\s*\\(`, 'm');
-        const mcpFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'McpManager'].join('')}\\s*\\(`, 'm');
-        const hasStatusbarMarker = sbFuncRe.test(baseSegment);
-        const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
-        const hasKoMarker = Boolean(koTranslatorCode);
-        const hasStatusbar = hasStatusbarMarker || pluginNames.has('antigravity-statusbar');
-        const hasMcpManager = hasMcpMarker || pluginNames.has('antigravity-mcp-manager');
-        const hasKoTranslator = hasKoMarker || pluginNames.has('ko-thought-translator');
+        const manifest = parseAutoinjectCompanionManifest(hostBundleText, pluginNames);
         const resolved = Boolean(hostBundleText) || (!readAttemptedAndFailed && pluginNames.size > 0);
         return {
           resolved,
           geminiDir,
-          hasStatusbar,
-          hasMcpManager,
-          hasKoTranslator,
-          mcpManagerCode,
-          koTranslatorCode,
+          hasStatusbar: manifest.hasStatusbar,
+          hasMcpManager: manifest.hasMcpManager,
+          hasKoTranslator: manifest.hasKoTranslator,
+          mcpManagerCode: manifest.mcpManagerCode,
+          koTranslatorCode: manifest.koTranslatorCode,
           hostBundleText,
         };
       }
-      let lastDesktopTrajectorySyncTs = 0;
-      let desktopTrajectorySyncInFlight = false;
       async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {
         if (!cwStore || typeof cwStore.encodeRemoteAnnotationProfile !== 'function') return false;
         let targetIds = [];
@@ -3509,7 +4589,7 @@
         return hostView;
       }
       function getAgentStateProviderForInputBox(inputBox) {
-        const cc = getCascadeContextForElement(inputBox);
+        const cc = desktopBridge.getCascadeContextForElement(inputBox);
         if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
         const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
         const steps = cid && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cid] : undefined;
@@ -3527,422 +4607,18 @@
         }
         return null;
       }
-      function getRemoteRpcServiceForElement(el) {
-        if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-          return hookLsClient(window.__agyCapturedLsClient);
-        }
-        const cwin = getAccessibleRemoteIframeWin();
-        if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-          return hookLsClient(cwin.__agyCapturedLsClient);
-        }
-        const cdoc = getAccessibleRemoteIframeDoc();
-        const candidates = [
-          resolveEffectiveInputBox(resolveEffectiveView(el)),
-          el,
-          document?.querySelector?.('[data-testid="conversation-view"]'),
-          cdoc?.querySelector?.('[data-testid="conversation-view"]'),
-        ].filter(Boolean);
-        for (const startEl of candidates) {
-          const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
-          let curr = fk ? startEl[fk] : null;
-          while (curr) {
-            const val = curr.memoizedProps?.value;
-            if (val && typeof val === 'object') {
-              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function' || typeof val.getCustomizationStates === 'function' || typeof val.readFile === 'function') {
-                return hookLsClient(val);
-              }
-              const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
-              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function' || typeof lsClient.getCustomizationStates === 'function' || typeof lsClient.readFile === 'function')) {
-                return hookLsClient(lsClient);
-              }
-            }
-            curr = curr.return;
-          }
-        }
-        const rcInst = getRemoteControlInstance();
-        if (rcInst && typeof rcInst.proxyCommand === 'function') {
-          return createRcServiceAdapter(rcInst);
-        }
-        try {
-          const parentWin = window?.parent !== window ? window?.parent : null;
-          const pRc = parentWin?.__agyRemoteControlInstance;
-          if (pRc && !pRc.destroyed && typeof pRc.proxyCommand === 'function') {
-            return createRcServiceAdapter(pRc);
-          }
-        } catch {}
-        return null;
-      }
-      function getSelectedModelKey(view, cascadeId, infoOpt) {
-        const info = infoOpt || getModelSelectorContextForView(view);
-        const state = info?.reduxStore ? info.reduxStore.getState() : null;
-        const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
-        const sm = info?.msCtx?.selectedModel;
-        const raw =
-          byConvo?.model ??
-          (sm && typeof sm === 'object' ? (sm.value ?? sm.label) : sm) ??
-          state?.modelSelection?.default?.model ??
-          info?.legacyCtx?.getModelConfigForConversation?.(cascadeId)?.value ??
-          '';
-        return `${cascadeId || ''}:${String(raw ?? '')}`;
-      }
-      function extractModelValFromModelOrAlias(moa) {
-        if (!moa || typeof moa !== 'object') return undefined;
-        if (moa.model !== undefined) return moa.model;
-        if (moa.choice && (moa.choice.case === 'model' || moa.choice.case === 'alias') && moa.choice.value !== undefined) {
-          return moa.choice.value;
-        }
-        return undefined;
-      }
-      function resolveModelValueFromLabel(state, label) {
-        if (!label || typeof label !== 'string') return undefined;
-        const trimmed = label.trim();
-        if (!trimmed) return undefined;
-        const configs = state?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-        if (!Array.isArray(configs)) return undefined;
-        for (const cfg of configs) {
-          if (cfg && cfg.label === trimmed) {
-            const v = extractModelValFromModelOrAlias(cfg.modelOrAlias);
-            if (v !== undefined) return v;
-          }
-        }
-        return undefined;
-      }
-      function extractLabelFromSyncedKey(syncedKey) {
-        if (typeof syncedKey !== 'string' || !syncedKey) return undefined;
-        const parts = syncedKey.split(':');
-        if (parts.length >= 4) {
-          const label = parts.slice(2, parts.length - 1).join(':').trim();
-          if (label) return label;
-        }
-        if (parts.length === 3) {
-          const label = parts[1].trim();
-          if (label) return label;
-        }
-        return undefined;
-      }
-      function sanitizePoisonedModelSelection(reduxStore) {
-        if (!reduxStore || typeof reduxStore.getState !== 'function' || typeof reduxStore.dispatch !== 'function') {
-          return;
-        }
-        try {
-          if (reduxStore.__agyPoisonSanitizedV25) return;
-          const st = reduxStore.getState();
-          const ms = st?.modelSelection;
-          if (!ms || typeof ms !== 'object') return;
-          const syncMap = ms.trajectorySync;
-          const byConvoMap = ms.byConversation;
-          if (!syncMap || typeof syncMap !== 'object') return;
-          const overrideDefaultModel = extractModelValFromModelOrAlias(
-            st?.userStatus?.cascadeModelConfigData?.defaultOverrideModelConfig?.modelOrAlias
-          );
-          let cleanConvoModel = undefined;
-          for (const cid of Object.keys(syncMap)) {
-            const entry = syncMap[cid];
-            const step = entry?.pick?.atStep;
-            if (step === undefined || step === -1) {
-              const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-              const mVal = resolveModelValueFromLabel(st, syncedLabel);
-              if (mVal !== undefined) {
-                cleanConvoModel = mVal;
-                if (syncedLabel && /\(medium\)/i.test(syncedLabel)) break;
-              }
-            }
-          }
-          const preferredModel = overrideDefaultModel ?? cleanConvoModel;
-          if (preferredModel === undefined) return;
-          const poisonedCids = [];
-          let recoveredTargetModel = undefined;
-          for (const cid of Object.keys(syncMap)) {
-            const entry = syncMap[cid];
-            const step = entry?.pick?.atStep;
-            const hasSyncedKey = typeof entry?.syncedKey === 'string' && entry.syncedKey.length > 0;
-            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-            const isV24Relocked =
-              hasSyncedKey &&
-              (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined));
-            const isPoisoned = step === 999999 || isV24Relocked;
-            if (isPoisoned) {
-              poisonedCids.push(cid);
-              const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
-              if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
-                recoveredTargetModel = syncedModelVal;
-              }
-            }
-          }
-          if (poisonedCids.length === 0 && ms.default?.model === preferredModel) {
-            reduxStore.__agyPoisonSanitizedV25 = true;
-            return;
-          }
-          reduxStore.__agyPoisonSanitizedV25 = true;
-          const currentDefaultModel = ms.default?.model;
-          const currentDefaultCustomLabel = ms.default?.customLabel;
-          const desiredDefaultCw = cwStore?.hasExplicitDefaultCw?.()
-            ? cwStore.getDefaultCw()
-            : (ms.default?.contextWindow || '256K');
-          const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
-          for (const cid of poisonedCids) {
-            const entry = syncMap[cid];
-            const convo = byConvoMap?.[cid];
-            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-            const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
-            const targetModel =
-              syncedLabel && !/\(low\)/i.test(syncedLabel) && syncedModelVal !== undefined
-                ? syncedModelVal
-                : (preferredModel ?? syncedModelVal ?? safeDefaultModel ?? convo?.model);
-            const targetCw = cwStore?.getSavedContextWindow?.(cid) || convo?.contextWindow || desiredDefaultCw;
-            if (targetModel !== undefined) {
-              reduxStore.dispatch({
-                type: 'modelSelection/modelPicked',
-                payload: {
-                  conversationId: cid,
-                  model: targetModel,
-                  customLabel: undefined,
-                  contextWindow: targetCw,
-                  pick: { atStep: -1, queuedMessageIds: [] },
-                },
-              });
-            }
-          }
-          if (safeDefaultModel !== undefined) {
-            reduxStore.dispatch({
-              type: 'modelSelection/modelPicked',
-              payload: {
-                conversationId: undefined,
-                model: safeDefaultModel,
-                customLabel: safeDefaultModel === currentDefaultModel ? currentDefaultCustomLabel : undefined,
-                contextWindow: desiredDefaultCw,
-              },
-            });
-          }
-        } catch {}
-      }
-      function setTriggerCwAttribute(triggerEl, cwStr) {
-        if (!triggerEl || typeof triggerEl.setAttribute !== 'function') return;
-        const str = String(cwStr);
-        if (triggerEl.getAttribute('data-context-window') !== str) {
-          triggerEl.__agyInternalDomCw = str;
-          triggerEl.setAttribute('data-context-window', str);
-        }
-      }
-      function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
-        const targetCw = cwStore.normalize(rawTargetCw);
-        if (!view || !cascadeId || !targetCw) return false;
-        const info = getModelSelectorContextForView(view, targetCw);
-        if (!info) return false;
-        const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
-        if (reduxStore) {
-          sanitizePoisonedModelSelection(reduxStore);
-        }
-        if (triggerEl) {
-          const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
-          if (triggerEl.getAttribute('data-agy-cw-warn') !== warnAttr) {
-            triggerEl.setAttribute('data-agy-cw-warn', warnAttr);
-          }
-        }
-        const currentInDom = triggerEl ? cwStore.normalize(triggerEl.getAttribute('data-context-window')) : null;
-        const selectedModel = getSelectedModelKey(view, cascadeId, info);
-        const applyKey = (selectedModel || '') + ':' + String(targetCw);
-        window.__agyLastAppliedContextWindowByCascade = window.__agyLastAppliedContextWindowByCascade || {};
-        const lastAppliedForCascade = window.__agyLastAppliedContextWindowByCascade[cascadeId];
-        const initialState = reduxStore ? reduxStore.getState() : null;
-        const initialByConvo = initialState?.modelSelection?.byConversation?.[cascadeId];
-        const defaultReduxCw = cwStore.normalize(initialState?.modelSelection?.default?.contextWindow) || '256K';
-        const effectiveInitialReduxCw = cwStore.normalize(initialByConvo?.contextWindow) || defaultReduxCw;
-        const reduxAlreadyMatches = !reduxStore || effectiveInitialReduxCw === targetCw;
-        if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
-          window.__agyLastAppliedContextWindow = applyKey;
-          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-          setTriggerCwAttribute(triggerEl, targetCw);
-          return true;
-        }
-        if (msCtx || reduxStore) {
-          const state = initialState;
-          const byConvo = initialByConvo;
-          const currentInRedux = reduxStore
-            ? effectiveInitialReduxCw
-            : (cwStore.normalize(msCtx?.contextWindow?.selected) || currentInDom || '256K');
-          const selectedModelObj = msCtx?.selectedModel;
-          if (selectedModelObj) {
-            ensureModelContextWindowOptions(selectedModelObj, targetCw);
-          }
-          let dispatched = false;
-          if (currentInRedux !== targetCw || force) {
-            const prevDefault = state?.modelSelection?.default;
-            const prevDefaultModel = prevDefault?.model;
-            const prevDefaultCustomLabel = prevDefault?.customLabel;
-            const prevDefaultCw = prevDefault?.contextWindow;
-            if (reduxStore) {
-              const syncEntry = state?.modelSelection?.trajectorySync?.[cascadeId];
-              const syncedModelVal =
-                syncEntry?.pick?.atStep === 999999
-                  ? resolveModelValueFromLabel(state, extractLabelFromSyncedKey(syncEntry?.syncedKey))
-                  : undefined;
-              const modelVal = syncedModelVal ?? byConvo?.model ?? selectedModelObj?.value ?? prevDefaultModel;
-              const isCustomModel = Boolean(selectedModelObj?.isCustom && selectedModelObj?.value === modelVal);
-              const customLabel = isCustomModel ? selectedModelObj?.label : undefined;
-              if (modelVal !== undefined) {
-                reduxStore.dispatch({
-                  type: 'modelSelection/modelPicked',
-                  payload: {
-                    conversationId: cascadeId,
-                    model: modelVal,
-                    customLabel,
-                    contextWindow: targetCw,
-                  },
-                });
-                dispatched = true;
-              }
-            } else if (msCtx?.contextWindow && typeof msCtx.contextWindow.select === 'function' && selectedModelObj) {
-              msCtx.contextWindow.select(selectedModelObj, targetCw);
-              dispatched = true;
-            } else if (typeof setSelectedModelWithCw === 'function' && selectedModelObj) {
-              setSelectedModelWithCw(selectedModelObj, targetCw);
-              dispatched = true;
-            } else if (typeof msCtx?.setSelectedModel === 'function' && selectedModelObj) {
-              msCtx.setSelectedModel(selectedModelObj, targetCw);
-              dispatched = true;
-            }
-            if (dispatched && reduxStore) {
-              const nextState = reduxStore.getState();
-              const defObj = nextState?.modelSelection?.default;
-              const desiredDefaultCw =
-                prevDefaultCw !== undefined
-                  ? prevDefaultCw
-                  : (cwStore.hasExplicitDefaultCw?.() ? cwStore.getDefaultCw() : '256K');
-              const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
-              const desiredDefaultCustomLabel =
-                prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
-              const defCwNormalized = cwStore.normalize(defObj?.contextWindow) || '256K';
-              const desiredCwNormalized = cwStore.normalize(desiredDefaultCw) || '256K';
-              if (
-                defObj &&
-                (defObj.model !== desiredDefaultModel ||
-                  defObj.customLabel !== desiredDefaultCustomLabel ||
-                  defCwNormalized !== desiredCwNormalized)
-              ) {
-                reduxStore.dispatch({
-                  type: 'modelSelection/modelPicked',
-                  payload: {
-                    conversationId: undefined,
-                    model: desiredDefaultModel,
-                    customLabel: desiredDefaultCustomLabel,
-                    contextWindow: desiredDefaultCw,
-                  },
-                });
-              }
-            }
-          }
-          if (dispatched || currentInRedux === targetCw) {
-            window.__agyLastAppliedContextWindow = applyKey;
-            setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-            setTriggerCwAttribute(triggerEl, targetCw);
-            return true;
-          }
-          return false;
-        }
-        if (legacyCtx) {
-          const modelCfg = legacyCtx.getModelConfigForConversation(cascadeId);
-          if (!modelCfg || modelCfg.value === undefined) return false;
-          const currentInEngine = legacyCtx.getContextWindowForConversation(cascadeId) || '256K';
-          if (currentInEngine !== targetCw || force) {
-            if (currentInEngine === targetCw && currentInDom !== targetCw) {
-              const tempCw = targetCw === '256K' ? '512K' : '256K';
-              legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, tempCw);
-            }
-            legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, targetCw);
-          }
-          window.__agyLastAppliedContextWindow = applyKey;
-          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-          setTriggerCwAttribute(triggerEl, targetCw);
-          return true;
-        }
-        return false;
-      }
-      async function runCompactForInputBox(inputBox) {
-        const effBox = resolveEffectiveInputBox(inputBox);
-        if (!effBox) return;
-        const editable = effBox.querySelector('[contenteditable="true"]');
-        if (!editable || !editable.__lexicalEditor) {
-          const svc = getRemoteRpcServiceForElement(effBox);
-          const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id') || effBox.closest?.('[data-cascade-id]')?.getAttribute?.('data-cascade-id');
-          if (svc && typeof svc.sendUserCascadeMessage === 'function' && cid && cid !== 'remote-session') {
-            try {
-              await svc.sendUserCascadeMessage({
-                cascadeId: cid,
-                items: [
-                  {
-                    item: {
-                      slashCommand: {
-                        info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
-                      },
-                    },
-                  },
-                  {
-                    text: ' ' + COMPACT_ARGS,
-                  },
-                ],
-              });
-            } catch {}
-          }
-          return;
-        }
-        const ed = editable.__lexicalEditor;
-        const PClass = ed._nodes.get('paragraph')?.klass;
-        const MClass = ed._nodes.get('contextScopeItemMention')?.klass;
-        const TClass = ed._nodes.get('text')?.klass;
-        if (!PClass || !MClass || !TClass) return;
-        ed.update(() => {
-          const root = ed.getEditorState()._nodeMap.get('root').getWritable();
-          root.clear();
-          const p = PClass.importJSON({
-            direction: null, format: '', indent: 0, type: 'paragraph', version: 1, textFormat: 0, textStyle: '',
-          });
-          const mention = MClass.importJSON({
-            trigger: '@',
-            value: 'contextScopeItemMention',
-            data: {
-              mentionText: 'compact',
-              data: JSON.stringify({
-                slashCommand: {
-                  info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
-                },
-              }),
-            },
-            type: 'contextScopeItemMention',
-            version: 1,
-          });
-          const text = TClass.importJSON({
-            detail: 0, format: 0, mode: 'normal', style: '', text: ' ' + COMPACT_ARGS, type: 'text', version: 1,
-          });
-          p.append(mention, text);
-          root.append(p);
-        });
-        await new Promise((r) => setTimeout(r, 60));
-        const fiberKey = Object.keys(editable).find((k) => k.startsWith('__reactFiber$'));
-        let curr = fiberKey ? editable[fiberKey] : null;
-        while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter !== 'function')) {
-          curr = curr.return;
-        }
-        if (curr && curr.memoizedProps && typeof curr.memoizedProps.handleEnter === 'function') {
-          const Evt = typeof KeyboardEvent === 'function' ? KeyboardEvent : function (t, o) { Object.assign(this, o, { type: t }); };
-          await curr.memoizedProps.handleEnter(new Evt('keydown', { key: 'Enter' }), ed);
-        } else {
-          const sendBtn = effBox.querySelector('[data-testid="send-button"]');
-          if (sendBtn && !sendBtn.disabled) sendBtn.click();
-        }
-      }
       return {
-        ensureContextWindowSelectorFlag,
-        ensureCustomizationsStoreLoaded,
+        ensureContextWindowSelectorFlag: desktopBridge.ensureContextWindowSelectorFlag,
+        ensureCustomizationsStoreLoaded: desktopBridge.ensureCustomizationsStoreLoaded,
         ensureRemoteHostView,
         getRemoteControlInstance,
-        getModelSelectorContextForView,
-        getCascadeContextForElement,
+        getModelSelectorContextForView: desktopBridge.getModelSelectorContextForView,
+        getCascadeContextForElement: desktopBridge.getCascadeContextForElement,
         getAgentStateProviderForInputBox,
         getRemoteRpcServiceForElement,
-        getSelectedModelKey,
-        applyContextWindowToEngine,
-        runCompactForInputBox,
+        getSelectedModelKey: desktopBridge.getSelectedModelKey,
+        applyContextWindowToEngine: desktopBridge.applyContextWindowToEngine,
+        runCompactForInputBox: desktopBridge.runCompactForInputBox,
         pushSessionCwToServer,
         pullAndBackfillTrajectorySummaries,
         syncDesktopAnnotations,
@@ -4899,13 +5575,17 @@
     const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
     const { resolveHostAdapterConfig } = require('./host-adapter-config');
     const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
+    const {
+      disposeCompanionPolicyController,
+      ensureRemoteCompanionScripts,
+    } = require('./companion-loader');
     const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
     const { createRpcClient } = require('./rpc-client');
     const { createAdapterRegistry } = require('./adapter-registry');
     const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
     const { createCompactButtonAdapter } = require('./adapters/compact-button');
     const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v32';
+    const STATUSBAR_VERSION = 'v34';
     function isIgnoredCustomOrTranslatedNode(node) {
       let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
       while (cur && cur.nodeType === 1) {
@@ -4913,6 +5593,7 @@
         if (
           id === 'agy-ctx-debug-modal' ||
           id === 'agy-ctx-statusbar-style' ||
+          id === 'agy-mcp-remote-launcher' ||
           id === 'agy-mcp-manager-modal-backdrop' ||
           id === 'agy-mcp-edit-popup-backdrop' ||
           id === 'agy-mcp-oauth-connect-backdrop' ||
@@ -5013,339 +5694,6 @@
         }
       }
       return false;
-    }
-    const OFFICIAL_COMPANION_URLS = Object.freeze([
-      'https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js',
-      'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
-      'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
-    ]);
-    const companionPolicyControllers = typeof WeakMap === 'function' ? new WeakMap() : null;
-    function isAllowedStatusBarScriptUrl(rawUrl, resolvedHostConfig) {
-      let parsed;
-      try {
-        parsed = new URL(String(rawUrl));
-      } catch {
-        return false;
-      }
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname.includes('..')) {
-        return false;
-      }
-      const candidateUrls = [
-        ...OFFICIAL_COMPANION_URLS,
-        ...Object.values(resolvedHostConfig?.companionScripts || {}),
-      ];
-      for (const cand of candidateUrls) {
-        if (!cand) continue;
-        try {
-          const cu = new URL(String(cand));
-          if (cu.protocol === 'https:' && parsed.origin === cu.origin && parsed.pathname === cu.pathname) {
-            return true;
-          }
-        } catch {}
-      }
-      if (/\/(?:prism_bundle|main)\.js$/.test(parsed.pathname)) {
-        const cdnBase = String(resolvedHostConfig?.cdnOrigin || 'https://www.gstatic.com/antigravity').replace(/\/+$/, '');
-        try {
-          const cdnUrl = new URL(cdnBase);
-          if (
-            cdnUrl.protocol === 'https:' &&
-            parsed.origin === cdnUrl.origin &&
-            (cdnUrl.pathname === '/' || parsed.pathname.startsWith(`${cdnUrl.pathname}/`))
-          ) {
-            return true;
-          }
-        } catch {}
-        for (const staticOrig of resolvedHostConfig?.staticCdnOrigins || []) {
-          try {
-            const su = new URL(String(staticOrig));
-            if (su.protocol === 'https:' && parsed.origin === su.origin) {
-              return true;
-            }
-          } catch {}
-        }
-        if (resolvedHostConfig?.isRemoteHost?.(parsed.hostname)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
-      if (!win || typeof win !== 'object') return null;
-      if (companionPolicyControllers && companionPolicyControllers.has(win)) {
-        const existing = companionPolicyControllers.get(win);
-        existing.updateHostConfig(resolvedHostConfig);
-        return existing;
-      }
-      let latestHostConfig = resolvedHostConfig;
-      const allowedInlineScripts = new Set();
-      const allowedBlobUrls = new Set();
-      let policy = null;
-      if (win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-        const names = [
-          'agy-statusbar',
-          'agy-statusbar-companion',
-          'agy-statusbar-' + Date.now(),
-        ];
-        for (const name of names) {
-          try {
-            const created = win.trustedTypes.createPolicy(name, {
-              createScript: (s) => {
-                const code = String(s ?? '');
-                if (allowedInlineScripts.has(code)) return code;
-                throw new TypeError('Untrusted inline script rejected by TrustedTypes policy');
-              },
-              createScriptURL: (u) => {
-                const raw = String(u ?? '');
-                if (raw.startsWith('blob:')) {
-                  if (allowedBlobUrls.has(raw)) return raw;
-                  throw new TypeError('Untrusted blob script URL rejected by TrustedTypes policy');
-                }
-                if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
-                  return raw;
-                }
-                throw new TypeError('Untrusted script URL rejected by TrustedTypes policy');
-              },
-            });
-            if (created) {
-              policy = created;
-              break;
-            }
-          } catch {}
-        }
-      }
-      const ctrl = {
-        updateHostConfig(nextCfg) {
-          if (nextCfg) latestHostConfig = nextCfg;
-        },
-        allowInline(code) {
-          allowedInlineScripts.add(String(code ?? ''));
-        },
-        revokeInline(code) {
-          allowedInlineScripts.delete(String(code ?? ''));
-        },
-        allowBlob(blobUrl) {
-          allowedBlobUrls.add(String(blobUrl ?? ''));
-        },
-        revokeBlob(blobUrl) {
-          allowedBlobUrls.delete(String(blobUrl ?? ''));
-        },
-        toScript(code) {
-          if (policy && typeof policy.createScript === 'function') {
-            return policy.createScript(code);
-          }
-          if (!allowedInlineScripts.has(String(code ?? ''))) {
-            throw new TypeError('Untrusted inline script rejected');
-          }
-          return code;
-        },
-        toScriptURL(rawUrl) {
-          if (policy && typeof policy.createScriptURL === 'function') {
-            return policy.createScriptURL(rawUrl);
-          }
-          const raw = String(rawUrl ?? '');
-          if (raw.startsWith('blob:')) {
-            if (allowedBlobUrls.has(raw)) return raw;
-            throw new TypeError('Untrusted blob script URL rejected');
-          }
-          if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
-            return raw;
-          }
-          throw new TypeError('Untrusted script URL rejected');
-        },
-      };
-      if (policy && companionPolicyControllers) {
-        companionPolicyControllers.set(win, ctrl);
-      }
-      return ctrl;
-    }
-    function getScriptNonce(doc) {
-      const nonceEl = doc?.querySelector?.('script[nonce]');
-      return nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '' : '';
-    }
-    function appendScriptSrcAsync(win, doc, rawUrl, policyCtrl, onDoneCleanup) {
-      return new Promise((resolve) => {
-        try {
-          const s = doc.createElement('script');
-          const nonce = getScriptNonce(doc);
-          if (nonce) s.nonce = nonce;
-          s.src = policyCtrl ? policyCtrl.toScriptURL(rawUrl) : rawUrl;
-          if (typeof s.addEventListener !== 'function') {
-            doc.head.appendChild(s);
-            if (typeof onDoneCleanup === 'function') onDoneCleanup();
-            resolve(true);
-            return;
-          }
-          let settled = false;
-          const setTimeoutFn = win?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-          const clearTimeoutFn = win?.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
-          let timer = null;
-          const finish = (ok) => {
-            if (settled) return;
-            settled = true;
-            if (timer && clearTimeoutFn) {
-              try { clearTimeoutFn(timer); } catch {}
-            }
-            if (typeof onDoneCleanup === 'function') {
-              try { onDoneCleanup(); } catch {}
-            }
-            resolve(ok);
-          };
-          s.addEventListener('load', () => finish(true), { once: true });
-          s.addEventListener('error', () => finish(false), { once: true });
-          if (setTimeoutFn) {
-            timer = setTimeoutFn(() => finish(false), 4000);
-            if (timer && typeof timer.unref === 'function') timer.unref();
-          }
-          doc.head.appendChild(s);
-        } catch {
-          if (typeof onDoneCleanup === 'function') {
-            try { onDoneCleanup(); } catch {}
-          }
-          resolve(false);
-        }
-      });
-    }
-    async function injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, checkLoaded) {
-      const isLoaded = typeof checkLoaded === 'function' ? checkLoaded : () => false;
-      if (code && doc?.head) {
-        try {
-          const s = doc.createElement('script');
-          const nonce = getScriptNonce(doc);
-          if (nonce) s.nonce = nonce;
-          policyCtrl?.allowInline(code);
-          try {
-            s.text = policyCtrl ? policyCtrl.toScript(code) : code;
-            doc.head.appendChild(s);
-          } finally {
-            policyCtrl?.revokeInline(code);
-          }
-          if (isLoaded() || typeof s.addEventListener !== 'function') {
-            return true;
-          }
-        } catch {}
-        try {
-          const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
-          const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
-          if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
-            const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
-            policyCtrl?.allowBlob(blobUrl);
-            const revoke = () => {
-              policyCtrl?.revokeBlob(blobUrl);
-              try { UrlApi.revokeObjectURL(blobUrl); } catch {}
-            };
-            const blobOk = await appendScriptSrcAsync(win, doc, blobUrl, policyCtrl, revoke);
-            if (blobOk && (isLoaded() || typeof doc.createElement('script')?.addEventListener !== 'function')) {
-              return true;
-            }
-          }
-        } catch {}
-      }
-      if (url && doc?.head) {
-        const sep = url.includes('?') ? '&' : '?';
-        const remoteUrl = `${url}${sep}t=${Date.now()}`;
-        const remoteOk = await appendScriptSrcAsync(win, doc, remoteUrl, policyCtrl, null);
-        if (remoteOk) {
-          return true;
-        }
-      }
-      return false;
-    }
-    function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
-      try {
-        const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
-        const isRemoteWeb = resolvedHostConfig.isRemoteHost(win?.location?.hostname);
-        if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
-        const effFetch = fetchFn || win?.fetch;
-        const loadScript = async (flagKey, url, fallbackCode, checkLoaded) => {
-          if (win[flagKey]) return false;
-          win[flagKey] = true;
-          const policyCtrl = getOrCreateCompanionPolicyController(win, resolvedHostConfig);
-          try {
-            if (fallbackCode) {
-              const ok = await injectCompanionCodeOrUrl(win, doc, fallbackCode, url, policyCtrl, checkLoaded);
-              if (!ok) win[flagKey] = false;
-              return ok;
-            }
-            if (typeof effFetch === 'function' && url) {
-              const sep = url.includes('?') ? '&' : '?';
-              const r = await Promise.resolve(effFetch(`${url}${sep}t=${Date.now()}`)).catch(() => null);
-              const code = r && r.ok !== false && typeof r.text === 'function' ? await r.text() : '';
-              if (code) {
-                const ok = await injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, checkLoaded);
-                if (!ok) win[flagKey] = false;
-                return ok;
-              }
-            }
-            if (url) {
-              const ok = await injectCompanionCodeOrUrl(win, doc, '', url, policyCtrl, checkLoaded);
-              if (!ok) win[flagKey] = false;
-              return ok;
-            }
-            win[flagKey] = false;
-            return false;
-          } catch {
-            win[flagKey] = false;
-            return false;
-          }
-        };
-        const resolveHostInfo = async () => {
-          if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
-            return { resolved: true, ...win.__agyHostInstalledPlugins };
-          }
-          if (hostBridge && typeof hostBridge.fetchHostInstalledPluginInfo === 'function') {
-            const info = await hostBridge.fetchHostInstalledPluginInfo(
-              win.__APP_CONFIG__?.csrfToken,
-              doc.querySelector?.('[data-testid="conversation-view"]')
-            );
-            if (info && info.resolved) {
-              win.__agyHostInstalledPlugins = info;
-              return info;
-            }
-          }
-          return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
-        };
-        let attempts = 0;
-        const tryLoadInstalledCompanions = async () => {
-          attempts += 1;
-          const info = await resolveHostInfo();
-          if (!info.resolved) {
-            if (attempts < 5) {
-              const setTimeoutFn = win.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-              if (setTimeoutFn) {
-                const t = setTimeoutFn(tryLoadInstalledCompanions, 1500);
-                if (t && typeof t.unref === 'function') t.unref();
-              }
-            }
-            return info;
-          }
-          const tasks = [];
-          if (info.hasMcpManager && !win.agyMcpManager) {
-            tasks.push(
-              loadScript(
-                '__agyLoadingMcpManagerCompanion',
-                resolvedHostConfig.companionScripts.mcpManagerUrl,
-                info.mcpManagerCode,
-                () => Boolean(win.agyMcpManager)
-              )
-            );
-          }
-          if (info.hasKoTranslator && !win.__agyKoLocalizerActive && !win.__agyKoThoughtCleanup) {
-            tasks.push(
-              loadScript(
-                '__agyLoadingKoTranslatorCompanion',
-                resolvedHostConfig.companionScripts.koTranslatorUrl,
-                info.koTranslatorCode,
-                () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
-              )
-            );
-          }
-          await Promise.all(tasks);
-          return info;
-        };
-        return tryLoadInstalledCompanions();
-      } catch {
-        return Promise.resolve(null);
-      }
     }
     function mountStatusBar(env = {}) {
       const win = env.window || (typeof window !== 'undefined' ? window : null);
@@ -5685,15 +6033,14 @@
           delete win.__agyHostInstalledPlugins;
           delete win.__agyLoadingMcpManagerCompanion;
           delete win.__agyLoadingKoTranslatorCompanion;
+          delete win.__agyLoadingKoThoughtCompanion;
           delete win.__agyRcGenLenByCascade;
           delete win.__agyRcStepCountByCascade;
           delete win.__agyLastAppliedContextWindow;
           delete win.__agyLastAppliedContextWindowByCascade;
           delete win.__agySniffedCascadeId;
           delete win.__agySniffedCascadeTs;
-          if (companionPolicyControllers) {
-            companionPolicyControllers.delete(win);
-          }
+          disposeCompanionPolicyController(win);
           if (!win.agyMcpManager) {
             delete win.__agyCapturedLsClient;
             delete win.__agyRemoteControlInstance;

@@ -3,6 +3,10 @@
 const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
 const { resolveHostAdapterConfig } = require('./host-adapter-config');
 const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
+const {
+  disposeCompanionPolicyController,
+  ensureRemoteCompanionScripts,
+} = require('./companion-loader');
 const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
 const { createRpcClient } = require('./rpc-client');
 const { createAdapterRegistry } = require('./adapter-registry');
@@ -10,7 +14,7 @@ const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
 const { createCompactButtonAdapter } = require('./adapters/compact-button');
 const { createContextButtonAdapter } = require('./adapters/context-button');
 
-const STATUSBAR_VERSION = 'v32';
+const STATUSBAR_VERSION = 'v34';
 
 function isIgnoredCustomOrTranslatedNode(node) {
   let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
@@ -19,6 +23,7 @@ function isIgnoredCustomOrTranslatedNode(node) {
     if (
       id === 'agy-ctx-debug-modal' ||
       id === 'agy-ctx-statusbar-style' ||
+      id === 'agy-mcp-remote-launcher' ||
       id === 'agy-mcp-manager-modal-backdrop' ||
       id === 'agy-mcp-edit-popup-backdrop' ||
       id === 'agy-mcp-oauth-connect-backdrop' ||
@@ -121,354 +126,6 @@ function isRelevantStatusBarMutation(mutations) {
     }
   }
   return false;
-}
-
-const OFFICIAL_COMPANION_URLS = Object.freeze([
-  'https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js',
-  'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
-  'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
-]);
-
-const companionPolicyControllers = typeof WeakMap === 'function' ? new WeakMap() : null;
-
-function isAllowedStatusBarScriptUrl(rawUrl, resolvedHostConfig) {
-  let parsed;
-  try {
-    parsed = new URL(String(rawUrl));
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname.includes('..')) {
-    return false;
-  }
-  const candidateUrls = [
-    ...OFFICIAL_COMPANION_URLS,
-    ...Object.values(resolvedHostConfig?.companionScripts || {}),
-  ];
-  for (const cand of candidateUrls) {
-    if (!cand) continue;
-    try {
-      const cu = new URL(String(cand));
-      if (cu.protocol === 'https:' && parsed.origin === cu.origin && parsed.pathname === cu.pathname) {
-        return true;
-      }
-    } catch {}
-  }
-  if (/\/(?:prism_bundle|main)\.js$/.test(parsed.pathname)) {
-    const cdnBase = String(resolvedHostConfig?.cdnOrigin || 'https://www.gstatic.com/antigravity').replace(/\/+$/, '');
-    try {
-      const cdnUrl = new URL(cdnBase);
-      if (
-        cdnUrl.protocol === 'https:' &&
-        parsed.origin === cdnUrl.origin &&
-        (cdnUrl.pathname === '/' || parsed.pathname.startsWith(`${cdnUrl.pathname}/`))
-      ) {
-        return true;
-      }
-    } catch {}
-    for (const staticOrig of resolvedHostConfig?.staticCdnOrigins || []) {
-      try {
-        const su = new URL(String(staticOrig));
-        if (su.protocol === 'https:' && parsed.origin === su.origin) {
-          return true;
-        }
-      } catch {}
-    }
-    if (resolvedHostConfig?.isRemoteHost?.(parsed.hostname)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
-  if (!win || typeof win !== 'object') return null;
-  if (companionPolicyControllers && companionPolicyControllers.has(win)) {
-    const existing = companionPolicyControllers.get(win);
-    existing.updateHostConfig(resolvedHostConfig);
-    return existing;
-  }
-  let latestHostConfig = resolvedHostConfig;
-  const allowedInlineScripts = new Set();
-  const allowedBlobUrls = new Set();
-  let policy = null;
-  if (win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-    const names = [
-      'agy-statusbar',
-      'agy-statusbar-companion',
-      'agy-statusbar-' + Date.now(),
-    ];
-    for (const name of names) {
-      try {
-        const created = win.trustedTypes.createPolicy(name, {
-          createScript: (s) => {
-            const code = String(s ?? '');
-            if (allowedInlineScripts.has(code)) return code;
-            throw new TypeError('Untrusted inline script rejected by TrustedTypes policy');
-          },
-          createScriptURL: (u) => {
-            const raw = String(u ?? '');
-            if (raw.startsWith('blob:')) {
-              if (allowedBlobUrls.has(raw)) return raw;
-              throw new TypeError('Untrusted blob script URL rejected by TrustedTypes policy');
-            }
-            if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
-              return raw;
-            }
-            throw new TypeError('Untrusted script URL rejected by TrustedTypes policy');
-          },
-        });
-        if (created) {
-          policy = created;
-          break;
-        }
-      } catch {}
-    }
-  }
-  const ctrl = {
-    updateHostConfig(nextCfg) {
-      if (nextCfg) latestHostConfig = nextCfg;
-    },
-    allowInline(code) {
-      allowedInlineScripts.add(String(code ?? ''));
-    },
-    revokeInline(code) {
-      allowedInlineScripts.delete(String(code ?? ''));
-    },
-    allowBlob(blobUrl) {
-      allowedBlobUrls.add(String(blobUrl ?? ''));
-    },
-    revokeBlob(blobUrl) {
-      allowedBlobUrls.delete(String(blobUrl ?? ''));
-    },
-    toScript(code) {
-      if (policy && typeof policy.createScript === 'function') {
-        return policy.createScript(code);
-      }
-      if (!allowedInlineScripts.has(String(code ?? ''))) {
-        throw new TypeError('Untrusted inline script rejected');
-      }
-      return code;
-    },
-    toScriptURL(rawUrl) {
-      if (policy && typeof policy.createScriptURL === 'function') {
-        return policy.createScriptURL(rawUrl);
-      }
-      const raw = String(rawUrl ?? '');
-      if (raw.startsWith('blob:')) {
-        if (allowedBlobUrls.has(raw)) return raw;
-        throw new TypeError('Untrusted blob script URL rejected');
-      }
-      if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
-        return raw;
-      }
-      throw new TypeError('Untrusted script URL rejected');
-    },
-  };
-  if (policy && companionPolicyControllers) {
-    companionPolicyControllers.set(win, ctrl);
-  }
-  return ctrl;
-}
-
-function getScriptNonce(doc) {
-  const nonceEl = doc?.querySelector?.('script[nonce]');
-  return nonceEl ? nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '' : '';
-}
-
-function appendScriptSrcAsync(win, doc, rawUrl, policyCtrl, onDoneCleanup) {
-  return new Promise((resolve) => {
-    try {
-      const s = doc.createElement('script');
-      const nonce = getScriptNonce(doc);
-      if (nonce) s.nonce = nonce;
-      s.src = policyCtrl ? policyCtrl.toScriptURL(rawUrl) : rawUrl;
-      if (typeof s.addEventListener !== 'function') {
-        doc.head.appendChild(s);
-        if (typeof onDoneCleanup === 'function') onDoneCleanup();
-        resolve(true);
-        return;
-      }
-      let settled = false;
-      const setTimeoutFn = win?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-      const clearTimeoutFn = win?.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
-      let timer = null;
-      const finish = (ok) => {
-        if (settled) return;
-        settled = true;
-        if (timer && clearTimeoutFn) {
-          try { clearTimeoutFn(timer); } catch {}
-        }
-        if (typeof onDoneCleanup === 'function') {
-          try { onDoneCleanup(); } catch {}
-        }
-        resolve(ok);
-      };
-      s.addEventListener('load', () => finish(true), { once: true });
-      s.addEventListener('error', () => finish(false), { once: true });
-      if (setTimeoutFn) {
-        timer = setTimeoutFn(() => finish(false), 4000);
-        if (timer && typeof timer.unref === 'function') timer.unref();
-      }
-      doc.head.appendChild(s);
-    } catch {
-      if (typeof onDoneCleanup === 'function') {
-        try { onDoneCleanup(); } catch {}
-      }
-      resolve(false);
-    }
-  });
-}
-
-async function injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, checkLoaded) {
-  const isLoaded = typeof checkLoaded === 'function' ? checkLoaded : () => false;
-  if (code && doc?.head) {
-    try {
-      const s = doc.createElement('script');
-      const nonce = getScriptNonce(doc);
-      if (nonce) s.nonce = nonce;
-      policyCtrl?.allowInline(code);
-      try {
-        s.text = policyCtrl ? policyCtrl.toScript(code) : code;
-        doc.head.appendChild(s);
-      } finally {
-        policyCtrl?.revokeInline(code);
-      }
-      if (isLoaded() || typeof s.addEventListener !== 'function') {
-        return true;
-      }
-    } catch {}
-
-    try {
-      const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
-      const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
-      if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
-        const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
-        policyCtrl?.allowBlob(blobUrl);
-        const revoke = () => {
-          policyCtrl?.revokeBlob(blobUrl);
-          try { UrlApi.revokeObjectURL(blobUrl); } catch {}
-        };
-        const blobOk = await appendScriptSrcAsync(win, doc, blobUrl, policyCtrl, revoke);
-        if (blobOk && (isLoaded() || typeof doc.createElement('script')?.addEventListener !== 'function')) {
-          return true;
-        }
-      }
-    } catch {}
-  }
-
-  if (url && doc?.head) {
-    const sep = url.includes('?') ? '&' : '?';
-    const remoteUrl = `${url}${sep}t=${Date.now()}`;
-    const remoteOk = await appendScriptSrcAsync(win, doc, remoteUrl, policyCtrl, null);
-    if (remoteOk) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
-  try {
-    const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
-    const isRemoteWeb = resolvedHostConfig.isRemoteHost(win?.location?.hostname);
-    if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
-    const effFetch = fetchFn || win?.fetch;
-
-    const loadScript = async (flagKey, url, fallbackCode, checkLoaded) => {
-      if (win[flagKey]) return false;
-      win[flagKey] = true;
-      const policyCtrl = getOrCreateCompanionPolicyController(win, resolvedHostConfig);
-      try {
-        if (fallbackCode) {
-          const ok = await injectCompanionCodeOrUrl(win, doc, fallbackCode, url, policyCtrl, checkLoaded);
-          if (!ok) win[flagKey] = false;
-          return ok;
-        }
-        if (typeof effFetch === 'function' && url) {
-          const sep = url.includes('?') ? '&' : '?';
-          const r = await Promise.resolve(effFetch(`${url}${sep}t=${Date.now()}`)).catch(() => null);
-          const code = r && r.ok !== false && typeof r.text === 'function' ? await r.text() : '';
-          if (code) {
-            const ok = await injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, checkLoaded);
-            if (!ok) win[flagKey] = false;
-            return ok;
-          }
-        }
-        if (url) {
-          const ok = await injectCompanionCodeOrUrl(win, doc, '', url, policyCtrl, checkLoaded);
-          if (!ok) win[flagKey] = false;
-          return ok;
-        }
-        win[flagKey] = false;
-        return false;
-      } catch {
-        win[flagKey] = false;
-        return false;
-      }
-    };
-
-    const resolveHostInfo = async () => {
-      if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
-        return { resolved: true, ...win.__agyHostInstalledPlugins };
-      }
-      if (hostBridge && typeof hostBridge.fetchHostInstalledPluginInfo === 'function') {
-        const info = await hostBridge.fetchHostInstalledPluginInfo(
-          win.__APP_CONFIG__?.csrfToken,
-          doc.querySelector?.('[data-testid="conversation-view"]')
-        );
-        if (info && info.resolved) {
-          win.__agyHostInstalledPlugins = info;
-          return info;
-        }
-      }
-      return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
-    };
-
-    let attempts = 0;
-    const tryLoadInstalledCompanions = async () => {
-      attempts += 1;
-      const info = await resolveHostInfo();
-      if (!info.resolved) {
-        if (attempts < 5) {
-          const setTimeoutFn = win.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-          if (setTimeoutFn) {
-            const t = setTimeoutFn(tryLoadInstalledCompanions, 1500);
-            if (t && typeof t.unref === 'function') t.unref();
-          }
-        }
-        return info;
-      }
-
-      const tasks = [];
-      if (info.hasMcpManager && !win.agyMcpManager) {
-        tasks.push(
-          loadScript(
-            '__agyLoadingMcpManagerCompanion',
-            resolvedHostConfig.companionScripts.mcpManagerUrl,
-            info.mcpManagerCode,
-            () => Boolean(win.agyMcpManager)
-          )
-        );
-      }
-      if (info.hasKoTranslator && !win.__agyKoLocalizerActive && !win.__agyKoThoughtCleanup) {
-        tasks.push(
-          loadScript(
-            '__agyLoadingKoTranslatorCompanion',
-            resolvedHostConfig.companionScripts.koTranslatorUrl,
-            info.koTranslatorCode,
-            () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
-          )
-        );
-      }
-      await Promise.all(tasks);
-      return info;
-    };
-
-    return tryLoadInstalledCompanions();
-  } catch {
-    return Promise.resolve(null);
-  }
 }
 
 function mountStatusBar(env = {}) {
@@ -840,15 +497,14 @@ function mountStatusBar(env = {}) {
       delete win.__agyHostInstalledPlugins;
       delete win.__agyLoadingMcpManagerCompanion;
       delete win.__agyLoadingKoTranslatorCompanion;
+      delete win.__agyLoadingKoThoughtCompanion;
       delete win.__agyRcGenLenByCascade;
       delete win.__agyRcStepCountByCascade;
       delete win.__agyLastAppliedContextWindow;
       delete win.__agyLastAppliedContextWindowByCascade;
       delete win.__agySniffedCascadeId;
       delete win.__agySniffedCascadeTs;
-      if (companionPolicyControllers) {
-        companionPolicyControllers.delete(win);
-      }
+      disposeCompanionPolicyController(win);
       if (!win.agyMcpManager) {
         delete win.__agyCapturedLsClient;
         delete win.__agyRemoteControlInstance;

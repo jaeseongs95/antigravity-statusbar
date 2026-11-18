@@ -18,9 +18,13 @@ const OUT_FILE = path.join(DIST_DIR, 'statusbar_autoinject.js');
 
 const MODULE_ORDER = [
   'host-adapter-config.js',
+  'protobuf-checkpoint-codec.js',
+  'remote-runtime.js',
+  'companion-loader.js',
   'context-window-policy.js',
   'dom-styles.js',
   'rpc-client.js',
+  'desktop-react-bridge.js',
   'host-bridge.js',
   'adapter-registry.js',
   'adapters/core-metrics.js',
