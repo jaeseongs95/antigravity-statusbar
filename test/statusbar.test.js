@@ -4955,30 +4955,18 @@ describe('D-0015..D-0021 full audit regressions', () => {
       };
     };
 
-    const loadRealCompanionText = async (localRelPath, urls) => {
+    const loadRealCompanionText = (localRelPath) => {
       const localAbs = path.join(__dirname, localRelPath);
-      if (fs.existsSync(localAbs)) {
-        return fs.readFileSync(localAbs, 'utf8');
+      if (!fs.existsSync(localAbs)) {
+        throw new Error(`Missing deterministic sibling companion bundle at ${localAbs} (check sibling repo checkout)`);
       }
-      for (const u of urls) {
-        try {
-          const r = await fetch(u);
-          if (r.ok) return await r.text();
-        } catch {}
-      }
-      throw new Error(`Unable to load real companion bundle from ${localRelPath} or ${urls.join(', ')}`);
+      return fs.readFileSync(localAbs, 'utf8');
     };
 
-    const [realMcpBundle, realKoBundle, realIframeHtml, realMainJs, realPrismJs, realJetboxCss, realTailwindCss] =
+    const realMcpBundle = loadRealCompanionText('../../antigravity-mcp-manager/dist/mcp_manager_autoinject.js');
+    const realKoBundle = loadRealCompanionText('../../ko-thought-translator/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js');
+    const [realIframeHtml, realMainJs, realPrismJs, realJetboxCss, realTailwindCss] =
       await Promise.all([
-        loadRealCompanionText('../../antigravity-mcp-manager/dist/mcp_manager_autoinject.js', [
-          'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/develop/dist/mcp_manager_autoinject.js',
-          'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
-        ]),
-        loadRealCompanionText('../../ko-thought-translator/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js', [
-          'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/develop/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
-          'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
-        ]),
         fetchUpstreamBuffer('https://antigravity.static.usercontent.goog/web/2.33.0/?hostTheme=dark&iframe=true'),
         fetchUpstreamBuffer('https://www.gstatic.com/antigravity/web/2.33.0/main.js'),
         fetchUpstreamBuffer('https://www.gstatic.com/antigravity/web/2.33.0/prism_bundle.js'),
@@ -5013,6 +5001,15 @@ describe('D-0015..D-0021 full audit regressions', () => {
       if (u.pathname === '/_/GoogleAntigravity/cspreport') {
         res.statusCode = 204;
         res.end();
+        return;
+      }
+      if (u.pathname === '/r/style-nonce-only') {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Content-Security-Policy', [
+          `script-src 'nonce-${hostNonce}';style-src 'nonce-${hostNonce}';connect-src *;worker-src 'self'`,
+          "require-trusted-types-for 'script'",
+        ]);
+        res.end(`<!doctype html><html><head><style nonce="${hostNonce}">body{margin:0}</style></head><body><div id="sb-style-only-host">ok</div></body></html>`);
         return;
       }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -5627,6 +5624,32 @@ describe('D-0015..D-0021 full audit regressions', () => {
         )
       )?.result?.value;
       assert.equal(revStyleNonce, hostNonce, 'SB-TC-037(4): #agy-ctx-statusbar-style must carry active document CSP nonce');
+
+      // Sub-scenario 5 (BLOCKING-3): README.md verbatim bookmarklet on host page with ONLY <style nonce="...">
+      await sendCdp('Page.navigate', { url: 'https://antigravity.google.com/r/style-nonce-only' }, sessionId);
+      for (let i = 0; i < 40; i++) {
+        const r = await sendCdp('Runtime.evaluate', { expression: 'Boolean(document.getElementById("sb-style-only-host"))', returnByValue: true }, sessionId);
+        if (r?.result?.value === true) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      const bmStyleOnly = await sendCdp('Runtime.evaluate', { expression: bookmarkletExpr, returnByValue: true }, sessionId);
+      assert.equal(bmStyleOnly.exceptionDetails, undefined, 'SB-TC-037(5): README bookmarklet must not throw on <style nonce>-only page');
+      let snapStyleOnly = null;
+      for (let i = 0; i < 50; i++) {
+        const r = await sendCdp(
+          'Runtime.evaluate',
+          {
+            expression: '(() => { const s = document.getElementById("agy-ctx-statusbar-style"); return { hasBarObj: Boolean(window.agyStatusBar && window.__agyStatusBarActiveVersion), styleNonce: s ? (s.nonce || s.getAttribute?.("nonce") || "") : "", scriptCount: document.scripts.length }; })()',
+            returnByValue: true,
+          },
+          sessionId
+        );
+        snapStyleOnly = r?.result?.value;
+        if (snapStyleOnly?.hasBarObj && snapStyleOnly?.styleNonce) break;
+        await new Promise((res) => setTimeout(res, 60));
+      }
+      assert.equal(snapStyleOnly?.hasBarObj, true, `SB-TC-037(5): README bookmarklet must activate statusbar when host page only has <style nonce>: ${JSON.stringify(snapStyleOnly)}`);
+      assert.equal(snapStyleOnly?.styleNonce, hostNonce, `SB-TC-037(5): #agy-ctx-statusbar-style must carry active <style nonce>: ${JSON.stringify(snapStyleOnly)}`);
     } finally {
       try { cdpWs?.close(); } catch {}
       try { chromeProc?.kill(); } catch {}

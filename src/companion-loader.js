@@ -172,22 +172,21 @@ function disposeCompanionPolicyController(win) {
 
 function getScriptNonce(doc) {
   if (!doc) return '';
-  const nonceEl = doc.querySelector?.('script[nonce]') || doc.querySelector?.('style[nonce]');
+  const nonceEl =
+    doc.querySelector?.('script[nonce]') ||
+    doc.querySelector?.('style[nonce]') ||
+    doc.querySelector?.('link[nonce]');
   if (nonceEl) {
     const n = nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '';
     if (n) return n;
   }
-  const scripts = doc.querySelectorAll?.('script') || [];
-  for (let i = 0; i < scripts.length; i++) {
-    const s = scripts[i];
-    const n = s && (s.nonce || s.getAttribute?.('nonce') || '');
-    if (n) return n;
-  }
-  const styles = doc.querySelectorAll?.('style') || [];
-  for (let i = 0; i < styles.length; i++) {
-    const st = styles[i];
-    const n = st && (st.nonce || st.getAttribute?.('nonce') || '');
-    if (n) return n;
+  for (const tag of ['script', 'style', 'link']) {
+    const nodes = doc.querySelectorAll?.(tag) || [];
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      const n = el && (el.nonce || el.getAttribute?.('nonce') || '');
+      if (n) return n;
+    }
   }
   return '';
 }
