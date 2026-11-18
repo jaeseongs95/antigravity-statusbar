@@ -5270,6 +5270,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
             '--no-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
+            '--disable-quic',
             '--disable-extensions',
             '--disable-background-networking',
             '--password-store=basic',
