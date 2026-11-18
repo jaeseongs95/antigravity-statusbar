@@ -8,11 +8,11 @@
     "install-statusbar": "node scripts/install.js",
     "uninstall": "node scripts/ensure_statusbar_patch.js --uninstall",
     "status": "node scripts/ensure_statusbar_patch.js --status",
-    "test": "node scripts/build.js && node --test test/unit/*.test.js test/integration/*.test.js test/installer/*.test.js test/e2e/*.test.js",
-    "test:unit": "node --test test/unit/*.test.js",
-    "test:integration": "node --test test/integration/*.test.js",
-    "test:installer": "node --test test/installer/*.test.js",
-    "test:e2e": "node scripts/build.js && node --test test/e2e/*.test.js"
+    "test": "node scripts/build.js && node --test test/unit/domain.test.js test/unit/ui.test.js test/integration/drivers.test.js test/installer/patcher.test.js test/e2e/remote-chrome.test.js",
+    "test:unit": "node --test test/unit/domain.test.js test/unit/ui.test.js",
+    "test:integration": "node --test test/integration/drivers.test.js",
+    "test:installer": "node --test test/installer/patcher.test.js",
+    "test:e2e": "node scripts/build.js && node --test test/e2e/remote-chrome.test.js"
   },
   "keywords": [
     "antigravity",
