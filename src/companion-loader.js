@@ -80,9 +80,10 @@ function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
   let latestHostConfig = resolvedHostConfig;
   const allowedInlineScripts = new Set();
   const allowedBlobUrls = new Set();
+  const ttSupported = Boolean(win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function');
   let policy = null;
-  if (win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-    const names = ['agy-statusbar', 'agy-statusbar-companion', 'agy-statusbar-' + Date.now()];
+  if (ttSupported) {
+    const names = ['agy-statusbar', 'agy-statusbar-companion', 'agy-rc-statusbar'];
     for (const name of names) {
       try {
         const created = win.trustedTypes.createPolicy(name, {
@@ -111,6 +112,7 @@ function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
     }
   }
   const ctrl = {
+    hasNativePolicy: Boolean(policy),
     updateHostConfig(nextCfg) {
       if (nextCfg) latestHostConfig = nextCfg;
     },
@@ -130,6 +132,9 @@ function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
       if (policy && typeof policy.createScript === 'function') {
         return policy.createScript(code);
       }
+      if (ttSupported) {
+        throw new TypeError('TrustedTypes policy creation blocked by CSP');
+      }
       if (!allowedInlineScripts.has(String(code ?? ''))) {
         throw new TypeError('Untrusted inline script rejected');
       }
@@ -138,6 +143,9 @@ function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
     toScriptURL(rawUrl) {
       if (policy && typeof policy.createScriptURL === 'function') {
         return policy.createScriptURL(rawUrl);
+      }
+      if (ttSupported) {
+        throw new TypeError('TrustedTypes policy creation blocked by CSP');
       }
       const raw = String(rawUrl ?? '');
       if (raw.startsWith('blob:')) {
@@ -407,7 +415,7 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig)
           'mcp-manager',
           ['__agyLoadingMcpManagerCompanion'],
           resolvedHostConfig.companionScripts.mcpManagerUrl,
-          info.mcpManagerCode,
+          info.mcpBlock || info.mcpManagerCode || '',
           () => Boolean(win.agyMcpManager)
         );
       }
@@ -416,7 +424,7 @@ function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig)
           'ko-thought-translator',
           ['__agyLoadingKoTranslatorCompanion', '__agyLoadingKoThoughtCompanion'],
           resolvedHostConfig.companionScripts.koTranslatorUrl,
-          info.koTranslatorCode,
+          info.koBlock || info.koTranslatorCode || '',
           () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
         );
       }

@@ -545,16 +545,17 @@ function createHostBridge({ window, document, localStorage, fetchFn, cwStore, ho
     const manifest = parseAutoinjectCompanionManifest(hostBundleText, pluginNames);
     const resolved = Boolean(hostBundleText) || (!readAttemptedAndFailed && pluginNames.size > 0);
 
-    return {
+    const infoObj = {
       resolved,
       geminiDir,
-      hasStatusbar: manifest.hasStatusbar,
-      hasMcpManager: manifest.hasMcpManager,
-      hasKoTranslator: manifest.hasKoTranslator,
-      mcpManagerCode: manifest.mcpManagerCode,
-      koTranslatorCode: manifest.koTranslatorCode,
+      geminiRoot: geminiDir,
+      ...manifest,
       hostBundleText,
     };
+    if (resolved && window) {
+      window.__agyHostInstalledPlugins = infoObj;
+    }
+    return infoObj;
   }
 
   async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {

@@ -170,11 +170,16 @@ function parseAutoinjectCompanionManifest(bundleText, discoveredPluginNames) {
   const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
   const hasKoMarker = Boolean(koTranslatorCode);
 
+  const statusbarBlock = hasStatusbarMarker ? baseSegment : '';
+
   return {
     hasStatusbar: hasStatusbarMarker || pluginNames.has('antigravity-statusbar'),
     hasMcpManager: hasMcpMarker || pluginNames.has('antigravity-mcp-manager'),
     hasKoTranslator: hasKoMarker || pluginNames.has('ko-thought-translator'),
-    statusbarBlock: hasStatusbarMarker ? baseSegment : '',
+    statusbarBlock,
+    mcpBlock: mcpManagerCode,
+    koBlock: koTranslatorCode,
+    statusbarCode: statusbarBlock,
     mcpManagerCode,
     koTranslatorCode,
   };
@@ -247,10 +252,10 @@ function acquireRemoteRuntimeLease({ window: win, document: doc, hostConfig, hoo
         continue;
       }
       wrapMethod(mName, (prevFn, isOff) => function () {
+        if (isOff()) return prevFn.apply(this, arguments);
         if (mName === 'onIframeLoad' && isAutoIframeLoadSuppressed(this)) {
           return Promise.resolve();
         }
-        if (isOff()) return prevFn.apply(this, arguments);
         if (win && this && !this.destroyed) {
           win.__agyRemoteControlInstance = this;
         }

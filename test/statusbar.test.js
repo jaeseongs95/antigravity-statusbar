@@ -4944,109 +4944,94 @@ describe('D-0015..D-0021 full audit regressions', () => {
     const hostNonce = '6MrTi0i9YKUcbrCAvGN0sg';
     const iframeNonce = 'jJgu3ijJjeWjBiu4jYPUZg';
 
-    // Simulated companion scripts exercising real TrustedTypes, RC.prototype.onIframeLoad suppression, zero-sink cd.open()+cd.close() URL promotion, and TanStack Router History.replaceState!
-    const companionKoJs = `(() => {
-      const rc = window.__agyRemoteControlInstance;
-      const iframe = document.querySelector('ga-remote-control iframe');
-      if (rc && iframe && !iframe.__agyKoPromoted) {
-        iframe.__agyKoPromoted = true;
-        rc.__agySuppressAutoIframeLoadCount = (rc.__agySuppressAutoIframeLoadCount || 0) + 1;
-        rc.__agySuppressAutoIframeLoad = true;
-        const origDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
-        const n = [...document.scripts].map(x => x.nonce || x.getAttribute('nonce')).find(Boolean) || '';
-        const pol = window.trustedTypes.createPolicy('agy-ko-e2e', { createScriptURL: u => u });
-        let blankHandled = false;
-        const onBlank = () => {
-          if (blankHandled) return;
-          let cw, cd;
-          try {
-            cw = iframe.contentWindow;
-            cd = iframe.contentDocument;
-            if (!cw || !cd) return;
-            blankHandled = true;
-          } catch {
-            return;
-          }
-          cd.open();
-          cd.close();
-          cd.addEventListener('securitypolicyviolation', (e) => {
-            (window.__e2eCspViolations = window.__e2eCspViolations || []).push('child:' + e.violatedDirective + ':' + e.blockedURI);
-          });
-          cw.addEventListener('error', (e) => {
-            (window.__e2eErrors = window.__e2eErrors || []).push('child:' + String(e.message || e));
-          });
-          const root = cd.createElement('div');
-          root.id = 'root';
-          cd.body.appendChild(root);
-          const ms = cd.createElement('script');
-          if (n) { ms.nonce = n; ms.setAttribute('nonce', n); }
-          ms.src = pol.createScriptURL('https://www.gstatic.com/antigravity/web/2.33.0/main.js');
-          ms.onload = () => {
-            rc.__agySuppressAutoIframeLoadCount = Math.max(0, (rc.__agySuppressAutoIframeLoadCount || 1) - 1);
-            rc.__agySuppressAutoIframeLoad = rc.__agySuppressAutoIframeLoadCount > 0;
-            rc.onIframeLoad();
-          };
-          cd.head.appendChild(ms);
-        };
-        iframe.addEventListener('load', onBlank, { once: true });
-        origDesc.set.call(iframe, 'about:blank');
-        Object.defineProperty(iframe, 'src', {
-          configurable: true,
-          enumerable: true,
-          get: () => 'https://antigravity.google.com/web/2.33.0/?hostTheme=dark&iframe=true',
-          set: (v) => origDesc.set.call(iframe, v)
-        });
+    const fetchUpstreamBuffer = async (url) => {
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error(`Upstream asset fetch failed (${resp.status}) for ${url}`);
       }
-      window.__agyKoLocalizerActive = 'v2-e2e';
-    })();`;
+      return {
+        buf: Buffer.from(await resp.arrayBuffer()),
+        contentType: resp.headers.get('content-type') || 'application/octet-stream',
+      };
+    };
 
-    const companionMcpJs = `(() => {
-      const rc = window.__agyRemoteControlInstance;
-      if (rc) {
-        const proto = Object.getPrototypeOf(rc);
-        const prev = proto.onIframeLoad;
-        proto.onIframeLoad = function (...args) {
-          if (this && (this.__agySuppressAutoIframeLoad || this.__agySuppressAutoIframeLoadCount > 0)) return Promise.resolve();
-          return prev.apply(this, args);
-        };
+    const loadRealCompanionText = async (localRelPath, urls) => {
+      const localAbs = path.join(__dirname, localRelPath);
+      if (fs.existsSync(localAbs)) {
+        return fs.readFileSync(localAbs, 'utf8');
       }
-      window.agyMcpManager = { version: 'v1.5.0-e2e' };
-    })();`;
+      for (const u of urls) {
+        try {
+          const r = await fetch(u);
+          if (r.ok) return await r.text();
+        } catch {}
+      }
+      throw new Error(`Unable to load real companion bundle from ${localRelPath} or ${urls.join(', ')}`);
+    };
 
-    const workbenchMainJs = `(() => {
-      // Simulate real Antigravity 2.33.0 TanStack Router startup calling History.replaceState with https://antigravity.google.com/... URL!
-      window.history.replaceState({}, '', 'https://antigravity.google.com/web/2.33.0/?hostTheme=dark&iframe=true');
-      window.__e2eChildHref = window.location.href;
-      window.addEventListener('message', (ev) => {
-        if (ev.data && ev.data.type === 'INITIAL_CONFIG' && ev.ports && ev.ports[0]) {
-          window.__e2ePortSessionId = ev.data.portSessionId;
-          const port = ev.ports[0];
-          port.start?.();
-          const root = document.getElementById('root');
-          if (root) {
-            const view = document.createElement('div');
-            view.setAttribute('data-testid', 'conversation-view');
-            view.setAttribute('data-cascade-id', '547d3ff8-7d19-415f-a68a-9bbf28c06f5f');
-            view.textContent = 'REMOTE_WORKBENCH_READY';
-            const box = document.createElement('div');
-            box.setAttribute('data-testid', 'agent-input-box');
-            view.appendChild(box);
-            root.appendChild(view);
-          }
-        }
-      });
-    })();`;
+    const [realMcpBundle, realKoBundle, realIframeHtml, realMainJs, realPrismJs, realJetboxCss, realTailwindCss] =
+      await Promise.all([
+        loadRealCompanionText('../../antigravity-mcp-manager/dist/mcp_manager_autoinject.js', [
+          'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/develop/dist/mcp_manager_autoinject.js',
+          'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
+        ]),
+        loadRealCompanionText('../../ko-thought-translator/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js', [
+          'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/develop/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
+          'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
+        ]),
+        fetchUpstreamBuffer('https://antigravity.static.usercontent.goog/web/2.33.0/?hostTheme=dark&iframe=true'),
+        fetchUpstreamBuffer('https://www.gstatic.com/antigravity/web/2.33.0/main.js'),
+        fetchUpstreamBuffer('https://www.gstatic.com/antigravity/web/2.33.0/prism_bundle.js'),
+        fetchUpstreamBuffer('https://www.gstatic.com/antigravity/web/2.33.0/jetbox.css'),
+        fetchUpstreamBuffer('https://www.gstatic.com/antigravity/web/2.33.0/compiled_tailwind.css'),
+      ]);
+
+    assert.ok(realMcpBundle.length > 200_000, 'SB-TC-037: mcp_manager_autoinject.js must be the real >200KB built bundle');
+    assert.ok(realKoBundle.length > 200_000, 'SB-TC-037: ko_thought_autoinject.js must be the real >200KB built bundle');
+    assert.ok(realMainJs.buf.length > 10_000_000, 'SB-TC-037: main.js must be the real >10MB Antigravity 2.33.0 bundle');
+    assert.ok(realPrismJs.buf.length > 100_000, 'SB-TC-037: prism_bundle.js must be the real >100KB Antigravity 2.33.0 bundle');
+
+    const normalizedRealIframeHtml = realIframeHtml.buf
+      .toString('utf8')
+      .replace(/nonce="[^"]*"/g, `nonce="${iframeNonce}"`);
+    const combinedHostAutoinject = [
+      builtBundle.trim(),
+      '// === BEGIN_AGY_MCP_MANAGER_V1 ===',
+      realMcpBundle.trim(),
+      '// === END_AGY_MCP_MANAGER_V1 ===',
+      '// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+      realKoBundle.trim(),
+      '// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===',
+      '',
+    ].join('\n');
+    const combinedHostAutoinjectB64 = Buffer.from(combinedHostAutoinject, 'utf8').toString('base64');
+    const upstreamAssetCache = new Map();
+    let serveCombinedHostManifest = false;
 
     const hostServer = https.createServer(tlsOpts, (req, res) => {
+      const u = new URL(req.url, 'https://antigravity.google.com');
+      if (u.pathname === '/_/GoogleAntigravity/cspreport') {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.setHeader('Content-Security-Policy', [
-        "require-trusted-types-for 'script'",
-        `script-src 'nonce-${hostNonce}' 'unsafe-inline';object-src 'none';base-uri 'self';worker-src 'self'`,
-      ]);
+      // Verbatim observed Content-Security-Policy headers from live https://antigravity.google.com/r/...-v2
+      const cspHeaders = [
+        `script-src 'report-sample' 'nonce-${hostNonce}' 'unsafe-inline';object-src 'none';base-uri 'self';report-uri /_/GoogleAntigravity/cspreport;worker-src 'self'`,
+        "require-trusted-types-for 'script';report-uri /_/GoogleAntigravity/cspreport",
+      ];
+      if (u.pathname.includes('strict-tt-block-all')) {
+        cspHeaders.push('trusted-types ogb-qtm#html');
+      }
+      res.setHeader('Content-Security-Policy', cspHeaders);
+      const readFilePayloadB64 = serveCombinedHostManifest ? combinedHostAutoinjectB64 : '';
       res.end(`<!doctype html><html><head>
         <script nonce="${hostNonce}">
           window.__e2eCspViolations = [];
           window.__e2eErrors = [];
+          window.__e2ePortSessions = [];
+          window.__e2ePortUnaryPaths = [];
           document.addEventListener('securitypolicyviolation', (e) => {
             window.__e2eCspViolations.push(e.violatedDirective + ':' + e.blockedURI);
           });
@@ -5056,10 +5041,11 @@ describe('D-0015..D-0021 full audit regressions', () => {
       </head><body style="background:#0d0d0d;color:#fff;margin:0">
         <ga-remote-control>
           <div class="app-container">
-            <iframe src="https://antigravity.static.usercontent.goog/web/2.32.1/?hostTheme=dark&iframe=true" style="width:100%;height:600px;border:0"></iframe>
+            <iframe src="https://antigravity.static.usercontent.goog/web/2.33.0/?hostTheme=dark&iframe=true" style="width:100%;height:720px;border:0"></iframe>
           </div>
         </ga-remote-control>
         <script nonce="${hostNonce}">
+          const E2E_HOST_BUNDLE_B64 = ${JSON.stringify(readFilePayloadB64)};
           class RemoteControlComponent {
             constructor(iframeEl) {
               this.destroyed = false;
@@ -5072,8 +5058,44 @@ describe('D-0015..D-0021 full audit regressions', () => {
               this.localUserInfo = { selectedGeminiDir: '/home/user/.gemini' };
             }
             selectedInstanceUuid() { return 'inst-uuid-0001'; }
-            iframeSrc() { return 'https://antigravity.static.usercontent.goog/web/2.32.1/?hostTheme=dark&iframe=true'; }
+            iframeSrc() { return 'https://antigravity.static.usercontent.goog/web/2.33.0/?hostTheme=dark&iframe=true'; }
             async initXChannelServer() { await Promise.resolve(); }
+            async handlePortRequest(msg) {
+              if (!msg || typeof msg !== 'object' || msg.sessionId !== this.proxyPortSessionId) return;
+              if (msg.kind === 'stream') {
+                if (String(msg.path || '').endsWith('/JetboxSubscribeToState')) {
+                  this.proxyPort?.postMessage({
+                    sessionId: msg.sessionId,
+                    id: msg.id,
+                    kind: 'data',
+                    chunk: new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x06, 0x12, 0x02, 0x28, 0x02, 0x1a, 0x00]),
+                    headers: { 'content-type': 'application/connect+proto' }
+                  });
+                }
+                return;
+              }
+              if (msg.kind === 'unary') {
+                window.__e2ePortUnaryPaths.push(String(msg.path || ''));
+                try {
+                  const res = await this.proxyCommand(msg.path, 'POST', msg.headers || {}, msg.body);
+                  this.proxyPort?.postMessage({
+                    sessionId: msg.sessionId,
+                    id: msg.id,
+                    kind: 'data',
+                    chunk: res.payload,
+                    headers: { 'content-type': 'application/json' }
+                  });
+                } catch (err) {
+                  this.proxyPort?.postMessage({
+                    sessionId: msg.sessionId,
+                    id: msg.id,
+                    kind: 'error',
+                    code: 13,
+                    message: String(err?.message || err)
+                  });
+                }
+              }
+            }
             async onIframeLoad() {
               const c = this.hubFrame.nativeElement;
               await this.initXChannelServer();
@@ -5083,6 +5105,8 @@ describe('D-0015..D-0021 full audit regressions', () => {
               const m = new MessageChannel();
               this.proxyPort = m.port1;
               this.proxyPortSessionId = 'rc-' + (++this.proxyPortSessionCounter);
+              window.__e2ePortSessions.push(this.proxyPortSessionId);
+              this.proxyPort.onmessage = (ev) => { this.handlePortRequest(ev.data); };
               c.contentWindow.postMessage({
                 type: 'INITIAL_CONFIG',
                 parentOrigin: d,
@@ -5095,6 +5119,15 @@ describe('D-0015..D-0021 full audit regressions', () => {
             }
             async proxyCommand(rpcPath) {
               const enc = (obj) => ({ payload: new TextEncoder().encode(JSON.stringify(obj)) });
+              if (rpcPath.endsWith('/HasAuthToken')) return enc({ hasToken: true });
+              if (rpcPath.endsWith('/GetAuthStatus')) return enc({ authResult: { hasValidAuth: true } });
+              if (rpcPath.endsWith('/GetServerConfiguration')) {
+                return enc({ config: { appDataDir: 'antigravity', sandboxAvailable: false, sidecars: { enabled: false, allowAll: false } } });
+              }
+              if (rpcPath.endsWith('/GetMendelFlags')) return enc({ experimentConfig: { experiments: [] } });
+              if (rpcPath.endsWith('/GetLocalUserInfo')) return enc({ homeDirUri: 'file:///home/user', username: 'e2e' });
+              if (rpcPath.endsWith('/GetMcpServerStates')) return enc({ states: [] });
+              if (rpcPath.endsWith('/GetUserStatus')) return enc({ userStatus: { name: 'E2E User', email: 'e2e@example.com' } });
               if (rpcPath.endsWith('/GetCustomizationStates')) {
                 return enc({ states: [
                   { path: '/home/user/.gemini/config/plugins/antigravity-statusbar/SKILL.md' },
@@ -5103,7 +5136,13 @@ describe('D-0015..D-0021 full audit regressions', () => {
                 ] });
               }
               if (rpcPath.endsWith('/GetAllPlugins')) return enc({ plugins: [] });
-              if (rpcPath.endsWith('/ReadFile')) return enc({ content: '' });
+              if (rpcPath.endsWith('/GetAllSkills')) return enc({ skills: [] });
+              if (rpcPath.endsWith('/ReadFile')) {
+                if (String(arguments[3] ? new TextDecoder().decode(arguments[3]) : '').includes('mcp_config.json')) {
+                  return enc({ content: btoa(JSON.stringify({ mcpServers: {} })) });
+                }
+                return enc({ content: E2E_HOST_BUNDLE_B64 });
+              }
               if (rpcPath.endsWith('/RetrieveUserQuotaSummary')) {
                 return enc({ quotaSummary: { fiveHourRemainingFraction: 0.98, sevenDayRemainingFraction: 0.68 } });
               }
@@ -5141,8 +5180,9 @@ describe('D-0015..D-0021 full audit regressions', () => {
       </body></html>`);
     });
 
-    const cdnServer = https.createServer(tlsOpts, (req, res) => {
+    const cdnServer = https.createServer(tlsOpts, async (req, res) => {
       const u = new URL(req.url, 'https://localhost');
+      const hostHdr = String(req.headers.host || '');
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       res.setHeader('Cache-Control', 'no-store');
@@ -5153,30 +5193,57 @@ describe('D-0015..D-0021 full audit regressions', () => {
       }
       if (u.pathname.endsWith('/mcp_manager_autoinject.js')) {
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.end(companionMcpJs);
+        res.end(realMcpBundle);
         return;
       }
       if (u.pathname.endsWith('/ko_thought_autoinject.js')) {
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.end(companionKoJs);
+        res.end(realKoBundle);
         return;
       }
       if (u.pathname.endsWith('/main.js')) {
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-        res.end(workbenchMainJs);
+        res.end(realMainJs.buf);
         return;
       }
       if (u.pathname.endsWith('/prism_bundle.js')) {
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-        res.end('// prism');
+        res.end(realPrismJs.buf);
         return;
+      }
+      if (u.pathname.endsWith('/jetbox.css')) {
+        res.setHeader('Content-Type', 'text/css; charset=utf-8');
+        res.end(realJetboxCss.buf);
+        return;
+      }
+      if (u.pathname.endsWith('/compiled_tailwind.css')) {
+        res.setHeader('Content-Type', 'text/css; charset=utf-8');
+        res.end(realTailwindCss.buf);
+        return;
+      }
+      if (hostHdr.includes('www.gstatic.com') || /\.(?:js|mjs|css|wasm|svg|png|woff2?|ttf|json)$/i.test(u.pathname)) {
+        const cleanPath = u.pathname.startsWith('/antigravity/') ? u.pathname : `/antigravity${u.pathname}`;
+        const upstreamUrl = `https://www.gstatic.com${cleanPath}${u.search}`;
+        try {
+          if (!upstreamAssetCache.has(upstreamUrl)) {
+            upstreamAssetCache.set(upstreamUrl, await fetchUpstreamBuffer(upstreamUrl));
+          }
+          const cached = upstreamAssetCache.get(upstreamUrl);
+          res.setHeader('Content-Type', cached.contentType);
+          res.end(cached.buf);
+          return;
+        } catch {
+          res.statusCode = 404;
+          res.end('Not found');
+          return;
+        }
       }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Security-Policy', [
-        `script-src 'nonce-${iframeNonce}' 'strict-dynamic' 'unsafe-eval' 'unsafe-inline' http: https:; object-src 'none'; base-uri 'none'`,
-        "require-trusted-types-for 'script'",
+        `script-src 'nonce-${iframeNonce}' 'report-sample' 'strict-dynamic' 'unsafe-eval' 'unsafe-inline' http: https:; object-src 'none'; report-uri https://csp.withgoogle.com/csp/jetski-devs; base-uri 'none'`,
+        "require-trusted-types-for 'script'; report-uri https://csp.withgoogle.com/csp/jetski-devs",
       ]);
-      res.end(`<!doctype html><html><head></head><body><div id="root"></div><script nonce="${iframeNonce}" src="https://antigravity.static.usercontent.goog/web/2.32.1/main.js"></script></body></html>`);
+      res.end(normalizedRealIframeHtml);
     });
 
     const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-sb-chrome-'));
@@ -5255,92 +5322,147 @@ describe('D-0015..D-0021 full audit regressions', () => {
       await sendCdp('Page.enable', {}, sessionId);
       await sendCdp('Runtime.enable', {}, sessionId);
 
-      await sendCdp(
-        'Page.navigate',
-        { url: 'https://antigravity.google.com/r/547d3ff8-7d19-415f-a68a-9bbf28c06f5f-v2' },
-        sessionId
-      );
+      const runBookmarkletAndCollect = async (pagePath) => {
+        await sendCdp('Page.navigate', { url: `https://antigravity.google.com${pagePath}` }, sessionId);
+        for (let i = 0; i < 80; i++) {
+          const r = await sendCdp(
+            'Runtime.evaluate',
+            { expression: 'window.__e2ePortUnaryPaths?.length || 0', returnByValue: true },
+            sessionId
+          );
+          if (r?.result?.value >= 1) break;
+          await new Promise((res) => setTimeout(res, 60));
+        }
 
-      // Wait for initial cross-origin iframe load (rc-1)
-      for (let i = 0; i < 40; i++) {
-        const r = await sendCdp(
+        const bmEval = await sendCdp(
           'Runtime.evaluate',
-          { expression: 'window.__agyRemoteControlInstance?.proxyPortSessionCounter || 0', returnByValue: true },
+          { expression: bookmarkletExpr, returnByValue: true },
           sessionId
         );
-        if (r?.result?.value >= 1) break;
-        await new Promise((res) => setTimeout(res, 50));
-      }
+        assert.equal(bmEval.exceptionDetails, undefined, 'SB-TC-037: bookmarklet evaluation must not throw');
 
-      // Click the exact README.md bookmarklet on live https://antigravity.google.com/r/...-v2!
-      const bmEval = await sendCdp(
-        'Runtime.evaluate',
-        { expression: bookmarkletExpr, returnByValue: true },
-        sessionId
+        let snapshot = null;
+        for (let i = 0; i < 120; i++) {
+          const r = await sendCdp(
+            'Runtime.evaluate',
+            {
+              expression: `(() => {
+                const bar = document.querySelector('.agy-ctx-statusbar');
+                const ifr = document.querySelector('ga-remote-control iframe');
+                let rootChildCount = 0;
+                let rootHtmlLen = 0;
+                let childMgr = false;
+                let initConfigRecv = false;
+                try {
+                  const cd = ifr?.contentDocument;
+                  const cw = ifr?.contentWindow;
+                  const rootEl = cd?.getElementById('root');
+                  rootChildCount = rootEl ? rootEl.childElementCount : 0;
+                  rootHtmlLen = rootEl ? (rootEl.innerHTML || '').length : 0;
+                  childMgr = Boolean(cw?.agyMcpManager);
+                  initConfigRecv = Boolean(cw?.__initialConfigReceived);
+                } catch {}
+                const hp = window.__agyHostInstalledPlugins || null;
+                return {
+                  hasBar: Boolean(bar),
+                  barText: bar ? bar.textContent : '',
+                  hasKo: Boolean(window.__agyKoLocalizerActive || window.__agyKoThoughtCleanup),
+                  hasMcp: Boolean(window.agyMcpManager),
+                  hasRemoteLauncher: Boolean(document.getElementById('agy-mcp-remote-launcher')),
+                  childMgr,
+                  rootChildCount,
+                  rootHtmlLen,
+                  initConfigRecv,
+                  manifestKeys: hp ? Object.keys(hp).sort() : [],
+                  hasMcpBlockLen: hp?.mcpBlock ? hp.mcpBlock.length : 0,
+                  hasKoBlockLen: hp?.koBlock ? hp.koBlock.length : 0,
+                  hasSbBlockLen: hp?.statusbarBlock ? hp.statusbarBlock.length : 0,
+                  portSessions: window.__e2ePortSessions || [],
+                  unaryCount: window.__e2ePortUnaryPaths?.length || 0,
+                  cspViolations: window.__e2eCspViolations || [],
+                  errors: window.__e2eErrors || []
+                };
+              })()`,
+              returnByValue: true,
+            },
+            sessionId
+          );
+          snapshot = r?.result?.value;
+          if (
+            snapshot &&
+            snapshot.hasBar &&
+            snapshot.hasKo &&
+            snapshot.hasMcp &&
+            snapshot.rootChildCount > 0 &&
+            snapshot.initConfigRecv &&
+            snapshot.barText.includes('cache 98%')
+          ) {
+            break;
+          }
+          await new Promise((res) => setTimeout(res, 80));
+        }
+        return snapshot;
+      };
+
+      // Sub-scenario 1: Remote URL co-loading of ALL 3 real built bundles + real >12MB 2.33.0 workbench
+      serveCombinedHostManifest = false;
+      const snapshot = await runBookmarkletAndCollect('/r/547d3ff8-7d19-415f-a68a-9bbf28c06f5f-v2');
+      assert.ok(snapshot, 'SB-TC-037(1): browser state snapshot must be collected');
+      assert.deepEqual(snapshot.cspViolations, [], `SB-TC-037(1): zero CSP/TrustedTypes violations on verbatim live CSP headers, got=${JSON.stringify(snapshot)}`);
+      assert.deepEqual(snapshot.errors, [], `SB-TC-037(1): zero uncaught errors with real 3-plugin bundles + real 2.33.0 workbench, got=${JSON.stringify(snapshot)}`);
+      assert.equal(snapshot.hasBar, true, 'SB-TC-037(1): statusbar must mount on <ga-remote-control>');
+      assert.ok(snapshot.barText.includes('cache 98%'), `SB-TC-037(1): statusbar must display live context metrics, got: ${snapshot.barText}`);
+      assert.equal(snapshot.hasKo, true, 'SB-TC-037(1): real ko-thought-translator bundle must co-load');
+      assert.equal(snapshot.hasMcp, true, 'SB-TC-037(1): real mcp-manager bundle must co-load');
+      assert.equal(snapshot.hasRemoteLauncher, true, 'SB-TC-037(1): real mcp-manager #agy-mcp-remote-launcher must render');
+      assert.ok(
+        snapshot.rootChildCount > 0 && snapshot.rootHtmlLen > 100 && snapshot.initConfigRecv,
+        `SB-TC-037(1): real >12MB Antigravity 2.33.0 React 19 workbench #root must render cleanly (zero black screen), snapshot=${JSON.stringify(snapshot)}`
       );
-      assert.equal(bmEval.exceptionDetails, undefined, 'SB-TC-037: bookmarklet evaluation must not throw');
 
-      let snapshot = null;
-      for (let i = 0; i < 60; i++) {
-        const r = await sendCdp(
+      // Sub-scenario 2: Host ReadFile combined statusbar_autoinject.js manifest co-loading ([BLOCKING 2] canonical schema E2E)
+      serveCombinedHostManifest = true;
+      const snapManifest = await runBookmarkletAndCollect('/r/547d3ff8-7d19-415f-a68a-9bbf28c06f5f-v2?manifest=1');
+      assert.ok(snapManifest, 'SB-TC-037(2): manifest co-load snapshot must exist');
+      assert.deepEqual(snapManifest.cspViolations, [], 'SB-TC-037(2): zero CSP violations when co-loading from host ReadFile manifest');
+      assert.deepEqual(snapManifest.errors, [], 'SB-TC-037(2): zero uncaught errors when co-loading from host ReadFile manifest');
+      assert.equal(snapManifest.hasKo, true, 'SB-TC-037(2): real ko-thought-translator must co-load from host ReadFile manifest');
+      assert.equal(snapManifest.hasMcp, true, 'SB-TC-037(2): real mcp-manager must co-load from host ReadFile manifest');
+      assert.ok(snapManifest.hasMcpBlockLen > 200_000, 'SB-TC-037(2): window.__agyHostInstalledPlugins.mcpBlock must be populated');
+      assert.ok(snapManifest.hasKoBlockLen > 200_000, 'SB-TC-037(2): window.__agyHostInstalledPlugins.koBlock must be populated');
+      assert.ok(snapManifest.hasSbBlockLen > 50_000, 'SB-TC-037(2): window.__agyHostInstalledPlugins.statusbarBlock must be populated');
+      assert.ok(snapManifest.rootChildCount > 0 && snapManifest.initConfigRecv, 'SB-TC-037(2): real 2.33.0 workbench must render cleanly');
+
+      // Sub-scenario 3: Strict trusted-types ogb-qtm#html blocking custom policies -> bookmarkletExpr exits cleanly (zero sink violation, zero uncaught error)
+      serveCombinedHostManifest = false;
+      await sendCdp('Page.navigate', { url: 'https://antigravity.google.com/r/strict-tt-block-all-v2' }, sessionId);
+      for (let i = 0; i < 80; i++) {
+        const r = await sendCdp('Runtime.evaluate', { expression: 'window.__e2ePortUnaryPaths?.length || 0', returnByValue: true }, sessionId);
+        if (r?.result?.value >= 1) break;
+        await new Promise((res) => setTimeout(res, 60));
+      }
+      const bmStrict = await sendCdp('Runtime.evaluate', { expression: bookmarkletExpr, returnByValue: true }, sessionId);
+      assert.equal(bmStrict.exceptionDetails, undefined, 'SB-TC-037(3): bookmarkletExpr must not throw synchronously');
+      await new Promise((res) => setTimeout(res, 400));
+      const snapStrict = (
+        await sendCdp(
           'Runtime.evaluate',
           {
-            expression: `(() => {
-              const bar = document.querySelector('.agy-ctx-statusbar');
-              const ifr = document.querySelector('ga-remote-control iframe');
-              let innerText = '';
-              let childPortSession = '';
-              try {
-                innerText = ifr?.contentDocument?.getElementById('root')?.textContent || '';
-                childPortSession = ifr?.contentWindow?.__e2ePortSessionId || '';
-              } catch {}
-              return {
-                hasBar: Boolean(bar),
-                barText: bar ? bar.textContent : '',
-                hasKo: Boolean(window.__agyKoLocalizerActive),
-                hasMcp: Boolean(window.agyMcpManager),
-                innerText,
-                childPortSession,
-                hostPortSession: window.__agyRemoteControlInstance?.proxyPortSessionId || '',
-                cspViolations: window.__e2eCspViolations || [],
-                errors: window.__e2eErrors || []
-              };
-            })()`,
+            expression: `({
+              cspViolations: window.__e2eCspViolations || [],
+              errors: window.__e2eErrors || []
+            })`,
             returnByValue: true,
           },
           sessionId
-        );
-        snapshot = r?.result?.value;
-        if (
-          snapshot &&
-          snapshot.hasBar &&
-          snapshot.hasKo &&
-          snapshot.hasMcp &&
-          snapshot.innerText.includes('REMOTE_WORKBENCH_READY') &&
-          snapshot.barText.includes('cache 98%')
-        ) {
-          break;
-        }
-        await new Promise((res) => setTimeout(res, 60));
-      }
-
-      assert.ok(snapshot, 'SB-TC-037: browser state snapshot must be collected');
-      assert.deepEqual(snapshot.cspViolations, [], 'SB-TC-037: zero CSP or TrustedTypes violations on live CSP headers');
-      assert.deepEqual(snapshot.errors, [], 'SB-TC-037: zero uncaught errors during bookmarklet & companion co-loading');
-      assert.equal(snapshot.hasBar, true, 'SB-TC-037: statusbar must mount on <ga-remote-control>');
-      assert.ok(snapshot.barText.includes('cache 98%'), `SB-TC-037: statusbar must display live context metrics, got: ${snapshot.barText}`);
-      assert.equal(snapshot.hasKo, true, 'SB-TC-037: ko-thought-translator companion must co-load');
-      assert.equal(snapshot.hasMcp, true, 'SB-TC-037: mcp-manager companion must co-load');
-      assert.equal(
-        snapshot.innerText,
-        'REMOTE_WORKBENCH_READY',
-        `SB-TC-037: inner workbench #root must render cleanly, snapshot=${JSON.stringify(snapshot)}`
+        )
+      )?.result?.value;
+      assert.deepEqual(
+        (snapStrict?.cspViolations || []).filter((v) => !v.startsWith('trusted-types:trusted-types-policy')),
+        [],
+        'SB-TC-037(3): bookmarklet must trigger ZERO sink/script-src violations when policy creation fails'
       );
-      assert.equal(
-        snapshot.childPortSession,
-        snapshot.hostPortSession,
-        'SB-TC-037: child workbench must hold the active -v2 MessagePort session without premature consumption'
-      );
+      assert.deepEqual(snapStrict?.errors, [], 'SB-TC-037(3): zero uncaught TypeError or rejection when policy creation fails');
     } finally {
       try { cdpWs?.close(); } catch {}
       try { chromeProc?.kill(); } catch {}
@@ -5397,8 +5519,14 @@ describe('D-0015..D-0021 full audit regressions', () => {
     inst.__agySuppressAutoIframeLoadCount = 0;
     await RcProtoFixture.prototype.onIframeLoad.call(inst);
     assert.equal(baseLoadCount, 1, 'SB-TC-038: releasing reference count must allow onIframeLoad');
+    const savedWrappedOnLoad = RcProtoFixture.prototype.onIframeLoad;
     leaseB.release();
     leaseA.release();
+    // [BLOCKING 6] Retained wrapper reference must pass through immediately after release() even when suppression count > 0!
+    inst.__agySuppressAutoIframeLoadCount = 1;
+    await savedWrappedOnLoad.call(inst);
+    assert.equal(baseLoadCount, 2, 'SB-TC-038: disposed lease wrapper reference must pass through immediately (isOff checked first)');
+    inst.__agySuppressAutoIframeLoadCount = 0;
     assert.equal(
       Object.prototype.hasOwnProperty.call(RcProtoFixture.prototype, '__agyOrig_onIframeLoad'),
       false,
@@ -5406,13 +5534,28 @@ describe('D-0015..D-0021 full audit regressions', () => {
     );
 
     const parsedManifest = runtimeMod.parseAutoinjectCompanionManifest(
-      'function mountStatusBar() {}\n// === BEGIN_AGY_MCP_MANAGER ===\nconst m = 1;\n// === END_AGY_MCP_MANAGER ===\n',
+      'function mountStatusBar() {}\n// === BEGIN_AGY_MCP_MANAGER ===\nconst m = 1;\n// === END_AGY_MCP_MANAGER ===\n// === BEGIN_AGY_KO_THOUGHT_LOCALIZER_V2 ===\nconst k = 2;\n// === END_AGY_KO_THOUGHT_LOCALIZER_V2 ===\n',
       new Set(['ko-thought-translator'])
     );
     assert.equal(parsedManifest.hasStatusbar, true);
     assert.equal(parsedManifest.hasMcpManager, true);
     assert.equal(parsedManifest.hasKoTranslator, true);
     assert.equal(parsedManifest.mcpManagerCode.includes('const m = 1;'), true);
+    assert.equal(parsedManifest.mcpBlock, parsedManifest.mcpManagerCode, 'SB-TC-038: canonical mcpBlock/mcpManagerCode parity');
+    assert.equal(parsedManifest.koBlock, parsedManifest.koTranslatorCode, 'SB-TC-038: canonical koBlock/koTranslatorCode parity');
+    assert.equal(parsedManifest.statusbarCode, parsedManifest.statusbarBlock, 'SB-TC-038: canonical statusbarBlock/statusbarCode parity');
+
+    // [BLOCKING 3] getOrCreateCompanionPolicyController must throw TypeError (never raw string) when createPolicy is denied
+    const deniedTtCtrl = loaderMod.getOrCreateCompanionPolicyController({
+      trustedTypes: { createPolicy() { throw new TypeError('Denied by CSP'); } },
+    });
+    deniedTtCtrl.allowInline('1+1');
+    assert.throws(() => deniedTtCtrl.toScript('1+1'), TypeError, 'SB-TC-038: toScript must throw TypeError when policy creation was denied');
+    assert.throws(
+      () => deniedTtCtrl.toScriptURL('https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js'),
+      TypeError,
+      'SB-TC-038: toScriptURL must throw TypeError when policy creation was denied'
+    );
 
     // 3. companion-loader: duplicate <script data-agy-companion="mcp-manager"> guard and failed tag removal
     let headTags = [];

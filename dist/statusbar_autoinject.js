@@ -706,11 +706,15 @@
       const hasStatusbarMarker = sbFuncRe.test(baseSegment);
       const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
       const hasKoMarker = Boolean(koTranslatorCode);
+      const statusbarBlock = hasStatusbarMarker ? baseSegment : '';
       return {
         hasStatusbar: hasStatusbarMarker || pluginNames.has('antigravity-statusbar'),
         hasMcpManager: hasMcpMarker || pluginNames.has('antigravity-mcp-manager'),
         hasKoTranslator: hasKoMarker || pluginNames.has('ko-thought-translator'),
-        statusbarBlock: hasStatusbarMarker ? baseSegment : '',
+        statusbarBlock,
+        mcpBlock: mcpManagerCode,
+        koBlock: koTranslatorCode,
+        statusbarCode: statusbarBlock,
         mcpManagerCode,
         koTranslatorCode,
       };
@@ -775,10 +779,10 @@
             continue;
           }
           wrapMethod(mName, (prevFn, isOff) => function () {
+            if (isOff()) return prevFn.apply(this, arguments);
             if (mName === 'onIframeLoad' && isAutoIframeLoadSuppressed(this)) {
               return Promise.resolve();
             }
-            if (isOff()) return prevFn.apply(this, arguments);
             if (win && this && !this.destroyed) {
               win.__agyRemoteControlInstance = this;
             }
@@ -1071,9 +1075,10 @@
       let latestHostConfig = resolvedHostConfig;
       const allowedInlineScripts = new Set();
       const allowedBlobUrls = new Set();
+      const ttSupported = Boolean(win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function');
       let policy = null;
-      if (win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function') {
-        const names = ['agy-statusbar', 'agy-statusbar-companion', 'agy-statusbar-' + Date.now()];
+      if (ttSupported) {
+        const names = ['agy-statusbar', 'agy-statusbar-companion', 'agy-rc-statusbar'];
         for (const name of names) {
           try {
             const created = win.trustedTypes.createPolicy(name, {
@@ -1102,6 +1107,7 @@
         }
       }
       const ctrl = {
+        hasNativePolicy: Boolean(policy),
         updateHostConfig(nextCfg) {
           if (nextCfg) latestHostConfig = nextCfg;
         },
@@ -1121,6 +1127,9 @@
           if (policy && typeof policy.createScript === 'function') {
             return policy.createScript(code);
           }
+          if (ttSupported) {
+            throw new TypeError('TrustedTypes policy creation blocked by CSP');
+          }
           if (!allowedInlineScripts.has(String(code ?? ''))) {
             throw new TypeError('Untrusted inline script rejected');
           }
@@ -1129,6 +1138,9 @@
         toScriptURL(rawUrl) {
           if (policy && typeof policy.createScriptURL === 'function') {
             return policy.createScriptURL(rawUrl);
+          }
+          if (ttSupported) {
+            throw new TypeError('TrustedTypes policy creation blocked by CSP');
           }
           const raw = String(rawUrl ?? '');
           if (raw.startsWith('blob:')) {
@@ -1385,7 +1397,7 @@
               'mcp-manager',
               ['__agyLoadingMcpManagerCompanion'],
               resolvedHostConfig.companionScripts.mcpManagerUrl,
-              info.mcpManagerCode,
+              info.mcpBlock || info.mcpManagerCode || '',
               () => Boolean(win.agyMcpManager)
             );
           }
@@ -1394,7 +1406,7 @@
               'ko-thought-translator',
               ['__agyLoadingKoTranslatorCompanion', '__agyLoadingKoThoughtCompanion'],
               resolvedHostConfig.companionScripts.koTranslatorUrl,
-              info.koTranslatorCode,
+              info.koBlock || info.koTranslatorCode || '',
               () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
             );
           }
@@ -4389,16 +4401,17 @@
         }
         const manifest = parseAutoinjectCompanionManifest(hostBundleText, pluginNames);
         const resolved = Boolean(hostBundleText) || (!readAttemptedAndFailed && pluginNames.size > 0);
-        return {
+        const infoObj = {
           resolved,
           geminiDir,
-          hasStatusbar: manifest.hasStatusbar,
-          hasMcpManager: manifest.hasMcpManager,
-          hasKoTranslator: manifest.hasKoTranslator,
-          mcpManagerCode: manifest.mcpManagerCode,
-          koTranslatorCode: manifest.koTranslatorCode,
+          geminiRoot: geminiDir,
+          ...manifest,
           hostBundleText,
         };
+        if (resolved && window) {
+          window.__agyHostInstalledPlugins = infoObj;
+        }
+        return infoObj;
       }
       async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {
         if (!cwStore || typeof cwStore.encodeRemoteAnnotationProfile !== 'function') return false;
