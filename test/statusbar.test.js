@@ -5250,6 +5250,10 @@ describe('D-0015..D-0021 full audit regressions', () => {
     let chromeProc = null;
     let cdpWs = null;
     try {
+      hostServer.keepAliveTimeout = 60000;
+      hostServer.headersTimeout = 65000;
+      cdnServer.keepAliveTimeout = 60000;
+      cdnServer.headersTimeout = 65000;
       await new Promise((r) => hostServer.listen(0, '127.0.0.1', r));
       await new Promise((r) => cdnServer.listen(0, '127.0.0.1', r));
       hostServer.unref();
@@ -5349,7 +5353,7 @@ describe('D-0015..D-0021 full audit regressions', () => {
         assert.equal(bmEval.exceptionDetails, undefined, 'SB-TC-037: bookmarklet evaluation must not throw');
 
         let snapshot = null;
-        for (let i = 0; i < 120; i++) {
+        for (let i = 0; i < 200; i++) {
           const r = await sendCdp(
             'Runtime.evaluate',
             {
