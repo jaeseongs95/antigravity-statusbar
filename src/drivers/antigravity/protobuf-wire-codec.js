@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * Pure Protobuf wire & Connect-RPC 5-byte envelope codec for
- * `SendUserCascadeMessageRequest` checkpoint limit injection and cascade UUID extraction.
+ * Pure Protobuf Wire & Connect-RPC 5-Byte Envelope Codec
+ * for `SendUserCascadeMessage` checkpoint limit injection and cascade UUID extraction.
  * Zero DOM or window coupling.
  */
 

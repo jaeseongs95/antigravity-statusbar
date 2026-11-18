@@ -1,12 +1,45 @@
 'use strict';
 
+/**
+ * Pure StatusBar Adapter Registry & DOM Slot Coordinator.
+ * Uses WeakMap (zero DOM expandos) and pure dom-builder nodes (zero HTML strings).
+ */
+
+const { h, setText } = require('./dom-builder');
+
+const nodeCleanupMap = new WeakMap();
+const adapterCtxMap = new WeakMap();
+
+function registerNodeCleanup(node, fn) {
+  if (!node || typeof fn !== 'function') return;
+  nodeCleanupMap.set(node, fn);
+}
+
+function runNodeCleanup(node) {
+  if (!node) return;
+  const fn = nodeCleanupMap.get(node);
+  if (typeof fn === 'function') {
+    nodeCleanupMap.delete(node);
+    try {
+      fn();
+    } catch {}
+  }
+}
+
+const VALID_ADAPTER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ALLOWED_ADAPTER_TAGS = new Set(['span', 'div', 'button']);
+
 function normalizeAdapter(adapter) {
   if (!adapter || typeof adapter !== 'object') {
     throw new TypeError('StatusBarAdapter must be an object');
   }
   const id = typeof adapter.id === 'string' ? adapter.id.trim() : '';
-  if (!id) {
-    throw new TypeError('StatusBarAdapter requires a non-empty string id');
+  if (!id || !VALID_ADAPTER_ID_RE.test(id)) {
+    throw new TypeError('StatusBarAdapter requires a valid [A-Za-z0-9_-]{1,64} id');
+  }
+  const rawTag = adapter.tagName === undefined ? 'span' : String(adapter.tagName).trim().toLowerCase();
+  if (!ALLOWED_ADAPTER_TAGS.has(rawTag)) {
+    throw new TypeError(`StatusBarAdapter "${id}" has disallowed tagName "${rawTag}"`);
   }
   const slot = adapter.slot === 'left' ? 'left' : 'right';
   const order = typeof adapter.order === 'number' && !isNaN(adapter.order) ? adapter.order : 100;
@@ -18,13 +51,14 @@ function normalizeAdapter(adapter) {
   return {
     ...adapter,
     id,
+    tagName: rawTag,
     slot,
     order,
     builtin: Boolean(adapter.builtin),
   };
 }
 
-function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
+function createAdapterRegistry({ window, document, onUpdate }) {
   const adapterRegistry = new Map();
   if (window) {
     if (!window.__agyCustomStatusBarAdapters || !(window.__agyCustomStatusBarAdapters instanceof Map)) {
@@ -37,11 +71,10 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
     if (!container || typeof container.querySelectorAll !== 'function') return;
     const menus = container.querySelectorAll('.agy-ctx-menu');
     for (const m of menus) {
-      if (typeof m.__agyCleanup === 'function') {
-        try { m.__agyCleanup(); } catch {}
-      } else {
-        try { m.remove(); } catch {}
-      }
+      runNodeCleanup(m);
+      try {
+        m.remove();
+      } catch {}
     }
   }
 
@@ -52,7 +85,10 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
       for (const node of nodes) {
         cleanupChildMenus(node);
-        try { node.remove(); } catch {}
+        runNodeCleanup(node);
+        try {
+          node.remove();
+        } catch {}
       }
     }
   }
@@ -66,17 +102,19 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
     }
     list.sort((a, b) => {
       if (a.slot !== b.slot) return a.slot === 'left' ? -1 : 1;
-      return (a.order - b.order) || a.id.localeCompare(b.id);
+      return a.order - b.order || a.id.localeCompare(b.id);
     });
     return list;
   }
 
-  function registerStatusBarAdapter(rawAdapter) {
+  function registerAdapter(rawAdapter) {
     const adapter = normalizeAdapter(rawAdapter);
     if (adapterRegistry.has(adapter.id)) {
       const prev = adapterRegistry.get(adapter.id);
       if (prev && typeof prev.unmount === 'function') {
-        try { prev.unmount(); } catch {}
+        try {
+          prev.unmount();
+        } catch {}
       }
       removeAdapterDomElements(adapter.id);
     }
@@ -85,17 +123,19 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       customStore.set(adapter.id, adapter);
     }
     if (typeof onUpdate === 'function') onUpdate();
-    return () => unregisterStatusBarAdapter(adapter.id);
+    return () => unregisterAdapter(adapter.id);
   }
 
-  function unregisterStatusBarAdapter(id) {
+  function unregisterAdapter(id) {
     const key = typeof id === 'string' ? id.trim() : '';
     if (!key || !adapterRegistry.has(key)) return false;
     const adapter = adapterRegistry.get(key);
     adapterRegistry.delete(key);
     customStore.delete(key);
     if (adapter && typeof adapter.unmount === 'function') {
-      try { adapter.unmount(); } catch {}
+      try {
+        adapter.unmount();
+      } catch {}
     }
     removeAdapterDomElements(key);
     if (typeof onUpdate === 'function') onUpdate();
@@ -116,16 +156,21 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
   }
 
   function ensureBarStructure(barEl) {
-    let leftEl = barEl.querySelector('.agy-ctx-left');
-    let rightEl = barEl.querySelector('.agy-ctx-right');
+    let leftEl = barEl.querySelector?.('.agy-ctx-left') || null;
+    let rightEl = barEl.querySelector?.('.agy-ctx-right') || null;
     if (!leftEl || !rightEl) {
       cleanupChildMenus(barEl);
-      setHtml(barEl, `
-        <div class="agy-ctx-left"></div>
-        <div class="agy-ctx-right"></div>
-      `);
-      leftEl = barEl.querySelector('.agy-ctx-left');
-      rightEl = barEl.querySelector('.agy-ctx-right');
+      leftEl = h(document, 'div', { className: 'agy-ctx-left' });
+      rightEl = h(document, 'div', { className: 'agy-ctx-right' });
+      if (typeof barEl.replaceChildren === 'function') {
+        barEl.replaceChildren(leftEl, rightEl);
+      } else {
+        while (barEl.firstChild && typeof barEl.removeChild === 'function') {
+          barEl.removeChild(barEl.firstChild);
+        }
+        barEl.appendChild(leftEl);
+        barEl.appendChild(rightEl);
+      }
     }
     return { leftEl, rightEl };
   }
@@ -141,7 +186,10 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
         const nodeId = node.getAttribute('data-agy-adapter-id');
         if (nodeId && !activeIds.has(nodeId)) {
           cleanupChildMenus(node);
-          try { node.remove(); } catch {}
+          runNodeCleanup(node);
+          try {
+            node.remove();
+          } catch {}
         }
       }
     }
@@ -151,43 +199,44 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
       if (typeof adapter.render === 'function') {
         if (!itemEl) {
-          itemEl = document.createElement(adapter.tagName || 'span');
-          itemEl.setAttribute('data-agy-adapter-id', adapter.id);
-          if (adapter.className) itemEl.className = adapter.className;
+          itemEl = h(document, adapter.tagName || 'span', {
+            className: adapter.className || undefined,
+            'data-agy-adapter-id': adapter.id,
+          });
           slotEl.appendChild(itemEl);
         }
         adapter.render(itemEl, ctx);
       } else {
         if (!itemEl) {
-          itemEl = document.createElement('button');
-          itemEl.type = 'button';
-          itemEl.setAttribute('data-agy-adapter-id', adapter.id);
-          itemEl.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const latestCtx = itemEl.__agyAdapterCtx || ctx;
-            if (typeof adapter.onClick === 'function') {
-              adapter.onClick(latestCtx, e);
-            }
-          };
+          itemEl = h(document, 'button', {
+            type: 'button',
+            'data-agy-adapter-id': adapter.id,
+            onclick(e) {
+              e.preventDefault();
+              e.stopPropagation();
+              const latestCtx = adapterCtxMap.get(itemEl) || ctx;
+              if (typeof adapter.onClick === 'function') {
+                adapter.onClick(latestCtx, e);
+              }
+            },
+          });
           slotEl.appendChild(itemEl);
         }
-        itemEl.__agyAdapterCtx = ctx;
-        const resolvedClass = typeof adapter.className === 'function'
-          ? adapter.className(ctx)
-          : (adapter.className || 'agy-ctx-btn');
-        const finalClass = resolvedClass.includes('agy-ctx-btn') ? resolvedClass : `agy-ctx-btn ${resolvedClass}`.trim();
+        adapterCtxMap.set(itemEl, ctx);
+        const resolvedClass =
+          typeof adapter.className === 'function' ? adapter.className(ctx) : adapter.className || 'agy-ctx-btn';
+        const finalClass = resolvedClass.includes('agy-ctx-btn')
+          ? resolvedClass
+          : `agy-ctx-btn ${resolvedClass}`.trim();
         if (itemEl.className !== finalClass) {
           itemEl.className = finalClass;
         }
         const resolvedLabel = typeof adapter.label === 'function' ? adapter.label(ctx) : String(adapter.label ?? '');
-        if (itemEl.textContent !== resolvedLabel) {
-          itemEl.textContent = resolvedLabel;
-        }
+        setText(itemEl, resolvedLabel);
         const resolvedTitle = typeof adapter.title === 'function' ? adapter.title(ctx) : String(adapter.title ?? '');
         if (resolvedTitle) {
-          if (itemEl.getAttribute('title') !== resolvedTitle) {
-            itemEl.setAttribute('title', resolvedTitle);
+          if (itemEl.getAttribute?.('title') !== resolvedTitle) {
+            itemEl.setAttribute?.('title', resolvedTitle);
             itemEl.title = resolvedTitle;
           }
         } else if (itemEl.getAttribute?.('title') !== null || itemEl.title) {
@@ -198,7 +247,7 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
       if (itemEl) orderedEls.push(itemEl);
     }
 
-    if (orderedEls.length > 1 && Array.isArray(slotEl.children)) {
+    if (orderedEls.length > 1 && slotEl.children) {
       let outOfOrder = false;
       for (let i = 0; i < orderedEls.length; i++) {
         if (slotEl.children[i] !== orderedEls[i]) {
@@ -207,21 +256,19 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
         }
       }
       if (outOfOrder) {
-        for (const el of orderedEls) {
-          slotEl.appendChild(el);
-        }
-      }
-    } else if (orderedEls.length > 1 && typeof slotEl.insertBefore === 'function' && slotEl.children) {
-      let outOfOrder = false;
-      for (let i = 0; i < orderedEls.length; i++) {
-        if (slotEl.children[i] !== orderedEls[i]) {
-          outOfOrder = true;
-          break;
-        }
-      }
-      if (outOfOrder) {
-        for (const el of orderedEls) {
-          slotEl.appendChild(el);
+        if (typeof slotEl.insertBefore === 'function') {
+          let anchor = slotEl.firstChild || null;
+          for (const el of orderedEls) {
+            if (el !== anchor) {
+              slotEl.insertBefore(el, anchor);
+            } else {
+              anchor = el.nextSibling || null;
+            }
+          }
+        } else {
+          for (const el of orderedEls) {
+            slotEl.appendChild(el);
+          }
         }
       }
     }
@@ -236,18 +283,27 @@ function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
     }));
   }
 
+  function clearAllMenus(targetDoc = document) {
+    cleanupChildMenus(targetDoc || document);
+  }
+
   return {
-    registerAdapter: registerStatusBarAdapter,
-    unregisterAdapter: unregisterStatusBarAdapter,
+    registerAdapter,
+    unregisterAdapter,
     registerBuiltinAdapters,
     getAdapters,
     getSortedAdapters,
     ensureBarStructure,
     renderSlotAdapters,
+    clearAllMenus,
+    registerNodeCleanup,
+    runNodeCleanup,
   };
 }
 
 module.exports = {
   normalizeAdapter,
   createAdapterRegistry,
+  registerNodeCleanup,
+  runNodeCleanup,
 };

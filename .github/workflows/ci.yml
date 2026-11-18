@@ -26,28 +26,11 @@ jobs:
     steps:
       - name: Checkout antigravity-statusbar
         uses: actions/checkout@v4
-        with:
-          path: antigravity-statusbar
-
-      - name: Checkout sibling antigravity-mcp-manager
-        uses: actions/checkout@v4
-        with:
-          repository: jaeseongs95/antigravity-mcp-manager
-          ref: ${{ github.ref == 'refs/heads/main' && 'main' || 'develop' }}
-          path: antigravity-mcp-manager
-
-      - name: Checkout sibling antigravity-ko-translator
-        uses: actions/checkout@v4
-        with:
-          repository: jaeseongs95/antigravity-ko-translator
-          ref: ${{ github.ref == 'refs/heads/main' && 'main' || 'develop' }}
-          path: ko-thought-translator
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Run unit tests
-        working-directory: antigravity-statusbar
+      - name: Build and run test suites
         run: npm test

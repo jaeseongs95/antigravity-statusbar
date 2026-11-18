@@ -1,8 +1,8 @@
-# antigravity-statusbar (`v1.4.0` / `v34`)
+# antigravity-statusbar (`v2.0.0`)
 
 **Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)**
 
-Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary token limit selector (`32K`–`980K`) with real-time backend checkpointer synchronization, pluggable **`StatusBarAdapter`** extension API, zero-offset `app.asar` + live CDP auto-patcher, and **Remote Control Web (`https://antigravity.google.com/r/...`)** bookmarklet & userscript support for **Google Antigravity IDE (`v2.26.x` – `v2.33.x+`)**.
+Standalone **Hexagonal Architecture** context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary token limit selector (`32K`–`980K`) with real-time backend checkpointer synchronization, zero-HTML-string pure DOM UI (`TrustedHTML`-free), pluggable **`StatusBarAdapter`** extension API, `Symbol.for('agy.plugin.bus.v2')` plugin event bus, modular zero-offset `app.asar` + live CDP auto-patcher, and **Remote Control Web (`https://antigravity.google.com/r/...`)** bookmarklet & userscript support for **Google Antigravity IDE**.
 
 ---
 
@@ -12,31 +12,26 @@ Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary to
 2. [Desktop App Installation (Local PC)](#desktop-app-installation-local-pc)
 3. [Remote Control Web Guide (Bookmarklet & UserScript)](#remote-control-web-guide-bookmarklet--userscript)
 4. [Statusbar UI & Controls Guide](#statusbar-ui--controls-guide)
-5. [Host-Aware Companion Plugin Auto-Loader](#host-aware-companion-plugin-auto-loader)
-6. [Extending the Statusbar (`StatusBarAdapter` API)](#extending-the-statusbar-statusbaradapter-api)
-7. [Repository Structure](#repository-structure)
+5. [Localization & Custom Configuration](#localization--custom-configuration)
+6. [Extending the Statusbar (`StatusBarAdapter` & Plugin Bus v2)](#extending-the-statusbar-statusbaradapter--plugin-bus-v2)
+7. [Hexagonal Repository Structure](#hexagonal-repository-structure)
 8. [Verification & Testing](#verification--testing)
 
 ---
 
 ## Overview & Key Features
 
-- **Real-Time Context, Cache & Quota Telemetry**:
-  - Displays current context token usage (`pct%`, `used / limit`), prompt cache hit rate (`cache %`), and `5h` / `7d` remaining quota directly inside the chat input box.
-  - Immediately reflects post-compacting token reductions (`agentStateProvider.getState().contextWindowUsage.estimatedAfterCompaction`) in both the statusbar and the `[ context ]` trajectory debug modal right after `Compacting` completes.
-- **Per-Session Arbitrary Context Limit (`32K` – `980K`) & Backend Checkpointer Sync**:
-  - Click `[ 256k ▾ ]` to select from presets (`128K`, `256K`, `384K`, `512K`, `750K`, `900K`) or enter any custom value between `32` and `980` (`K` tokens).
-  - Intercepts both `fetch` (including `Request` objects) and `Transport.send` / `sendUnary` (`SendUserCascadeMessage`) across JSON, Connect-framed JSON, and Protobuf binary payloads to inject `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`), while automatically skipping `continue_after_injection` (`field 20`) continuations and merging pre-existing `cascade_config` fields without duplicate tags so `language_server.exe` honors the selected limit.
-  - Persists limits per `cascadeId` across `localStorage`, cookies, `nativeStorage`, and server trajectory annotations (`annotations.activeProfile`) for seamless Desktop ↔ Mobile sync while isolating Redux's global default so changing one conversation does not alter other sessions.
-  - Suppresses the warning icon (`⚠️`) in the native model selector pill when the session limit is `<= 256K` while retaining the `· {cw}` badge.
-- **Zero-Offset `app.asar` & Live CDP Auto-Patcher**:
-  - Patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` with **0 byte-offset drift** using a lexical-aware comment stripper, NUL-padded header support, atomic `app_storage.json` replacement, and frame/session isolation (`isScriptJailSession` and `http(s):` guards), recalculating `ElectronAsarIntegrity` SHA-256 block hashes.
-  - Injects into already-running Antigravity windows via Chrome DevTools Protocol (CDP) without requiring an app restart.
-- **Remote Control Web (`https://antigravity.google.com/r/...`) & Host-Aware Companion Loading**:
-  - Bridges the top-level `<ga-remote-control>` Angular host shell (`RemoteControlComponent.prototype.proxyCommand`) and internal React Fiber WebRTC/WebChannel RPC services (`retrieveUserQuotaSummary`, `getCascadeTrajectoryGeneratorMetadata`, `getCascadeTrajectory`).
-  - Automatically detects which companion plugins (`antigravity-mcp-manager`, `ko-thought-translator`) are installed on the host PC and loads only those installed plugins in Remote Control web.
-- **Pluggable `StatusBarAdapter` Architecture (`v7`)**:
-  - Decouples the statusbar layout (`.agy-ctx-left` / `.agy-ctx-right`) from individual widgets and buttons (`core-metrics`, `[ compact ]`, `[ context ]`), allowing external scripts or plugins to dynamically register custom widgets via `window.agyStatusBar.registerAdapter(adapter)`.
+- **Hexagonal Ports & Adapters Architecture**:
+  - Cleanly separates **Ports** (`src/ports/contracts.js`), **Domain Policy & i18n** (`src/domain/*`), **Antigravity Drivers** (`src/drivers/antigravity/*`), **Zero-HTML DOM UI** (`src/ui/*`), and the **Composition Root** (`src/app/index.js`).
+  - Zero sibling-repository URLs, zero external runtime dependencies, and deterministic `DisposableScope` teardown via `window.__agyStatusBarCleanup()`.
+- **Zero-HTML DOM Composition (`D-0025` / `D-0032` Structural Elimination)**:
+  - All views (metrics bar, limit selector dropdown, diagnostics modal, style injection) build nodes exclusively with `document.createElement` / `textContent` (`src/ui/dom-builder.js`) — **zero `innerHTML`, zero HTML parsers, and zero `TrustedHTML` policy creation**.
+- **Per-Session Context Limit (`32K` – `980K`) & Backend Checkpointer Sync**:
+  - Click `[ 256k ▾ ]` to choose presets (`128K`, `256K`, `384K`, `512K`, `750K`, `900K`) or enter any custom token limit between `32` and `980` (`K`), with one-click saving as the default for new sessions.
+  - Intercepts `fetch` (including `Request` objects) and `Transport.send` / `sendUnary` (`SendUserCascadeMessage`) across JSON, Connect-framed JSON, and Protobuf binary payloads to inject `cascadeConfig.checkpointConfig.maxTokenLimit` (`field 5`), while skipping `continue_after_injection` (`field 20`) continuations cleanly.
+  - Synchronizes 200-entry LRU session overrides across `localStorage`, cookies, `nativeStorage`, and server annotations without mutating `Object.prototype` or polluting unrelated sessions.
+- **Standalone Modular Auto-Patcher (`installer/`)**:
+  - `installer/{asar-codec,file-lock,rfc6455-client,cdp-injector,host-patcher,cli}.js` patches `dist/preload.js`, `dist/utils.js`, and `dist/main.js` inside `app.asar` with **0 byte-offset drift**, maintains atomic PID+token locks, and injects live windows over CDP while preserving any local companion plugin blocks (`antigravity-mcp-manager`, `ko-thought-translator`) anchored at column 0 in `~/.gemini/antigravity/statusbar_autoinject.js`.
 
 ---
 
@@ -46,52 +41,38 @@ Custom context window statusbar (`.agy-ctx-statusbar`), per-session arbitrary to
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
 
-# 1. Run unit, bundle integration & Headless Chrome E2E tests (37/37 tests)
+# 1. Build dist/statusbar_autoinject.js and run unit, integration, installer & Chrome E2E tests
 npm test
 
-# 2. Build dist/statusbar_autoinject.js, install to ~/.gemini/antigravity, patch app.asar & live-inject via CDP
+# 2. Build, install to ~/.gemini/antigravity (including modular installer/), patch app.asar & live-inject via CDP
 npm run install-statusbar
 
 # 3. Check ASAR patch & live CDP injection status
 npm run status
+
+# 4. Uninstall cleanly (restores app.asar from .orig backup & removes injected state)
+npm run uninstall
 ```
 
 ---
 
 ## Remote Control Web Guide (Bookmarklet & UserScript)
 
-When accessing your Antigravity session remotely via **`https://antigravity.google.com/r/...`** on a desktop browser, tablet, or mobile phone (Chrome / Safari / Edge), local Electron `preload.js` files do not run on the remote client device. You can activate the full statusbar (plus any companion plugins installed on your host PC) with **one tap using a Bookmarklet** or **automatically using Tampermonkey / AdGuard**.
+### Method 1: One-Tap Bookmarklet
 
-### Method 1: One-Tap Bookmarklet (Recommended for Mobile & Desktop Chrome)
-
-Copy the single-line JavaScript code below and save it as the **URL** of a browser bookmark:
+Save the single-line JavaScript below as the **URL** of a browser bookmark and click it once inside `https://antigravity.google.com/r/...`:
 
 ```javascript
-javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>{if(!r.ok)throw new Error(r.status);return r.text()}).then(c=>{const s=document.createElement('script'),n=[...document.querySelectorAll('script,style,link')].map(x=>x.nonce||x.getAttribute('nonce')).find(Boolean),t=window.trustedTypes;let p=null;if(t?.createPolicy){for(const k of['agy-sb-bm','agy-sb-'+Date.now()])try{let u=1;p=t.createPolicy(k,{createScript:x=>{if(!u)throw new TypeError();u=0;return x}});break}catch{}}if(t&&!p)return;if(n){s.nonce=n;s.setAttribute('nonce',n)}s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
+javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js?t='+Date.now()).then(r=>{if(!r.ok||!r.url.startsWith('https://raw.githubusercontent.com/'))throw new Error(r.status);return r.text()}).then(c=>{const s=document.createElement('script'),n=[...document.querySelectorAll('script,style,link')].map(x=>x.nonce||x.getAttribute('nonce')).find(Boolean),t=window.trustedTypes;let p=null;if(t?.createPolicy){for(const k of['agy-sb-bm','agy-sb-'+Date.now()])try{let u=1;p=t.createPolicy(k,{createScript:x=>{if(!u)throw new TypeError();u=0;return x}});break}catch{}}if(t&&!p&&!t.defaultPolicy)return;if(n){s.nonce=n;s.setAttribute('nonce',n)}s.text=p?p.createScript(c):c;document.head.appendChild(s)})})();
 ```
-
-#### How to Add & Run on Desktop Chrome / Edge / Brave
-1. Press `Ctrl+Shift+O` (Bookmark Manager) or right-click your **Bookmarks Bar** and click **Add page...** (or **Add bookmark**).
-2. Set **Name** to `AGY Statusbar` (or any name you prefer).
-3. Paste the `javascript:(()=>{...})();` code above into the **URL** field and click **Save**.
-4. Open your Antigravity Remote Control web session (`https://antigravity.google.com/r/...`) and click the **`AGY Statusbar`** bookmark once.
-5. The statusbar will immediately mount at the bottom of the chat input box, and any companion plugins installed on your host PC (`antigravity-mcp-manager`, `ko-thought-translator`) will automatically load together.
-
-#### How to Add & Run on Mobile Chrome (Android / iOS)
-1. Bookmark any page in Mobile Chrome, then tap **Edit** on that bookmark.
-2. Change the **Name** to `AGY Statusbar` and replace the **URL** with the `javascript:(()=>{...})();` code above.
-3. On your `https://antigravity.google.com/r/...` tab, tap the **address bar**, type `AGY Statusbar`, and tap the bookmark entry that appears with the ⭐ icon. *(Note: On mobile Chrome, tapping a `javascript:` bookmarklet from the address bar suggestions executes it in the current tab.)*
 
 ### Method 2: Automatic UserScript (Tampermonkey / Violentmonkey / AdGuard)
 
-`dist/statusbar_autoinject.js` includes a standard `// ==UserScript==` metadata block matching `https://antigravity.google.com/*`:
+`dist/statusbar_autoinject.js` includes a `// ==UserScript==` header matching `https://antigravity.google.com/*`:
 
-1. Open your UserScript manager dashboard (e.g., Tampermonkey -> **Utilities** -> **Install from URL**).
-2. Enter the raw bundle URL:
-   ```text
-   https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js
-   ```
-3. Click **Install**. The statusbar and host-installed companion plugins will now inject automatically whenever you open `https://antigravity.google.com/r/...`.
+```text
+https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js
+```
 
 ---
 
@@ -99,84 +80,101 @@ javascript:(()=>{fetch('https://raw.githubusercontent.com/jaeseongs95/antigravit
 
 | Control / Metric | Location | Description |
 | :--- | :--- | :--- |
-| **`{pct}% · {used} / [ {limit} ▾ ]`** | Left Slot | Shows real-time context usage percentage and token count. Click **`[ {limit} ▾ ]`** to open the per-session context limit selector (`128K`–`900K` presets or custom `32K`–`980K` input). |
-| **`cache {pct}%`** | Left Slot | Displays the prompt cache hit ratio (`cacheReadTokens / inputTokens`) for the latest model turn. |
-| **`5h {pct}% · 7d {pct}%`** | Left Slot | Displays remaining user quota percentages from `LanguageServerService.retrieveUserQuotaSummary`. |
-| **`[ compact ]`** | Right Slot | Sends `/compact` in the current conversation to compress context history and immediately updates the token count after compaction finishes. |
-| **`[ context ]`** | Right Slot | Opens the **Trajectory Context Debug Modal** (`#agy-ctx-debug-modal`), showing per-step token progression, model name, checkpoint history, and compression savings. |
+| **`ctx {pct}% {used}/[ {limit} ▾ ]`** | Left Slot | Displays context usage % and token count. Click `[ {limit} ▾ ]` to select presets (`128K`–`900K`), enter custom limits (`32K`–`980K`), or save as default. `Shift+Click` cycles `256K -> 512K -> 900K`. |
+| **`cache {pct}%`** | Left Slot | Prompt cache hit ratio (`cacheReadTokens / (inputTokens + cacheReadTokens)`) on the latest turn. |
+| **`5h {pct}% · 7d {pct}%`** | Left Slot | Remaining quota percentages from `retrieveUserQuotaSummary`. |
+| **`[ compact ]`** | Right Slot | Dispatches `/compact` in the active session using the configured summary prompt. |
+| **`[ context ]`** | Right Slot | Opens the **Trajectory & Context Debug View** (`#agy-ctx-debug-modal`) with token breakdown, prompt sections, and recent turns. |
 
 ---
 
-## Host-Aware Companion Plugin Auto-Loader
+## Localization & Custom Configuration
 
-When you run the `antigravity-statusbar` bookmarklet on Remote Control web (`https://antigravity.google.com/r/...`), it inspects the host PC via `LanguageServerService` (`GetCustomizationStates` / `GetAllSkills` / `ReadFile` on `~/.gemini/antigravity/statusbar_autoinject.js`):
-
-- **1 Plugin Installed on Host (`antigravity-statusbar` only)**: Loads only the statusbar; never forces unwanted companion scripts.
-- **2 or 3 Plugins Installed on Host (with `antigravity-mcp-manager` and/or `ko-thought-translator`)**: Automatically loads the exact combination installed on your host PC. If external GitHub Raw access is blocked on the client browser, it falls back to executing the embedded companion block directly from the host's local `statusbar_autoinject.js`.
-
----
-
-## Extending the Statusbar (`StatusBarAdapter` API)
-
-Register custom buttons or widgets at runtime via `window.agyStatusBar`:
+The statusbar defaults to English (`'en'`) with instant runtime switching to Korean (`'ko'`) and configurable `/compact` prompts:
 
 ```js
-// 1. Register a custom button adapter in the right slot
-const dispose = window.agyStatusBar.registerAdapter({
-  id: 'my-custom-btn',
-  slot: 'right',          // 'left' | 'right' (default: 'right')
-  order: 30,              // Lower numbers render first (compact=10, context=20)
-  label: '[ clear ]',     // String or (ctx) => string
-  title: 'Run custom action for this session',
-  className: 'agy-ctx-btn',
-  onClick(ctx, event) {
-    console.log('Clicked in session:', ctx.cascadeId, 'Current limit:', ctx.getConversationContextWindow());
-  },
-  unmount() {
-    // Optional cleanup when unregistered or replaced
-  }
-});
+// Toggle UI language at runtime
+window.agyStatusBar.setLocale('ko'); // 'en' | 'ko'
 
-// 2. Remove adapter when no longer needed
-dispose(); // or window.agyStatusBar.unregisterAdapter('my-custom-btn');
+// Or configure before injection via window.__AGY_STATUSBAR_HOST_CONFIG__
+window.__AGY_STATUSBAR_HOST_CONFIG__ = {
+  locale: 'auto', // 'en' | 'ko' | 'auto' (reads navigator.language)
+  compactPrompt: 'Summarize context concisely before continuing.',
+};
 ```
 
 ---
 
-## Repository Structure
+## Extending the Statusbar (`StatusBarAdapter` & Plugin Bus v2)
+
+```js
+// Register a custom widget via window.agyStatusBar
+const dispose = window.agyStatusBar.registerAdapter({
+  id: 'my-custom-btn',
+  slot: 'right',          // 'left' | 'right'
+  order: 30,
+  label: '[ clear ]',
+  title: 'Run custom action',
+  onClick(ctx) {
+    console.log('Session:', ctx.cascadeId, 'Limit:', ctx.currentCw);
+  },
+});
+
+// Listen for plugin lifecycle events on Symbol.for('agy.plugin.bus.v2')
+const bus = window.agyStatusBar.pluginBus;
+bus.on('plugin:registered', (entry) => console.log('Plugin active:', entry.id, entry.version));
+
+// Remove adapter or tear down cleanly
+dispose();
+```
+
+---
+
+## Hexagonal Repository Structure
 
 ```text
 antigravity-statusbar/
 ├── src/
-│   ├── index.js                      # Composition root & lifecycle observer
-│   ├── host-adapter-config.js        # Configurable host RPC prefix, CSRF header, remote domains & companion URLs
-│   ├── protobuf-checkpoint-codec.js  # Pure Protobuf / Connect-frame SendUserCascadeMessage codec
-│   ├── remote-runtime.js             # Isolated RemoteControlComponent prototype lease & companion manifest parser
-│   ├── companion-loader.js           # Strict TrustedTypes / CSP nonce companion script loader
-│   ├── desktop-react-bridge.js       # React Fiber / Redux modelSelection / Lexical compact engine adapter
-│   ├── context-window-policy.js      # Context limit normalization (32K-980K) & per-session persistence store
-│   ├── host-bridge.js                # Host bridge coordinator facade
-│   ├── rpc-client.js                 # LanguageServer RPC client, singleflight deduplication & LRU cache
-│   ├── dom-styles.js                 # CSS styles, dynamic <=256K warning filter, sink-free DOM builder & formatters
-│   ├── adapter-registry.js           # StatusBarAdapter registry & ordered slot renderer
-│   └── adapters/
-│       ├── core-metrics.js           # Left slot metrics + per-session context limit dropdown menu
-│       ├── compact-button.js         # Right slot `[ compact ]` button adapter
-│       └── context-button.js         # Right slot `[ context ]` button adapter + Trajectory Debug Modal
-├── dist/
-│   └── statusbar_autoinject.js       # Built single-file runtime bundle (with ==UserScript== header)
-├── docs/
-│   ├── TEST_CASES.md                 # Pre-test specification & defect traceability matrix
-│   └── templates/                    # Standard README & bilingual Release Notes templates
+│   ├── ports/contracts.js                    # Port validators & Symbol.for('agy.plugin.bus.v2')
+│   ├── domain/
+│   │   ├── i18n.js                           # 'en' default + 'ko' dictionary & compact prompt
+│   │   ├── context-window-policy.js          # 32K–980K policy & 200-entry synchronized LRU store
+│   │   └── metrics-calculator.js             # Stats, quota parsing & fail-closed cascade matcher
+│   ├── drivers/antigravity/
+│   │   ├── host-config.js                    # Boundary-safe host matcher & HTTPS CDN validation
+│   │   ├── protobuf-wire-codec.js            # Connect / Protobuf SendUserCascadeMessage codec
+│   │   ├── local-http-transport.js           # LanguageServer TransportPort & StoragePort adapters
+│   │   ├── remote-port-driver.js             # WeakMap ref-counted RC hook & iframe safety driver
+│   │   ├── react-fiber-driver.js             # React Fiber / Redux / fetch / lsClient EnginePort
+│   │   └── compact-driver.js                 # Lexical editor /compact command dispatcher
+│   ├── ui/
+│   │   ├── dom-builder.js                    # Pure createElement / textContent DOM builder (0 HTML)
+│   │   ├── style-manager.js                  # CSP nonce-aware stylesheet injector (WeakSet)
+│   │   ├── adapter-registry.js               # StatusBarAdapter registry & slot reconciler
+│   │   └── views/{metrics-view,compact-button,context-modal}.js
+│   ├── app/
+│   │   ├── disposable.js                     # Bound timer & observer DisposableScope
+│   │   ├── state-coordinator.js              # Pure port-driven application coordinator
+│   │   └── index.js                          # Composition root (mountStatusBar & cleanup)
+│   └── index.js                              # Thin entry facade -> ./app/index
+├── installer/
+│   ├── asar-codec.js                         # Exact-size zero-offset ASAR reader/writer
+│   ├── file-lock.js                          # Atomic PID + token lock recovery
+│   ├── rfc6455-client.js                     # Zero-dep RFC 6455 WebSocket client
+│   ├── cdp-injector.js                       # Page & Browser CDP Runtime.evaluate injector
+│   ├── host-patcher.js                       # app_storage.json atomic sync & ASAR orchestrator
+│   └── cli.js                                # --worker / --status / fast-path CLI
 ├── scripts/
-│   ├── build.js                      # Zero-dependency CommonJS bundler (src/ -> dist/statusbar_autoinject.js)
-│   ├── ensure_statusbar_patch.js     # Zero-offset ASAR patcher + app_storage sync + live CDP injector
-│   └── install.js                    # Builds bundle, installs to ~/.gemini/antigravity & runs patcher
+│   ├── build.js                              # Zero-dep Hexagonal CommonJS bundler
+│   ├── ensure_statusbar_patch.js             # Compatibility shim -> installer/cli
+│   └── install.js                            # Installs bundle + installer/ & preserves column-0 blocks
 ├── test/
-│   └── statusbar.test.js             # Module unit tests + bundle integration + Chrome E2E tests (37/37)
-├── README.md                         # English documentation
-├── README.ko.md                      # Korean documentation
-└── package.json
+│   ├── unit/{domain,ui}.test.js              # Pure domain, i18n, UI & static Hexagonal boundary tests
+│   ├── integration/drivers.test.js           # React Fiber, RemotePort, DisposableScope & bundle tests
+│   ├── installer/patcher.test.js             # Build, install, ASAR, lock, RFC6455 & CDP tests
+│   └── e2e/remote-chrome.test.js             # Headless Chromium CSP/TrustedTypes & live host smoke
+├── .github/workflows/ci.yml                  # Standalone Windows + Ubuntu CI matrix
+└── docs/{ARCHITECTURE_V2,TEST_CASES}.md
 ```
 
 ---
@@ -184,8 +182,8 @@ antigravity-statusbar/
 ## Verification & Testing
 
 ```bash
-# Build dist/statusbar_autoinject.js and run all 37 unit, integration & Chrome E2E tests (37/37)
-npm test
+npm test              # Full build + unit + integration + installer + Chromium E2E suites
+npm run test:unit     # Fast unit tests (domain, i18n, UI, Hexagonal boundary static check)
 ```
 
 ## License

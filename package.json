@@ -1,20 +1,26 @@
 {
   "name": "antigravity-statusbar",
-  "version": "1.4.0",
-  "description": "Custom context window statusbar, StatusBarAdapter extension architecture, per-session arbitrary token limit selector (32K-980K), Remote Control web support, and resilient zero-offset ASAR + CDP auto-patcher for Google Antigravity IDE.",
-  "main": "src/index.js",
+  "version": "2.0.0",
+  "description": "Standalone Hexagonal context window statusbar (32K-980K), StatusBarAdapter extension API, Remote Control host bridge, and atomic ASAR/CDP injector for Google Antigravity IDE.",
+  "main": "src/app/index.js",
   "scripts": {
     "build": "node scripts/build.js",
     "install-statusbar": "node scripts/install.js",
+    "uninstall": "node scripts/ensure_statusbar_patch.js --uninstall",
     "status": "node scripts/ensure_statusbar_patch.js --status",
-    "test": "node scripts/build.js && node --test test/statusbar.test.js"
+    "test": "node scripts/build.js && node --test test/unit/*.test.js test/integration/*.test.js test/installer/*.test.js test/e2e/*.test.js",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:installer": "node --test test/installer/*.test.js",
+    "test:e2e": "node scripts/build.js && node --test test/e2e/*.test.js"
   },
   "keywords": [
     "antigravity",
     "statusbar",
     "context-window",
     "electron",
-    "cdp"
+    "cdp",
+    "hexagonal"
   ],
   "author": "jaeseongs95",
   "license": "MIT"

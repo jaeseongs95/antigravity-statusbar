@@ -1,6 +1,9 @@
 'use strict';
 
-const { getScriptNonce } = require('./companion-loader');
+/**
+ * Pure CSP Nonce-Aware Style Sheet Injector & Scoped Cleanup.
+ * Zero sibling dependencies, zero hardcoded host DOM selectors.
+ */
 
 const STYLE_CSS = `
     .agy-ctx-statusbar {
@@ -133,7 +136,7 @@ const STYLE_CSS = `
       padding: 6px 0;
       display: flex;
       flex-direction: column;
-      min-width: 215px;
+      min-width: 225px;
       text-align: left;
     }
     .agy-ctx-menu-hdr {
@@ -144,12 +147,19 @@ const STYLE_CSS = `
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
     .agy-ctx-custom-row {
       display: flex;
       align-items: center;
       gap: 4px;
-      padding: 6px 10px;
+      padding: 6px 10px 3px 10px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .agy-ctx-custom-hint {
+      padding: 0 10px 6px 10px;
+      font-size: 9.5px;
+      color: rgba(148, 163, 184, 0.78);
       border-bottom: 1px solid rgba(128, 128, 128, 0.2);
       background: rgba(255, 255, 255, 0.02);
     }
@@ -206,6 +216,12 @@ const STYLE_CSS = `
     .agy-ctx-menu-item.active {
       font-weight: bold;
       color: #5dade2;
+    }
+    .agy-ctx-menu-default {
+      margin-top: 2px;
+      border-top: 1px solid rgba(128, 128, 128, 0.2);
+      font-size: 10px;
+      color: #93c5fd;
     }
     .agy-ctx-menu-hint {
       font-size: 9.5px;
@@ -412,40 +428,63 @@ const STYLE_CSS = `
     }
 `.replace(/\s+/g, ' ').trim();
 
-function buildDynamicCwWarnCss(underDefaultCwSet) {
-  const selectors = ['[data-testid="model-selector-trigger"][data-agy-cw-warn="0"] div:has(> .text-warning)'];
-  for (const cw of underDefaultCwSet) {
-    selectors.push(`[data-testid="model-selector-trigger"][data-context-window="${cw}"] div:has(> .text-warning)`);
+function buildDynamicCwWarnCss(underDefaultCwSet, documentHost) {
+  if (documentHost && typeof documentHost.buildWarningSuppressionCss === 'function') {
+    return documentHost.buildWarningSuppressionCss(underDefaultCwSet);
   }
-  return `\n    ${selectors.join(',\n    ')} {\n      display: none !important;\n    }\n`;
+  return '';
 }
 
-function ensureStyleElement(document, underDefaultCwSet) {
-  if (!document) return;
-  const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
-  const docs = [document];
+function getCspNonce(doc) {
+  if (!doc) return '';
   try {
-    const iframe = document.querySelector?.('ga-remote-control iframe');
-    if (iframe && !iframe.__agyCrossOriginInaccessible) {
-      const iframeDoc = iframe.contentDocument;
-      if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
-    }
-  } catch {
+    const curNonce = doc.currentScript && (doc.currentScript.nonce || doc.currentScript.getAttribute?.('nonce'));
+    if (curNonce) return String(curNonce);
+  } catch {}
+
+  const selectors = ['style[nonce]', 'script[nonce]', 'link[nonce]'];
+  for (const sel of selectors) {
     try {
-      const iframe = document.querySelector?.('ga-remote-control iframe');
-      if (iframe) iframe.__agyCrossOriginInaccessible = true;
+      const node = doc.querySelector?.(sel);
+      const val = node && (node.nonce || node.getAttribute?.('nonce'));
+      if (val) return String(val);
     } catch {}
   }
-  const fallbackNonce = getScriptNonce(typeof document !== 'undefined' ? document : null);
+
+  try {
+    const nodes = doc.querySelectorAll?.('style, script, link') || [];
+    for (const node of nodes) {
+      const val = node && (node.nonce || node.getAttribute?.('nonce'));
+      if (val) return String(val);
+    }
+  } catch {}
+
+  return '';
+}
+
+function resolveDocs(rootDoc, documentHost) {
+  if (documentHost && typeof documentHost.getAccessibleDocs === 'function') {
+    const list = documentHost.getAccessibleDocs(rootDoc);
+    if (Array.isArray(list) && list.length > 0) return list;
+  }
+  return rootDoc ? [rootDoc] : [];
+}
+
+function ensureStyleElement(document, underDefaultCwSet, documentHost) {
+  if (!document) return;
+  const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet, documentHost);
+  const docs = resolveDocs(document, documentHost);
+  const fallbackNonce = getCspNonce(document);
+
   for (const d of docs) {
     const parent = d.head || d.documentElement;
     if (!parent) continue;
-    let docNonce = getScriptNonce(d);
+    let docNonce = getCspNonce(d);
     if (!docNonce) {
       try {
         const pw = d.defaultView && d.defaultView.parent;
         if (pw && pw !== d.defaultView && pw.document) {
-          docNonce = getScriptNonce(pw.document);
+          docNonce = getCspNonce(pw.document);
         }
       } catch {}
     }
@@ -469,199 +508,19 @@ function ensureStyleElement(document, underDefaultCwSet) {
   }
 }
 
-const SAFE_HTML_TAGS = new Set([
-  'div', 'span', 'strong', 'button', 'input', 'table', 'thead', 'tbody',
-  'tr', 'th', 'td', 'code', 'br', 'small', 'b', 'i', 'p', 'section', 'header', 'label', 'ul', 'li',
-]);
-const VOID_HTML_TAGS = new Set(['br', 'input', 'hr', 'img']);
-
-function decodeHtmlEntities(str) {
-  return String(str ?? '')
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
-}
-
-function applyInlineStyleString(el, cssText) {
-  if (!el || !el.style || !cssText) return;
-  try {
-    el.style.cssText = cssText;
-  } catch {}
-  const decls = String(cssText).split(';');
-  for (const decl of decls) {
-    const colon = decl.indexOf(':');
-    if (colon <= 0) continue;
-    const rawProp = decl.slice(0, colon).trim();
-    const rawVal = decl.slice(colon + 1).trim();
-    if (!rawProp || !rawVal) continue;
-    const camelProp = rawProp.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-    try { el.style[camelProp] = rawVal; } catch {}
-  }
-}
-
-function renderHtmlViaSafeDomBuilder(doc, rootEl, rawHtml) {
-  if (!doc || typeof doc.createElement !== 'function' || !rootEl) return;
-  if ('textContent' in rootEl) {
-    rootEl.textContent = '';
-  } else {
-    while (rootEl.firstChild && typeof rootEl.removeChild === 'function') {
-      rootEl.removeChild(rootEl.firstChild);
-    }
-  }
-  const html = String(rawHtml ?? '');
-  if (!html) return;
-
-  const appendText = (parent, txt) => {
-    if (!txt) return;
-    const decoded = decodeHtmlEntities(txt);
-    if (typeof doc.createTextNode === 'function') {
-      parent.appendChild(doc.createTextNode(decoded));
-    } else {
-      const span = doc.createElement('span');
-      span.textContent = decoded;
-      parent.appendChild(span);
-    }
-  };
-
-  const stack = [rootEl];
-  const tokenRe = /<!--[\s\S]*?-->|<\/([a-zA-Z0-9-]+)\s*>|<([a-zA-Z0-9-]+)((?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
-  let lastIdx = 0;
-  let skippedDisallowedTag = null;
-  let m;
-
-  while ((m = tokenRe.exec(html)) !== null) {
-    const textBefore = html.slice(lastIdx, m.index);
-    if (!skippedDisallowedTag && textBefore) {
-      appendText(stack[stack.length - 1], textBefore);
-    }
-    lastIdx = tokenRe.lastIndex;
-
-    const closingTag = m[1] ? m[1].toLowerCase() : null;
-    const openingTag = m[2] ? m[2].toLowerCase() : null;
-    const attrChunk = m[3] || '';
-    const selfClosing = Boolean(m[4]);
-
-    if (skippedDisallowedTag) {
-      if (closingTag === skippedDisallowedTag) {
-        skippedDisallowedTag = null;
-      }
-      continue;
-    }
-
-    if (closingTag) {
-      if (SAFE_HTML_TAGS.has(closingTag) && stack.length > 1) {
-        stack.pop();
-      }
-      continue;
-    }
-
-    if (!openingTag) continue;
-    if (!SAFE_HTML_TAGS.has(openingTag)) {
-      if (!selfClosing && !VOID_HTML_TAGS.has(openingTag)) {
-        skippedDisallowedTag = openingTag;
-      }
-      continue;
-    }
-
-    const el = doc.createElement(openingTag);
-    if (attrChunk) {
-      const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
-      let am;
-      while ((am = attrRe.exec(attrChunk)) !== null) {
-        const attrName = am[1];
-        const lowerAttr = attrName.toLowerCase();
-        if (lowerAttr.startsWith('on') || lowerAttr === 'srcdoc') continue;
-        const rawVal = am[2] ?? am[3] ?? am[4] ?? '';
-        const val = decodeHtmlEntities(rawVal);
-        if ((lowerAttr === 'href' || lowerAttr === 'src' || lowerAttr === 'action') && /^\s*javascript:/i.test(val)) {
-          continue;
-        }
-        if (typeof el.setAttribute === 'function') {
-          el.setAttribute(attrName, val);
-        }
-        if (lowerAttr === 'class') el.className = val;
-        else if (lowerAttr === 'id') el.id = val;
-        else if (lowerAttr === 'title') el.title = val;
-        else if (lowerAttr === 'type') el.type = val;
-        else if (lowerAttr === 'value') el.value = val;
-        else if (lowerAttr === 'placeholder') el.placeholder = val;
-        else if (lowerAttr === 'style') applyInlineStyleString(el, val);
-      }
-    }
-    stack[stack.length - 1].appendChild(el);
-    if (!selfClosing && !VOID_HTML_TAGS.has(openingTag)) {
-      stack.push(el);
-    }
-  }
-
-  if (!skippedDisallowedTag && lastIdx < html.length) {
-    appendText(stack[stack.length - 1], html.slice(lastIdx));
-  }
-}
-
-function createTrustedHtmlSetter(_window, document) {
-  return (el, html) => {
-    if (document && typeof document.createElement === 'function') {
-      renderHtmlViaSafeDomBuilder(document, el, html);
-    } else if (el && typeof el === 'object') {
-      el.textContent = decodeHtmlEntities(String(html ?? '').replace(/<[^>]*>/g, ''));
-    }
-  };
-}
-
-function fmtK(n) {
-  const num = Number(n);
-  if (!num || isNaN(num)) return '0';
-  if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
-  if (num >= 1000) return Math.round(num / 1000) + 'k';
-  return String(num);
-}
-
-function fmtNum(n) {
-  if (n === null || n === undefined) return '0';
-  const num = Number(n);
-  if (isNaN(num)) return '0';
-  return num.toLocaleString('en-US');
-}
-
-function escHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function fmtResetTime(iso) {
-  if (!iso) return '';
-  try {
-    let d;
-    if (typeof iso === 'object' && iso.seconds !== undefined) {
-      d = new Date(Number(iso.seconds) * 1000);
-    } else {
-      d = new Date(iso);
-    }
-    if (isNaN(d.getTime())) return '';
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    return `→${hh}:${mm}`;
-  } catch {
-    return '';
+function removeStyleElements(document, documentHost) {
+  for (const d of resolveDocs(document, documentHost)) {
+    try {
+      const styleEl = d.getElementById?.('agy-ctx-statusbar-style');
+      styleEl?.remove?.();
+    } catch {}
   }
 }
 
 module.exports = {
   STYLE_CSS,
   buildDynamicCwWarnCss,
+  getCspNonce,
   ensureStyleElement,
-  createTrustedHtmlSetter,
-  fmtK,
-  fmtNum,
-  escHtml,
-  fmtResetTime,
+  removeStyleElements,
 };

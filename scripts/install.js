@@ -1,29 +1,51 @@
 #!/usr/bin/env node
+'use strict';
+
 /**
- * Installer for Antigravity Custom Statusbar & Auto-Patcher.
- * Builds `dist/statusbar_autoinject.js` from modular `src/` files, copies it
- * (preserving any embedded KO_THOUGHT_LOCALIZER block) and `ensure_statusbar_patch.js`
- * to `~/.gemini/antigravity`, then runs `--worker` to patch `app.asar`,
- * sync `app_storage.json`, and inject into active windows via CDP.
+ * Installer for Antigravity Custom Statusbar v2.0.0 & Modular Auto-Patcher.
+ * Builds `dist/statusbar_autoinject.js` from Hexagonal `src/`, preserves column-0
+ * companion plugin blocks in `~/.gemini/antigravity/statusbar_autoinject.js`,
+ * installs modular `installer/*.js` + `ensure_statusbar_patch.js`, then runs `--worker`.
  */
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { buildBundle } = require('./build');
+
+function writeFileAtomic(destPath, contentBufOrStr) {
+  const dir = path.dirname(destPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = `${destPath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    fs.writeFileSync(tmpPath, contentBufOrStr);
+    fs.renameSync(tmpPath, destPath);
+  } finally {
+    if (fs.existsSync(tmpPath)) {
+      try { fs.unlinkSync(tmpPath); } catch {}
+    }
+  }
+}
 
 const HOME_DIR = process.env.USERPROFILE || process.env.HOME || os.homedir();
 const AGY_DIR = path.join(HOME_DIR, '.gemini', 'antigravity');
 const TARGET_AUTOINJECT = path.join(AGY_DIR, 'statusbar_autoinject.js');
 const TARGET_PATCHER = path.join(AGY_DIR, 'ensure_statusbar_patch.js');
+const TARGET_INSTALLER_DIR = path.join(AGY_DIR, 'installer');
 
 const SRC_PATCHER = path.join(__dirname, 'ensure_statusbar_patch.js');
+const SRC_INSTALLER_DIR = path.join(__dirname, '..', 'installer');
 
-const MCP_BEGIN_RE = /^(?:\/\/ === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
-const MCP_END_RE = /^(?:\/\/ === END_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === END_AGY_MCP_MANAGER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
-const KO_BEGIN_RE = /^(?:\/\/ === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
-const KO_END_RE = /^(?:\/\/ === END_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === END_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const MCP_BEGIN_RE =
+  /^(?:\/\/ === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === BEGIN_AGY_MCP_MANAGER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const MCP_END_RE =
+  /^(?:\/\/ === END_AGY_MCP_MANAGER(?:_V\d+)? ===|\/\* === END_AGY_MCP_MANAGER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const KO_BEGIN_RE =
+  /^(?:\/\/ === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === BEGIN_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
+const KO_END_RE =
+  /^(?:\/\/ === END_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? ===|\/\* === END_AGY_KO_THOUGHT_LOCALIZER(?:_V\d+)? === \*\/)[ \t]*\r?$/gm;
 
 function extractAnchoredCompanionBlock(source, beginRe, endRe) {
   if (!source || typeof source !== 'string') return '';
@@ -47,15 +69,28 @@ function extractAnchoredCompanionBlock(source, beginRe, endRe) {
   return source.slice(startIdx, endIdx).trim();
 }
 
-function install() {
+function copyInstallerModules(srcDir = SRC_INSTALLER_DIR, destDir = TARGET_INSTALLER_DIR) {
+  fs.mkdirSync(destDir, { recursive: true });
+  const files = fs.readdirSync(srcDir);
+  for (const name of files) {
+    if (!name.endsWith('.js')) continue;
+    writeFileAtomic(path.join(destDir, name), fs.readFileSync(path.join(srcDir, name)));
+  }
+}
+
+function install(opts = {}) {
   const { outFile } = buildBundle();
-  fs.mkdirSync(AGY_DIR, { recursive: true });
+  const agyDir = opts.agyDir || AGY_DIR;
+  const targetAutoinject = opts.targetAutoinject || path.join(agyDir, 'statusbar_autoinject.js');
+  const targetPatcher = opts.targetPatcher || path.join(agyDir, 'ensure_statusbar_patch.js');
+  const targetInstallerDir = opts.targetInstallerDir || path.join(agyDir, 'installer');
+
+  fs.mkdirSync(agyDir, { recursive: true });
 
   let baseCode = fs.readFileSync(outFile, 'utf8').replace(/\r\n/g, '\n').trimEnd() + '\n';
 
-  // Preserve embedded antigravity-mcp-manager and ko-thought-translator blocks only when anchored at column 0
-  if (fs.existsSync(TARGET_AUTOINJECT)) {
-    const existing = fs.readFileSync(TARGET_AUTOINJECT, 'utf8').replace(/\r\n/g, '\n');
+  if (fs.existsSync(targetAutoinject)) {
+    const existing = fs.readFileSync(targetAutoinject, 'utf8').replace(/\r\n/g, '\n');
     const mcpBlock = extractAnchoredCompanionBlock(existing, MCP_BEGIN_RE, MCP_END_RE);
     if (mcpBlock) {
       baseCode += `\n${mcpBlock}\n`;
@@ -66,10 +101,15 @@ function install() {
     }
   }
 
-  fs.writeFileSync(TARGET_AUTOINJECT, baseCode, 'utf8');
-  fs.copyFileSync(SRC_PATCHER, TARGET_PATCHER);
+  writeFileAtomic(targetAutoinject, Buffer.from(baseCode, 'utf8'));
+  copyInstallerModules(SRC_INSTALLER_DIR, targetInstallerDir);
+  writeFileAtomic(targetPatcher, fs.readFileSync(SRC_PATCHER));
 
-  const workerRes = spawnSync(process.execPath, [TARGET_PATCHER, '--worker'], {
+  if (opts.skipWorker) {
+    return { targetAutoinject, targetPatcher, targetInstallerDir, exitCode: 0 };
+  }
+
+  const workerRes = spawnSync(process.execPath, [targetPatcher, '--worker'], {
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -81,7 +121,7 @@ function install() {
     process.stderr.write(String(workerRes.error.message || workerRes.error) + '\n');
   }
 
-  const statusRes = spawnSync(process.execPath, [TARGET_PATCHER, '--status'], {
+  const statusRes = spawnSync(process.execPath, [targetPatcher, '--status'], {
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -93,11 +133,22 @@ function install() {
     process.stderr.write(statusRes.stderr);
   }
   const exitCode = typeof workerRes.status === 'number' ? workerRes.status : 1;
-  process.exit(exitCode);
+  if (!opts.noExit) {
+    process.exit(exitCode);
+  }
+  return { targetAutoinject, targetPatcher, targetInstallerDir, exitCode };
 }
 
 if (require.main === module) {
   install();
 }
 
-module.exports = { install, extractAnchoredCompanionBlock };
+module.exports = {
+  MCP_BEGIN_RE,
+  MCP_END_RE,
+  KO_BEGIN_RE,
+  KO_END_RE,
+  extractAnchoredCompanionBlock,
+  copyInstallerModules,
+  install,
+};

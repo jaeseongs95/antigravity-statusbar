@@ -16,20 +16,29 @@ const SRC_DIR = path.join(ROOT_DIR, 'src');
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const OUT_FILE = path.join(DIST_DIR, 'statusbar_autoinject.js');
 
+const V2_MODULE_ROOTS = ['ports', 'domain', 'drivers', 'ui', 'app'];
+
 const MODULE_ORDER = [
-  'host-adapter-config.js',
-  'protobuf-checkpoint-codec.js',
-  'remote-runtime.js',
-  'companion-loader.js',
-  'context-window-policy.js',
-  'dom-styles.js',
-  'rpc-client.js',
-  'desktop-react-bridge.js',
-  'host-bridge.js',
-  'adapter-registry.js',
-  'adapters/core-metrics.js',
-  'adapters/compact-button.js',
-  'adapters/context-button.js',
+  'ports/contracts.js',
+  'domain/i18n.js',
+  'domain/context-window-policy.js',
+  'domain/metrics-calculator.js',
+  'drivers/antigravity/host-config.js',
+  'drivers/antigravity/protobuf-wire-codec.js',
+  'drivers/antigravity/local-http-transport.js',
+  'drivers/antigravity/remote-port-driver.js',
+  'drivers/antigravity/react-fiber-driver.js',
+  'drivers/antigravity/compact-driver.js',
+  'drivers/antigravity/companion-driver.js',
+  'ui/dom-builder.js',
+  'ui/style-manager.js',
+  'ui/adapter-registry.js',
+  'ui/views/compact-button.js',
+  'ui/views/metrics-view.js',
+  'ui/views/context-modal.js',
+  'app/disposable.js',
+  'app/state-coordinator.js',
+  'app/index.js',
   'index.js',
 ];
 
@@ -359,10 +368,17 @@ function buildBundle(options = {}) {
   const write = options.write !== false;
   if (typeof fs.readdirSync === 'function') {
     const orderSet = new Set(MODULE_ORDER);
-    for (const rel of collectSrcJsFiles(SRC_DIR)) {
-      if (!orderSet.has(rel)) {
-        throw new Error(`Module in src/ is missing from MODULE_ORDER: ${rel}`);
+    for (const rootDir of V2_MODULE_ROOTS) {
+      const absRoot = path.join(SRC_DIR, rootDir);
+      if (!fs.existsSync(absRoot)) continue;
+      for (const rel of collectSrcJsFiles(absRoot, rootDir)) {
+        if (!orderSet.has(rel)) {
+          throw new Error(`Module in src/ is missing from MODULE_ORDER: ${rel}`);
+        }
       }
+    }
+    if (!orderSet.has('index.js')) {
+      throw new Error('Entry module src/index.js is missing from MODULE_ORDER');
     }
   }
   const modulesCode = [];

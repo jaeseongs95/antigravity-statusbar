@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Antigravity Custom Statusbar (Local & Remote Control)
 // @namespace    https://github.com/jaeseongs95/antigravity-statusbar
-// @version      1.4.0
+// @version      2.0.0
 // @description  Custom context window statusbar (32K-980K), quota/cache metrics, compact & context debug modal for Antigravity Desktop and Remote Control web.
 // @match        https://antigravity.google.com/*
 // @match        https://*.antigravity.google.com/*
@@ -12,9 +12,973 @@
 (() => {
   'use strict';
   const __modules = {
-  "./host-adapter-config": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
+  "./ports/contracts": function(module, exports, __require) {
+    const require = (spec) => __require("./ports", spec);
     'use strict';
+    /**
+     * Pure Port Contracts, Validators, and Isolated v2 Plugin Bus (`Symbol.for('agy.plugin.bus.v2')`).
+     * Zero DOM, browser global, or vendor string dependencies.
+     */
+    const PLUGIN_BUS_SYMBOL = Symbol.for('agy.plugin.bus.v2');
+    function assertPortMethods(port, portName, requiredMethods) {
+      if (!port || typeof port !== 'object') {
+        throw new TypeError(`${portName} must be an object`);
+      }
+      for (const method of requiredMethods) {
+        if (typeof port[method] !== 'function') {
+          throw new TypeError(`${portName} missing required method "${method}"`);
+        }
+      }
+      return port;
+    }
+    const TRANSPORT_PORT_METHODS = Object.freeze([
+      'getStats',
+      'getCachedStats',
+      'getImmediateStats',
+      'getQuota',
+      'getLatestQuota',
+      'getAllTrajectories',
+      'updateAnnotations',
+      'getGeneratorMetadataRange',
+      'dispose',
+    ]);
+    const STORAGE_PORT_METHODS = Object.freeze([
+      'loadPersistent',
+      'readSessionCookie',
+      'writeSessionCookie',
+      'deleteSessionCookie',
+      'readDefaultCookie',
+      'writeDefaultCookie',
+      'getLocalItem',
+      'setLocalItem',
+      'flushNative',
+    ]);
+    const ENGINE_PORT_METHODS = Object.freeze([
+      'observeSessions',
+      'getActiveSessions',
+      'applyContextLimit',
+      'triggerCompact',
+      'getSelectedModelKey',
+      'getDebugSnapshot',
+      'dispose',
+    ]);
+    const DOCUMENT_HOST_PORT_METHODS = Object.freeze([
+      'getAccessibleDocs',
+      'getIframeDocument',
+      'buildWarningSuppressionCss',
+      'findFallbackSessionTarget',
+    ]);
+    const COMPANION_LOADER_PORT_METHODS = Object.freeze([
+      'discoverCompanions',
+      'loadCompanions',
+    ]);
+    function validateTransportPort(port) {
+      return assertPortMethods(port, 'TransportPort', TRANSPORT_PORT_METHODS);
+    }
+    function validateStoragePort(port) {
+      return assertPortMethods(port, 'StoragePort', STORAGE_PORT_METHODS);
+    }
+    function validateEnginePort(port) {
+      return assertPortMethods(port, 'EnginePort', ENGINE_PORT_METHODS);
+    }
+    function validateDocumentHostPort(port) {
+      return assertPortMethods(port, 'DocumentHostPort', DOCUMENT_HOST_PORT_METHODS);
+    }
+    function validateCompanionLoaderPort(port) {
+      return assertPortMethods(port, 'CompanionLoaderPort', COMPANION_LOADER_PORT_METHODS);
+    }
+    function getOrCreatePluginBus(hostRoot) {
+      const target = hostRoot && (typeof hostRoot === 'object' || typeof hostRoot === 'function') ? hostRoot : globalThis;
+      const existing = target[PLUGIN_BUS_SYMBOL];
+      if (
+        existing &&
+        typeof existing === 'object' &&
+        existing.version === 2 &&
+        typeof existing.registerPlugin === 'function' &&
+        typeof existing.on === 'function'
+      ) {
+        return existing;
+      }
+      const plugins = new Map();
+      const listeners = new Map();
+      const bus = {
+        version: 2,
+        registerPlugin(id, metadata = {}) {
+          const cleanId = typeof id === 'string' ? id.trim() : '';
+          if (!cleanId) {
+            throw new TypeError('Plugin id must be a non-empty string');
+          }
+          const entry = Object.freeze({
+            id: cleanId,
+            version: String(metadata.version || '0.0.0'),
+            capabilities: Array.isArray(metadata.capabilities) ? Object.freeze([...metadata.capabilities]) : Object.freeze([]),
+            registeredAt: Date.now(),
+          });
+          plugins.set(cleanId, entry);
+          bus.emit('plugin:registered', entry);
+          return () => bus.unregisterPlugin(cleanId);
+        },
+        unregisterPlugin(id) {
+          const cleanId = typeof id === 'string' ? id.trim() : '';
+          if (!cleanId || !plugins.has(cleanId)) return false;
+          const prev = plugins.get(cleanId);
+          plugins.delete(cleanId);
+          bus.emit('plugin:unregistered', prev);
+          return true;
+        },
+        getPlugin(id) {
+          return plugins.get(id) || null;
+        },
+        listPlugins() {
+          return Array.from(plugins.values());
+        },
+        on(event, handler) {
+          if (typeof event !== 'string' || !event || typeof handler !== 'function') {
+            return () => {};
+          }
+          let set = listeners.get(event);
+          if (!set) {
+            set = new Set();
+            listeners.set(event, set);
+          }
+          set.add(handler);
+          return () => {
+            set.delete(handler);
+            if (set.size === 0) listeners.delete(event);
+          };
+        },
+        off(event, handler) {
+          const set = listeners.get(event);
+          if (!set) return false;
+          const deleted = set.delete(handler);
+          if (set.size === 0) listeners.delete(event);
+          return deleted;
+        },
+        emit(event, payload) {
+          const set = listeners.get(event);
+          if (!set || set.size === 0) return 0;
+          let count = 0;
+          for (const fn of Array.from(set)) {
+            try {
+              fn(payload);
+              count += 1;
+            } catch {}
+          }
+          return count;
+        },
+      };
+      try {
+        Object.defineProperty(target, PLUGIN_BUS_SYMBOL, {
+          value: bus,
+          configurable: true,
+          enumerable: false,
+          writable: true,
+        });
+      } catch {
+        target[PLUGIN_BUS_SYMBOL] = bus;
+      }
+      return bus;
+    }
+    module.exports = {
+      PLUGIN_BUS_SYMBOL,
+      TRANSPORT_PORT_METHODS,
+      STORAGE_PORT_METHODS,
+      ENGINE_PORT_METHODS,
+      DOCUMENT_HOST_PORT_METHODS,
+      COMPANION_LOADER_PORT_METHODS,
+      assertPortMethods,
+      validateTransportPort,
+      validateStoragePort,
+      validateEnginePort,
+      validateDocumentHostPort,
+      validateCompanionLoaderPort,
+      getOrCreatePluginBus,
+    };
+  },
+  "./domain/i18n": function(module, exports, __require) {
+    const require = (spec) => __require("./domain", spec);
+    'use strict';
+    /**
+     * Pure Domain Internationalization (`en` default + built-in `ko` toggle).
+     * Zero DOM or vendor globals.
+     */
+    const DEFAULT_LOCALE = 'en';
+    const SUPPORTED_LOCALES = Object.freeze(['en', 'ko']);
+    const DEFAULT_COMPACT_PROMPT =
+      'Summarize the current state concisely in internal context only so work can resume seamlessly: preserve exact user goals, confirmed decisions and reasons, edited file paths and key changes, executed checks/results (including failures), remaining work, and constraints/feedback, while condensing finished exploration and long tool outputs to conclusions. Respond with a single confirmation line and end the turn immediately.';
+    const MESSAGES = Object.freeze({
+      en: Object.freeze({
+        'compact.label': '[ compact ]',
+        'compact.title': 'Run system /compact immediately with configured summary prompt',
+        'context.label': '[ context ]',
+        'context.title': 'Toggle detailed context & trajectory debug modal',
+        'metrics.currentSession': 'current',
+        'metrics.limitTitle': 'Session ({session}) context limit: {cw} ({hint})\nClick to open custom input / preset selector (per-session)\nShift+Click to cycle 256K -> 512K -> 900K',
+        'metrics.cacheLabel': 'cache',
+        'metrics.ctxLabel': 'ctx',
+        'metrics.leftLabel': 'left',
+        'menu.headerLeft': 'Session Context Limit',
+        'menu.headerRight': 'Per-session · 32K~980K',
+        'menu.customPlaceholder': 'e.g. 400 or 750K',
+        'menu.apply': 'Apply',
+        'menu.customHint': 'Supports 32K–980K · Enter to apply · Click outside or Esc to close',
+        'menu.saveAsDefault': 'Save {cw} as new-session default ({defCw})',
+        'preset.128K': 'Saver (~0.7x)',
+        'preset.256K': 'Default quota (1.0x)',
+        'preset.384K': 'Mid limit (~1.15x)',
+        'preset.512K': 'High (~1.3x quota/turn)',
+        'preset.750K': 'Large (~1.6x)',
+        'preset.900K': 'Max (~1.8x quota/turn)',
+        'preset.customLow': 'Saver (<1.0x)',
+        'preset.customMult': 'Custom (~{mult}x est.)',
+        'modal.title': 'Trajectory & Context Debug View',
+        'modal.inlineStats': '[ inline stats ]',
+        'modal.inlineStatsTitle': 'Toggle built-in top Trajectory Stats banner',
+        'modal.close': '[ × ]',
+        'modal.closeTitle': 'Close (ESC)',
+        'modal.loading': 'Loading context telemetry…',
+        'modal.noSession': 'Session metadata unavailable (missing cascadeId or RPC transport).',
+        'modal.fetchFailed': 'Failed to load telemetry: {error}',
+        'modal.cardCtx': 'Context Used / Session Limit ({cw})',
+        'modal.cardCache': 'Prompt Cache Hit Rate',
+        'modal.cardCacheSub': 'Cache: {cache} · Fresh Input: {input}',
+        'modal.cardTraj': 'Trajectory Metadata',
+        'modal.cardTrajVal': '{steps} steps · {turns} turns',
+        'modal.cardTrajSub': 'Last Turn Max: {max} · Model: {model}',
+        'modal.breakdownTitle': 'Context Window Token Breakdown',
+        'modal.breakdownTotal': 'Total: {total}',
+        'modal.colGroupSource': 'Group / Source',
+        'modal.colTokens': 'Tokens',
+        'modal.colShare': 'Share',
+        'modal.sectionsTitle': 'Prompt Sections ({count})',
+        'modal.colSectionTitle': 'Section Title',
+        'modal.colSource': 'Source',
+        'modal.colSize': 'Size',
+        'modal.turnsTitle': 'Recent Generator Turns (Latest {shown} of {total})',
+        'modal.trajectoryId': 'Trajectory ID: {id}',
+        'modal.colStep': 'Step',
+        'modal.colModel': 'Model',
+        'modal.colEstCtx': 'Est. Ctx',
+        'modal.colCacheRead': 'Cache Read',
+        'modal.colFreshInput': 'Fresh Input',
+        'modal.colOutputThink': 'Output (+Think)',
+        'modal.noTurns': 'No generator turn metadata recorded yet.',
+        'modal.charsUnit': '{count} chars',
+        'modal.thkSuffix': '(+{count} thk)',
+      }),
+      ko: Object.freeze({
+        'compact.label': '[ compact ]',
+        'compact.title': '지정된 요약 프롬프트로 시스템 /compact 즉시 실행',
+        'context.label': '[ context ]',
+        'context.title': '상세 컨텍스트 디버그 창 열기/닫기',
+        'metrics.currentSession': '현재',
+        'metrics.limitTitle': '이 세션({session})의 컨텍스트 한도: {cw} ({hint})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환',
+        'metrics.cacheLabel': 'cache',
+        'metrics.ctxLabel': 'ctx',
+        'metrics.leftLabel': 'left',
+        'menu.headerLeft': '컨텍스트 한도 설정',
+        'menu.headerRight': '세션별 적용 · 32K~980K',
+        'menu.customPlaceholder': '예: 400 또는 750K',
+        'menu.apply': '적용',
+        'menu.customHint': '32K~980K 직접 입력 · Enter 적용 · 바깥 클릭/Esc 닫기',
+        'menu.saveAsDefault': '기본값으로 저장 ({cw} → 새 채팅 기본값: {defCw})',
+        'preset.128K': '절약 모드 (~0.7x)',
+        'preset.256K': '기본 쿼터 (1.0x)',
+        'preset.384K': '중간 한도 (~1.15x)',
+        'preset.512K': '턴당 약 1.3배 쿼터 소비',
+        'preset.750K': '대용량 (~1.6x)',
+        'preset.900K': '턴당 약 1.8배 쿼터 소비',
+        'preset.customLow': '절약 모드 (<1.0x)',
+        'preset.customMult': '직접 지정 (~{mult}x 추정)',
+        'modal.title': 'Trajectory & Context Debug View',
+        'modal.inlineStats': '[ inline stats ]',
+        'modal.inlineStatsTitle': '채팅창 상단 내장 Trajectory Stats 표시 토글',
+        'modal.close': '[ × ]',
+        'modal.closeTitle': '닫기 (ESC)',
+        'modal.loading': '컨텍스트 메타데이터를 불러오는 중…',
+        'modal.noSession': '세션 정보(cascadeId 또는 RPC 연결)를 찾을 수 없습니다.',
+        'modal.fetchFailed': '메타데이터 조회 실패: {error}',
+        'modal.cardCtx': '사용 컨텍스트 / 세션 한도 ({cw})',
+        'modal.cardCache': '프롬프트 캐시 적중률',
+        'modal.cardCacheSub': '캐시: {cache} · 신규 입력: {input}',
+        'modal.cardTraj': 'Trajectory 메타데이터',
+        'modal.cardTrajVal': '{steps} steps · {turns} turns',
+        'modal.cardTrajSub': '직전 턴 상한: {max} · 모델: {model}',
+        'modal.breakdownTitle': '컨텍스트 윈도우 토큰 상세',
+        'modal.breakdownTotal': '합계: {total}',
+        'modal.colGroupSource': '그룹 / 소스',
+        'modal.colTokens': '토큰',
+        'modal.colShare': '비중',
+        'modal.sectionsTitle': '프롬프트 섹션 ({count})',
+        'modal.colSectionTitle': '섹션 제목',
+        'modal.colSource': '소스',
+        'modal.colSize': '크기',
+        'modal.turnsTitle': '최근 생성 턴 ({shown} / {total})',
+        'modal.trajectoryId': 'Trajectory ID: {id}',
+        'modal.colStep': '스텝',
+        'modal.colModel': '모델',
+        'modal.colEstCtx': '추정 Ctx',
+        'modal.colCacheRead': '캐시 읽기',
+        'modal.colFreshInput': '신규 입력',
+        'modal.colOutputThink': '출력 (+사고)',
+        'modal.noTurns': '생성된 턴 메타데이터가 아직 없습니다.',
+        'modal.charsUnit': '{count} chars',
+        'modal.thkSuffix': '(+{count} thk)',
+      }),
+    });
+    function resolveLocale(preferred, hostLanguage) {
+      const pref = typeof preferred === 'string' ? preferred.trim().toLowerCase() : '';
+      if (pref === 'en' || pref === 'ko') return pref;
+      if (pref === 'auto') {
+        const lang = typeof hostLanguage === 'string' ? hostLanguage.trim().toLowerCase() : '';
+        return lang.startsWith('ko') ? 'ko' : 'en';
+      }
+      return DEFAULT_LOCALE;
+    }
+    function formatMessage(template, vars) {
+      if (!vars || typeof vars !== 'object') return template;
+      return String(template).replace(/\{([A-Za-z0-9_]+)\}/g, (_, k) =>
+        vars[k] !== undefined && vars[k] !== null ? String(vars[k]) : ''
+      );
+    }
+    function createTranslator(initialLocale = DEFAULT_LOCALE, hostLanguage = '') {
+      let currentLocale = resolveLocale(initialLocale, hostLanguage);
+      function setLocale(nextLocale, nextHostLanguage) {
+        currentLocale = resolveLocale(nextLocale, nextHostLanguage !== undefined ? nextHostLanguage : hostLanguage);
+        return currentLocale;
+      }
+      function getLocale() {
+        return currentLocale;
+      }
+      function t(key, vars) {
+        const dict = MESSAGES[currentLocale] || MESSAGES[DEFAULT_LOCALE];
+        const template = dict[key] !== undefined ? dict[key] : (MESSAGES[DEFAULT_LOCALE][key] ?? key);
+        return formatMessage(template, vars);
+      }
+      return {
+        getLocale,
+        setLocale,
+        t,
+      };
+    }
+    module.exports = {
+      DEFAULT_LOCALE,
+      SUPPORTED_LOCALES,
+      DEFAULT_COMPACT_PROMPT,
+      MESSAGES,
+      resolveLocale,
+      formatMessage,
+      createTranslator,
+    };
+  },
+  "./domain/context-window-policy": function(module, exports, __require) {
+    const require = (spec) => __require("./domain", spec);
+    'use strict';
+    /**
+     * Pure Context Window Policy Domain Module.
+     * Enforces [32K, 980K] clamping, 200-entry synchronized LRU eviction, cookie override preservation,
+     * and remote annotation profile serialization without any DOM or vendor coupling.
+     */
+    const { DEFAULT_LOCALE, createTranslator } = require('./i18n');
+    const CONTEXT_WINDOWS = Object.freeze(['256K', '512K', '900K']);
+    const PRESET_CONTEXT_WINDOWS = Object.freeze(['128K', '256K', '384K', '512K', '750K', '900K']);
+    const MAX_SESSION_ENTRIES = 200;
+    const CW_LIMITS = Object.freeze({
+      '128K': 128000,
+      '256K': 256000,
+      '384K': 384000,
+      '512K': 512000,
+      '750K': 750000,
+      '900K': 900000,
+    });
+    const STORAGE_MAP_KEY = 'agy-session-ctx-windows-v1';
+    const STORAGE_TS_MAP_KEY = 'agy-session-ctx-ts-v1';
+    const DEFAULT_CW_KEY = 'agy-default-ctx-window';
+    function normalizeContextWindow(raw, onNormalized) {
+      if (raw === null || raw === undefined) return null;
+      const s = String(raw).trim().toUpperCase().replace(/,/g, '');
+      if (!s) return null;
+      const m = s.match(/^(\d+(?:\.\d+)?)\s*([KM])?$/);
+      if (!m) return null;
+      const num = parseFloat(m[1]);
+      const unit = m[2] || '';
+      if (isNaN(num) || num <= 0) return null;
+      let kVal;
+      if (unit === 'M') {
+        kVal = Math.round(num * 1000);
+      } else if (unit === 'K') {
+        kVal = Math.round(num);
+      } else {
+        kVal = num >= 10000 ? Math.round(num / 1000) : Math.round(num);
+      }
+      if (kVal < 32) kVal = 32;
+      if (kVal > 980) kVal = 980;
+      const cw = `${kVal}K`;
+      if (typeof onNormalized === 'function') {
+        onNormalized(cw);
+      }
+      return cw;
+    }
+    function getCwLimit(cw, onNormalized) {
+      if (CW_LIMITS[cw]) return CW_LIMITS[cw];
+      const norm = normalizeContextWindow(cw, onNormalized);
+      if (!norm) return 256000;
+      return parseInt(norm, 10) * 1000;
+    }
+    function getCwQuotaHint(cw, onNormalized, translatorOrLocale = DEFAULT_LOCALE) {
+      const tr =
+        translatorOrLocale && typeof translatorOrLocale.t === 'function'
+          ? translatorOrLocale
+          : createTranslator(typeof translatorOrLocale === 'string' ? translatorOrLocale : DEFAULT_LOCALE);
+      const presetKey = `preset.${cw}`;
+      const presetMsg = tr.t(presetKey);
+      if (presetMsg !== presetKey) return presetMsg;
+      const tok = getCwLimit(cw, onNormalized);
+      if (tok < 256000) return tr.t('preset.customLow');
+      if (tok === 256000) return tr.t('preset.256K');
+      const mult = (1 + ((tok - 256000) / (900000 - 256000)) * 0.8).toFixed(1);
+      return tr.t('preset.customMult', { mult });
+    }
+    function createContextWindowStore({ storage, onCustomCw, onSaveCw, translator }) {
+      const sessionCwMap = new Map();
+      const sessionCwTsMap = new Map();
+      const VALID_CASCADE_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+      const FORBIDDEN_ID_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+      let defaultCwCache = '512K';
+      let hasExplicitDefault = false;
+      const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
+      const isValidCascadeId = (cascadeId) =>
+        typeof cascadeId === 'string' && VALID_CASCADE_ID_RE.test(cascadeId) && !FORBIDDEN_ID_KEYS.has(cascadeId);
+      function trimSessionMaps(maxEntries = MAX_SESSION_ENTRIES) {
+        while (sessionCwMap.size > maxEntries) {
+          const oldestKey = sessionCwMap.keys().next().value;
+          if (oldestKey === undefined) break;
+          sessionCwMap.delete(oldestKey);
+          sessionCwTsMap.delete(oldestKey);
+          try {
+            storage?.deleteSessionCookie?.(oldestKey);
+          } catch {}
+        }
+      }
+      function touchSessionEntry(cascadeId, cw, ts) {
+        if (!isValidCascadeId(cascadeId)) return false;
+        if (sessionCwMap.has(cascadeId)) sessionCwMap.delete(cascadeId);
+        sessionCwMap.set(cascadeId, cw);
+        if (typeof ts === 'number' && ts > 0) {
+          sessionCwTsMap.set(cascadeId, ts);
+        } else if (!sessionCwTsMap.has(cascadeId)) {
+          sessionCwTsMap.set(cascadeId, 1);
+        }
+        trimSessionMaps(MAX_SESSION_ENTRIES);
+        return true;
+      }
+      function loadMapFromRaw(raw) {
+        if (!raw) return;
+        try {
+          const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (obj && typeof obj === 'object') {
+            for (const [k, v] of Object.entries(obj)) {
+              if (!isValidCascadeId(k)) continue;
+              const norm = normalize(v);
+              if (norm) {
+                touchSessionEntry(k, norm, sessionCwTsMap.get(k));
+              }
+            }
+          }
+        } catch {}
+      }
+      function loadTsMapFromRaw(raw) {
+        if (!raw) return;
+        try {
+          const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (obj && typeof obj === 'object') {
+            for (const [k, v] of Object.entries(obj)) {
+              if (k !== '__default__' && !isValidCascadeId(k)) continue;
+              const tsNum = Number(v);
+              if (!isNaN(tsNum) && tsNum > 0) {
+                const prev = sessionCwTsMap.get(k) || 0;
+                if (tsNum > prev) sessionCwTsMap.set(k, tsNum);
+              }
+            }
+          }
+        } catch {}
+      }
+      function serializeSessionMap() {
+        trimSessionMaps(MAX_SESSION_ENTRIES);
+        return JSON.stringify(Object.fromEntries(sessionCwMap.entries()));
+      }
+      function serializeSessionTsMap() {
+        const out = {};
+        for (const [k, ts] of sessionCwTsMap.entries()) {
+          if (typeof ts === 'number' && ts > 0 && (k === '__default__' || sessionCwMap.has(k))) {
+            out[k] = ts;
+          }
+        }
+        return JSON.stringify(out);
+      }
+      try {
+        const lsDef = normalize(storage?.getLocalItem?.(DEFAULT_CW_KEY));
+        if (lsDef) {
+          defaultCwCache = lsDef;
+          hasExplicitDefault = true;
+        }
+        const cDef = normalize(storage?.readDefaultCookie?.());
+        if (cDef) {
+          defaultCwCache = cDef;
+          hasExplicitDefault = true;
+        }
+        loadTsMapFromRaw(storage?.getLocalItem?.(STORAGE_TS_MAP_KEY));
+        loadMapFromRaw(storage?.getLocalItem?.(STORAGE_MAP_KEY));
+      } catch {}
+      async function loadPersistentContextSettings() {
+        if (!storage || typeof storage.loadPersistent !== 'function') return;
+        try {
+          const items = await storage.loadPersistent();
+          if (!items || typeof items !== 'object') return;
+          const savedDef = normalize(items.defaultCw ?? items[DEFAULT_CW_KEY]);
+          if (savedDef) {
+            defaultCwCache = savedDef;
+            hasExplicitDefault = true;
+          }
+          if (items.tsMap ?? items[STORAGE_TS_MAP_KEY]) {
+            loadTsMapFromRaw(items.tsMap ?? items[STORAGE_TS_MAP_KEY]);
+          }
+          if (items.sessionMap ?? items[STORAGE_MAP_KEY]) {
+            loadMapFromRaw(items.sessionMap ?? items[STORAGE_MAP_KEY]);
+            try {
+              storage.setLocalItem?.(STORAGE_MAP_KEY, serializeSessionMap());
+              storage.setLocalItem?.(STORAGE_TS_MAP_KEY, serializeSessionTsMap());
+            } catch {}
+          }
+        } catch {}
+      }
+      function hasSessionOverride(cascadeId) {
+        if (!isValidCascadeId(cascadeId)) return false;
+        if (sessionCwMap.has(cascadeId)) return true;
+        const cSession = storage?.readSessionCookie?.(cascadeId);
+        if (cSession) {
+          const norm = normalize(cSession.cw);
+          if (norm) {
+            const prevTs = sessionCwTsMap.get(cascadeId) || 0;
+            const ts = typeof cSession.ts === 'number' && cSession.ts > prevTs ? cSession.ts : prevTs || 1;
+            touchSessionEntry(cascadeId, norm, ts);
+            return true;
+          }
+        }
+        return false;
+      }
+      function getSavedContextWindow(cascadeId) {
+        if (isValidCascadeId(cascadeId) && sessionCwMap.has(cascadeId)) {
+          const v = normalize(sessionCwMap.get(cascadeId));
+          if (v) return v;
+        }
+        if (isValidCascadeId(cascadeId) && hasSessionOverride(cascadeId)) {
+          return sessionCwMap.get(cascadeId);
+        }
+        return normalize(defaultCwCache) || '512K';
+      }
+      function saveContextWindowSetting(cascadeId, targetCw, opts = {}) {
+        const norm = normalize(targetCw);
+        if (!norm) return null;
+        const ts = typeof opts?.updatedAtMs === 'number' && opts.updatedAtMs > 0 ? opts.updatedAtMs : Date.now();
+        if (cascadeId !== null && cascadeId !== undefined && cascadeId !== '') {
+          if (!isValidCascadeId(cascadeId)) return null;
+          touchSessionEntry(cascadeId, norm, ts);
+          storage?.writeSessionCookie?.(cascadeId, norm, ts);
+          const serialized = serializeSessionMap();
+          const serializedTs = serializeSessionTsMap();
+          try {
+            storage?.setLocalItem?.(STORAGE_MAP_KEY, serialized);
+            storage?.setLocalItem?.(STORAGE_TS_MAP_KEY, serializedTs);
+          } catch {}
+          if (!opts?.deferNativeFlush) {
+            storage?.flushNative?.({
+              [STORAGE_MAP_KEY]: serialized,
+              [STORAGE_TS_MAP_KEY]: serializedTs,
+            });
+          }
+          if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
+            try { onSaveCw(cascadeId, norm, ts); } catch {}
+          }
+        } else {
+          defaultCwCache = norm;
+          hasExplicitDefault = true;
+          sessionCwTsMap.set('__default__', ts);
+          const serializedTs = serializeSessionTsMap();
+          storage?.writeDefaultCookie?.(norm);
+          try {
+            storage?.setLocalItem?.(DEFAULT_CW_KEY, norm);
+            storage?.setLocalItem?.(STORAGE_TS_MAP_KEY, serializedTs);
+          } catch {}
+          if (!opts?.deferNativeFlush) {
+            storage?.flushNative?.({
+              [DEFAULT_CW_KEY]: norm,
+              [STORAGE_TS_MAP_KEY]: serializedTs,
+            });
+          }
+          if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
+            try { onSaveCw(null, norm, ts); } catch {}
+          }
+        }
+        return norm;
+      }
+      function encodeRemoteAnnotationProfile(cascadeId) {
+        if (!cascadeId || !hasSessionOverride(cascadeId)) return null;
+        const sessionCw = normalize(sessionCwMap.get(cascadeId));
+        if (!sessionCw) return null;
+        const defCw = normalize(defaultCwCache) || '512K';
+        const ts = sessionCwTsMap.get(cascadeId) || 1;
+        return `${sessionCw}|${defCw}|${ts}`;
+      }
+      function parseRemoteAnnotationProfile(rawProfile) {
+        if (!rawProfile || typeof rawProfile !== 'string') return null;
+        const trimmed = rawProfile.trim();
+        if (!trimmed) return null;
+        if (!trimmed.includes('|')) {
+          const single = normalize(trimmed);
+          return single ? { sessionCw: single, defaultCw: null, ts: 1 } : null;
+        }
+        const parts = trimmed.split('|');
+        const sessionCw = normalize(parts[0]);
+        const defaultCw = normalize(parts[1]);
+        const tsRaw = parseInt(parts[2], 10);
+        const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
+        if (!sessionCw && !defaultCw) return null;
+        return { sessionCw, defaultCw, ts };
+      }
+      function syncFromRemoteAnnotations(summariesMap) {
+        if (!summariesMap || typeof summariesMap !== 'object') {
+          return { changed: false, unsyncedLocalIds: [] };
+        }
+        let changed = false;
+        let mapUpdated = false;
+        let defUpdated = false;
+        for (const [cid, sum] of Object.entries(summariesMap)) {
+          hasSessionOverride(cid);
+          const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
+          if (!parsed) continue;
+          if (parsed.sessionCw) {
+            const localCw = sessionCwMap.get(cid);
+            const localTs = sessionCwTsMap.get(cid) || 0;
+            if (!localCw || parsed.ts > localTs) {
+              saveContextWindowSetting(cid, parsed.sessionCw, {
+                fromRemoteSync: true,
+                deferNativeFlush: true,
+                updatedAtMs: parsed.ts,
+              });
+              mapUpdated = true;
+              if (localCw !== parsed.sessionCw) changed = true;
+            }
+          }
+          if (parsed.defaultCw) {
+            const localDefTs = sessionCwTsMap.get('__default__') || 0;
+            if (parsed.ts > localDefTs && parsed.defaultCw !== defaultCwCache) {
+              saveContextWindowSetting(null, parsed.defaultCw, {
+                fromRemoteSync: true,
+                deferNativeFlush: true,
+                updatedAtMs: parsed.ts,
+              });
+              defUpdated = true;
+              changed = true;
+            }
+          }
+        }
+        if (mapUpdated || defUpdated) {
+          const payload = { [STORAGE_TS_MAP_KEY]: serializeSessionTsMap() };
+          if (mapUpdated) payload[STORAGE_MAP_KEY] = serializeSessionMap();
+          if (defUpdated) payload[DEFAULT_CW_KEY] = defaultCwCache;
+          storage?.flushNative?.(payload);
+        }
+        const unsyncedLocalIds = [];
+        for (const [cid, localCw] of sessionCwMap.entries()) {
+          if (!cid || cid === 'remote-session') continue;
+          if ((sessionCwTsMap.get(cid) || 0) < 1) continue;
+          const sum = summariesMap[cid];
+          if (!sum) continue;
+          const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
+          if (!parsed || parsed.sessionCw !== localCw) {
+            unsyncedLocalIds.push(cid);
+          }
+        }
+        return { changed, unsyncedLocalIds };
+      }
+      function seedSessionIfEmpty(cascadeId, rawCw) {
+        if (!cascadeId || hasSessionOverride(cascadeId)) return;
+        const norm = normalize(rawCw);
+        if (norm) {
+          touchSessionEntry(cascadeId, norm, Date.now());
+        }
+      }
+      function migrateSessionOverride(fromCascadeId, toCascadeId) {
+        if (!fromCascadeId || !toCascadeId || fromCascadeId === toCascadeId) return null;
+        hasSessionOverride(fromCascadeId);
+        hasSessionOverride(toCascadeId);
+        const ts = sessionCwTsMap.get(fromCascadeId) || 1;
+        const cw = sessionCwMap.get(fromCascadeId);
+        if (!cw || ts < 1) return null;
+        sessionCwMap.delete(fromCascadeId);
+        sessionCwTsMap.delete(fromCascadeId);
+        const existingTs = sessionCwTsMap.get(toCascadeId) || 0;
+        if (ts >= existingTs) {
+          return saveContextWindowSetting(toCascadeId, cw, { updatedAtMs: ts });
+        }
+        return sessionCwMap.get(toCascadeId) || null;
+      }
+      return {
+        normalize,
+        getLimit: (cw) => getCwLimit(cw, onCustomCw),
+        getQuotaHint: (cw) => getCwQuotaHint(cw, onCustomCw, translator || DEFAULT_LOCALE),
+        loadPersistentContextSettings,
+        getSavedContextWindow,
+        saveContextWindowSetting,
+        encodeRemoteAnnotationProfile,
+        parseRemoteAnnotationProfile,
+        syncFromRemoteAnnotations,
+        hasSessionOverride,
+        seedSessionIfEmpty,
+        migrateSessionOverride,
+        getDefaultCw: () => normalize(defaultCwCache) || '512K',
+        hasExplicitDefaultCw: () => hasExplicitDefault,
+        _debugSizes: () => ({ cwSize: sessionCwMap.size, tsSize: sessionCwTsMap.size }),
+      };
+    }
+    module.exports = {
+      CONTEXT_WINDOWS,
+      PRESET_CONTEXT_WINDOWS,
+      MAX_SESSION_ENTRIES,
+      CW_LIMITS,
+      STORAGE_MAP_KEY,
+      STORAGE_TS_MAP_KEY,
+      DEFAULT_CW_KEY,
+      normalizeContextWindow,
+      getCwLimit,
+      getCwQuotaHint,
+      createContextWindowStore,
+    };
+  },
+  "./domain/metrics-calculator": function(module, exports, __require) {
+    const require = (spec) => __require("./domain", spec);
+    'use strict';
+    /**
+     * Pure Domain Telemetry & Quota Metrics Calculator.
+     * Zero DOM, window, fetch, or vendor dependencies.
+     */
+    function fmtK(n) {
+      const num = Number(n);
+      if (!num || isNaN(num)) return '0';
+      if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
+      if (num >= 1000) return Math.round(num / 1000) + 'k';
+      return String(num);
+    }
+    function fmtNum(n) {
+      if (n === null || n === undefined) return '0';
+      const num = Number(n);
+      if (isNaN(num)) return '0';
+      return num.toLocaleString('en-US');
+    }
+    function fmtResetTime(iso) {
+      if (!iso) return '';
+      try {
+        let d;
+        if (typeof iso === 'object' && iso.seconds !== undefined) {
+          d = new Date(Number(iso.seconds) * 1000);
+        } else {
+          d = new Date(iso);
+        }
+        if (isNaN(d.getTime())) return '';
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `→${hh}:${mm}`;
+      } catch {
+        return '';
+      }
+    }
+    function getChatModelFromMeta(m) {
+      if (!m) return null;
+      if (m.chatModel) return m.chatModel;
+      if (m.metadata && m.metadata.case === 'chatModel' && m.metadata.value) return m.metadata.value;
+      if (m.metadata && m.metadata.value && (m.metadata.value.chatStartMetadata || m.metadata.value.usage)) return m.metadata.value;
+      return null;
+    }
+    function getBucketRemainingFraction(b) {
+      if (!b) return null;
+      if (typeof b.remainingFraction === 'number') return b.remainingFraction;
+      if (b.remaining && b.remaining.case === 'remainingFraction' && typeof b.remaining.value === 'number') {
+        return b.remaining.value;
+      }
+      return null;
+    }
+    function extractStatsFromMetas(metas) {
+      const list = Array.isArray(metas) ? metas : [];
+      let used = 0;
+      let max = 256000;
+      let cacheRead = 0;
+      let inputTok = 0;
+      let lastMetaStepIndex = -1;
+      let foundCtx = false;
+      let foundUsage = false;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const m = list[i];
+        const cm = getChatModelFromMeta(m);
+        if (!cm) continue;
+        if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
+          const cwm = cm.chatStartMetadata.contextWindowMetadata;
+          if (cwm.estimatedTokensUsed !== undefined && cwm.estimatedTokensUsed !== null) {
+            used = Number(cwm.estimatedTokensUsed);
+            max = Number(cwm.maxContextTokens || 256000);
+            if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
+              lastMetaStepIndex = Number(m.stepIndices[m.stepIndices.length - 1]);
+            } else if (cm.chatStartMetadata.startStepIndex !== undefined && cm.chatStartMetadata.startStepIndex !== null) {
+              lastMetaStepIndex = Number(cm.chatStartMetadata.startStepIndex);
+            }
+            foundCtx = true;
+          }
+        }
+        if (!foundUsage && cm.usage && (cm.usage.inputTokens || cm.usage.cacheReadTokens)) {
+          cacheRead = Number(cm.usage.cacheReadTokens || 0);
+          inputTok = Number(cm.usage.inputTokens || 0);
+          foundUsage = true;
+        }
+        if (foundCtx && foundUsage) break;
+      }
+      const totalPrompt = cacheRead + inputTok;
+      const cachePct = totalPrompt > 0 ? Math.round((cacheRead / totalPrompt) * 100) : 0;
+      return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, lastMetaStepIndex, foundCtx, foundUsage };
+    }
+    function parseQuotaResponse(j) {
+      if (!j || typeof j !== 'object') return null;
+      const groups = (j.response && j.response.groups) || j.groups || [];
+      const geminiGroup = groups.find((g) => (g.displayName || g.groupName || '').includes('Gemini')) || groups[0];
+      if (geminiGroup && Array.isArray(geminiGroup.buckets)) {
+        const b5h = geminiGroup.buckets.find((b) => b.window === '5h');
+        const b7d = geminiGroup.buckets.find((b) => b.window === 'weekly');
+        const frac5h = getBucketRemainingFraction(b5h);
+        const frac7d = getBucketRemainingFraction(b7d);
+        return {
+          pct5h: frac5h !== null ? Math.round(frac5h * 100) : null,
+          rst5h: b5h ? fmtResetTime(b5h.resetTime) : '',
+          pct7d: frac7d !== null ? Math.round(frac7d * 100) : null,
+        };
+      }
+      return null;
+    }
+    /**
+     * Fail-closed cascade state matching (`D-0033`):
+     * Rejects snapshots missing an explicit conversation/cascade ID or belonging to another session.
+     */
+    function isStateForCascade(fullState, cascadeId) {
+      if (!fullState || typeof fullState !== 'object' || !cascadeId) return false;
+      const stateCid =
+        fullState.conversationId ||
+        fullState.cascadeId ||
+        fullState.trajectorySlice?.conversationId ||
+        fullState.trajectorySlice?.cascadeId ||
+        null;
+      if (!stateCid) return false;
+      return stateCid === cascadeId;
+    }
+    function applyRealtimeCompactionAndUsage(parsed, fullState) {
+      if (!fullState || typeof fullState !== 'object') return parsed;
+      const cwUsage = fullState.contextWindowUsage;
+      const compactedSteps = Array.isArray(fullState.compactedAtStepIndices)
+        ? fullState.compactedAtStepIndices
+        : fullState.compactionInfo?.compactedAtStepIndices;
+      const latestCompactedStep =
+        Array.isArray(compactedSteps) && compactedSteps.length > 0
+          ? Number(compactedSteps[compactedSteps.length - 1])
+          : -1;
+      const base = parsed
+        ? { ...parsed }
+        : {
+            used: 0,
+            trajectoryMax: 256000,
+            cacheRead: 0,
+            inputTok: 0,
+            cachePct: 0,
+            lastMetaStepIndex: -1,
+            foundCtx: false,
+            foundUsage: false,
+          };
+      if (cwUsage && typeof cwUsage === 'object') {
+        const uMax = Number(cwUsage.maxContextTokens || 0);
+        if (uMax > 0) {
+          base.trajectoryMax = uMax;
+        }
+        const uStep = Number(cwUsage.lastStepIndex ?? -1);
+        const uEst = Number(cwUsage.estimatedTokensUsed || 0);
+        const rawAfterCompact = cwUsage.estimatedAfterCompaction;
+        const afterCompact =
+          typeof rawAfterCompact === 'boolean' ? (rawAfterCompact ? uEst : 0) : Number(rawAfterCompact || 0);
+        if (
+          afterCompact > 0 &&
+          latestCompactedStep >= 0 &&
+          (base.lastMetaStepIndex < 0 || latestCompactedStep >= base.lastMetaStepIndex)
+        ) {
+          base.used = afterCompact;
+          base.foundCtx = true;
+        } else if (
+          uEst > 0 &&
+          (!base.foundCtx || (uStep >= 0 && base.lastMetaStepIndex >= 0 && uStep > base.lastMetaStepIndex))
+        ) {
+          base.used = uEst;
+          base.foundCtx = true;
+        }
+      }
+      return base;
+    }
+    function extractVersionMetrics(fullState, rcStepCount = -1, fallbackGenLen = -1) {
+      const slice = fullState?.trajectorySlice;
+      const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
+      const totalStepsLen = slice?.totalStepsLength ?? -1;
+      const compactedSteps = Array.isArray(fullState?.compactedAtStepIndices)
+        ? fullState.compactedAtStepIndices
+        : fullState?.compactionInfo?.compactedAtStepIndices;
+      const latestCompactedStep =
+        Array.isArray(compactedSteps) && compactedSteps.length > 0
+          ? Number(compactedSteps[compactedSteps.length - 1])
+          : -1;
+      const rawCwAfter = fullState?.contextWindowUsage?.estimatedAfterCompaction;
+      const cwAfterCompact =
+        typeof rawCwAfter === 'boolean'
+          ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
+          : Number(rawCwAfter || 0);
+      const hasLiveVersion = Boolean(fullState && (totalGenLen >= 0 || totalStepsLen >= 0));
+      const rcSteps = typeof rcStepCount === 'number' && rcStepCount >= 0 ? rcStepCount : -1;
+      const effGenLen = typeof fallbackGenLen === 'number' && fallbackGenLen > 0 ? fallbackGenLen : -1;
+      return {
+        totalGenLen,
+        totalStepsLen,
+        latestCompactedStep,
+        cwAfterCompact,
+        hasLiveVersion,
+        rcSteps,
+        versionKey: hasLiveVersion
+          ? `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`
+          : `fallback:${rcSteps}:${effGenLen}`,
+      };
+    }
+    module.exports = {
+      fmtK,
+      fmtNum,
+      fmtResetTime,
+      getChatModelFromMeta,
+      getBucketRemainingFraction,
+      extractStatsFromMetas,
+      parseQuotaResponse,
+      isStateForCascade,
+      applyRealtimeCompactionAndUsage,
+      extractVersionMetrics,
+    };
+  },
+  "./drivers/antigravity/host-config": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
+    'use strict';
+    /**
+     * Antigravity Host Adapter Configuration Driver.
+     * Enforces exact/dot-boundary subdomain checks (D-0031), HTTPS-only CDN origins,
+     * and clean standalone overrides without sibling repository knowledge.
+     */
+    const { DEFAULT_COMPACT_PROMPT } = require('../../domain/i18n');
     const DEFAULT_HOST_ADAPTER_CONFIG = Object.freeze({
       rpcServicePrefix: '/exa.language_server_pb.LanguageServerService',
       csrfHeaderName: 'x-codeium-csrf-token',
@@ -22,63 +986,82 @@
       remoteHostDomains: Object.freeze(['antigravity.google.com']),
       staticCdnOrigins: Object.freeze(['https://antigravity.static.usercontent.goog']),
       cdnOrigin: 'https://www.gstatic.com/antigravity',
-      companionScripts: Object.freeze({
-        mcpManagerUrl:
-          'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
-        koTranslatorUrl:
-          'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
-      }),
+      companionScripts: Object.freeze([]),
+      locale: 'en',
+      compactPrompt: DEFAULT_COMPACT_PROMPT,
     });
+    const SAFE_RPC_PREFIX_RE = /^\/(?!\/)[^\s?#]+$/;
+    const VALID_DOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+    function isPlainConfigObject(val) {
+      return Boolean(val && typeof val === 'object' && !Array.isArray(val) && val.nodeType === undefined);
+    }
     function normalizeHttpsBaseUrl(raw, fallback) {
       try {
-        const u = new URL(String(raw || '').trim());
-        if (u.protocol === 'https:' && !u.username && !u.password) {
+        const str = String(raw || '').trim();
+        if (!str || /[\u0000-\u0020]/.test(str)) return fallback;
+        const u = new URL(str);
+        if (u.protocol === 'https:' && !u.username && !u.password && !u.search && !u.hash) {
           return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
         }
       } catch {}
       return fallback;
     }
     function resolveHostAdapterConfig(overrides, win) {
-      if (overrides && typeof overrides.buildRpcPath === 'function' && typeof overrides.isRemoteHost === 'function') {
+      if (
+        isPlainConfigObject(overrides) &&
+        typeof overrides.buildRpcPath === 'function' &&
+        typeof overrides.isRemoteHost === 'function'
+      ) {
         return overrides;
       }
-      const winCfg = win && typeof win.__AGY_HOST_ADAPTER_CONFIG__ === 'object' ? win.__AGY_HOST_ADAPTER_CONFIG__ : null;
+      const rawWinCfg = win && win.__AGY_HOST_ADAPTER_CONFIG__;
+      const winCfg = isPlainConfigObject(rawWinCfg) ? rawWinCfg : null;
+      const ovrCfg = isPlainConfigObject(overrides) ? overrides : null;
       const src = {
         ...(winCfg || {}),
-        ...(overrides && typeof overrides === 'object' ? overrides : {}),
+        ...(ovrCfg || {}),
       };
-      const rpcServicePrefix = String(src.rpcServicePrefix || DEFAULT_HOST_ADAPTER_CONFIG.rpcServicePrefix).replace(
-        /\/+$/,
-        ''
-      );
+      const rawPrefix = typeof src.rpcServicePrefix === 'string' ? src.rpcServicePrefix.trim().replace(/\/+$/, '') : '';
+      const rpcServicePrefix =
+        rawPrefix && SAFE_RPC_PREFIX_RE.test(rawPrefix) && !rawPrefix.includes('..') && !rawPrefix.includes('://')
+          ? rawPrefix
+          : DEFAULT_HOST_ADAPTER_CONFIG.rpcServicePrefix;
       const csrfHeaderName = String(src.csrfHeaderName || DEFAULT_HOST_ADAPTER_CONFIG.csrfHeaderName).trim();
       const normalizedCustomDomains = Array.isArray(src.remoteHostDomains)
         ? src.remoteHostDomains
-            .map((d) => String(d).trim().toLowerCase().replace(/^\.+|\.+$/g, ''))
-            .filter(Boolean)
+            .map((d) => String(d || '').trim().toLowerCase().replace(/^\.+|\.+$/g, ''))
+            .filter((d) => VALID_DOMAIN_LABEL_RE.test(d))
         : [];
       const remoteHostDomains =
         normalizedCustomDomains.length > 0
           ? normalizedCustomDomains
           : [...DEFAULT_HOST_ADAPTER_CONFIG.remoteHostDomains];
-      const staticCdnOrigins = Array.isArray(src.staticCdnOrigins) && src.staticCdnOrigins.length > 0
-        ? src.staticCdnOrigins.map((o) => String(o).trim()).filter(Boolean)
-        : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
+      const staticCdnOrigins =
+        Array.isArray(src.staticCdnOrigins) && src.staticCdnOrigins.length > 0
+          ? src.staticCdnOrigins.map((o) => normalizeHttpsBaseUrl(o, '')).filter(Boolean)
+          : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
+      const normalizedCdnOrigins =
+        staticCdnOrigins.length > 0 ? staticCdnOrigins : [...DEFAULT_HOST_ADAPTER_CONFIG.staticCdnOrigins];
       const cdnOrigin = normalizeHttpsBaseUrl(src.cdnOrigin, DEFAULT_HOST_ADAPTER_CONFIG.cdnOrigin);
+      const companionScripts = Array.isArray(src.companionScripts)
+        ? src.companionScripts.map((u) => normalizeHttpsBaseUrl(u, '')).filter(Boolean)
+        : [];
       const remoteCsrfToken = String(src.remoteCsrfToken || DEFAULT_HOST_ADAPTER_CONFIG.remoteCsrfToken);
-      const companionScripts = {
-        ...DEFAULT_HOST_ADAPTER_CONFIG.companionScripts,
-        ...(winCfg?.companionScripts || {}),
-        ...(src.companionScripts && typeof src.companionScripts === 'object' ? src.companionScripts : {}),
-      };
+      const locale = typeof src.locale === 'string' && src.locale.trim() ? src.locale.trim() : DEFAULT_HOST_ADAPTER_CONFIG.locale;
+      const compactPrompt =
+        typeof src.compactPrompt === 'string' && src.compactPrompt.trim()
+          ? src.compactPrompt.trim()
+          : DEFAULT_HOST_ADAPTER_CONFIG.compactPrompt;
       return {
         rpcServicePrefix,
         csrfHeaderName,
         remoteCsrfToken,
         remoteHostDomains,
-        staticCdnOrigins,
+        staticCdnOrigins: normalizedCdnOrigins,
         cdnOrigin,
         companionScripts,
+        locale,
+        compactPrompt,
         buildRpcPath(methodName) {
           const clean = String(methodName || '').replace(/^\/+/, '');
           return `${rpcServicePrefix}/${clean}`;
@@ -99,15 +1082,17 @@
     }
     module.exports = {
       DEFAULT_HOST_ADAPTER_CONFIG,
+      isPlainConfigObject,
+      normalizeHttpsBaseUrl,
       resolveHostAdapterConfig,
     };
   },
-  "./protobuf-checkpoint-codec": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
+  "./drivers/antigravity/protobuf-wire-codec": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
     'use strict';
     /**
-     * Pure Protobuf wire & Connect-RPC 5-byte envelope codec for
-     * `SendUserCascadeMessageRequest` checkpoint limit injection and cascade UUID extraction.
+     * Pure Protobuf Wire & Connect-RPC 5-Byte Envelope Codec
+     * for `SendUserCascadeMessage` checkpoint limit injection and cascade UUID extraction.
      * Zero DOM or window coupling.
      */
     const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -549,21 +1534,603 @@
       injectCheckpointPayload,
     };
   },
-  "./remote-runtime": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
+  "./drivers/antigravity/local-http-transport": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
     'use strict';
     /**
-     * Shared Remote Control Runtime Kernel (`window.__agyRemoteRuntime`, v1).
-     *
-     * Responsibilities:
-     * 1. Isolated WeakMap-based `RemoteControlComponent.prototype` chaining with reference-counted
-     *    lease teardown (zero shared `__agyOrig_*` clobbering across plugins).
-     * 2. Preservation of active `onIframeLoad` suppression (`__agySuppressAutoIframeLoad` /
-     *    `__agySuppressAutoIframeLoadCount > 0`) so `-v2` MessagePort handshakes never tear down prematurely.
-     * 3. Angular 19 Ivy component discovery (`ng.getComponent`, `LView` BFS, `ɵgetLContext`, guarded fallback probe).
-     * 4. Canonical `statusbar_autoinject.js` anchored companion block parser.
+     * Antigravity Storage & Local HTTP / Remote RPC Transport Drivers.
+     * Implements `StoragePort` and `TransportPort` with bounded LRU internal caches,
+     * fail-closed session telemetry isolation (D-0033), and `.bind(win)` flush timers (NB2).
      */
-    const { resolveHostAdapterConfig } = require('./host-adapter-config');
+    const {
+      STORAGE_MAP_KEY,
+      STORAGE_TS_MAP_KEY,
+      DEFAULT_CW_KEY,
+      normalizeContextWindow,
+    } = require('../../domain/context-window-policy');
+    const {
+      extractStatsFromMetas,
+      parseQuotaResponse,
+      isStateForCascade,
+      applyRealtimeCompactionAndUsage,
+      extractVersionMetrics,
+    } = require('../../domain/metrics-calculator');
+    const { resolveHostAdapterConfig } = require('./host-config');
+    const MAX_CACHE_ENTRIES = 60;
+    const MAX_CASCADE_LEN_ENTRIES = 200;
+    const STATS_CACHE_KEY = 'agy-stats-cache-v1';
+    function setBoundedLruMap(map, key, val, limit) {
+      if (!key) return;
+      if (map.has(key)) map.delete(key);
+      map.set(key, val);
+      while (map.size > limit) {
+        const oldest = map.keys().next().value;
+        if (oldest === undefined) break;
+        map.delete(oldest);
+      }
+    }
+    function createStorageAdapter({ window, document, localStorage, nativeStorage }) {
+      const effNative = nativeStorage || window?.nativeStorage || null;
+      function readCookie(name) {
+        try {
+          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const m = (document?.cookie || '').match(new RegExp('(?:^|; )' + escaped + '=([^;]*)'));
+          return m ? decodeURIComponent(m[1]) : null;
+        } catch {
+          return null;
+        }
+      }
+      function writeCookie(name, val) {
+        try {
+          if (document) {
+            document.cookie = `${name}=${encodeURIComponent(val)}; path=/; max-age=31536000; SameSite=Lax`;
+          }
+        } catch {}
+      }
+      return {
+        async loadPersistent() {
+          if (!effNative || typeof effNative.getItems !== 'function') return null;
+          try {
+            const items = await effNative.getItems();
+            if (!items || typeof items !== 'object') return null;
+            return {
+              defaultCw: items[DEFAULT_CW_KEY],
+              sessionMap: items[STORAGE_MAP_KEY],
+              tsMap: items[STORAGE_TS_MAP_KEY],
+            };
+          } catch {
+            return null;
+          }
+        },
+        readSessionCookie(cascadeId) {
+          if (!cascadeId) return null;
+          const raw = readCookie('agy_cw_' + cascadeId);
+          if (!raw || typeof raw !== 'string') return null;
+          const parts = raw.split('|');
+          const cw = normalizeContextWindow(parts[0]);
+          if (!cw) return null;
+          const tsRaw = parts.length > 1 ? parseInt(parts[1], 10) : 1;
+          const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
+          return { cw, ts };
+        },
+        writeSessionCookie(cascadeId, cw, ts) {
+          if (cascadeId && /^[A-Za-z0-9._:-]{1,128}$/.test(cascadeId) && cw) {
+            writeCookie('agy_cw_' + cascadeId, `${cw}|${ts || Date.now()}`);
+          }
+        },
+        deleteSessionCookie(cascadeId) {
+          if (!cascadeId || !/^[A-Za-z0-9._:-]{1,128}$/.test(cascadeId)) return;
+          try {
+            if (document) {
+              document.cookie = `agy_cw_${cascadeId}=; path=/; max-age=0; SameSite=Lax`;
+            }
+          } catch {}
+        },
+        readDefaultCookie() {
+          return readCookie('agy_default_cw');
+        },
+        writeDefaultCookie(cw) {
+          if (cw) writeCookie('agy_default_cw', cw);
+        },
+        getLocalItem(key) {
+          try {
+            return localStorage?.getItem?.(key) ?? null;
+          } catch {
+            return null;
+          }
+        },
+        setLocalItem(key, value) {
+          try {
+            localStorage?.setItem?.(key, String(value));
+          } catch {}
+        },
+        flushNative(patchObj) {
+          if (effNative && typeof effNative.updateItems === 'function' && patchObj && typeof patchObj === 'object') {
+            try {
+              effNative.updateItems(patchObj);
+            } catch {}
+          }
+        },
+      };
+    }
+    function createLocalHttpTransport({
+      window,
+      fetchFn,
+      localStorage,
+      getRemoteRpcServiceForElement,
+      hostConfig,
+      scope,
+      onQuotaUpdated,
+    }) {
+      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
+      const stateCache = new Map();
+      const inFlightStats = new Map();
+      const knownGenLenMap = new Map();
+      const rcStepCountMap = new Map();
+      const statsBackoffMap = new Map();
+      const activeAbortControllers = new Set();
+      let inFlightQuota = null;
+      let quotaData = null;
+      let quotaBackoffUntil = 0;
+      let quotaFailureCount = 0;
+      let lastQuotaFetch = 0;
+      let cacheFlushTimer = null;
+      let disposed = false;
+      const getTimerFn = (name, fallback) =>
+        window && typeof window[name] === 'function' ? window[name].bind(window) : fallback;
+      function registerFetchSignal(externalSignal) {
+        if (typeof AbortController !== 'function') {
+          return { signal: externalSignal, cleanup() {} };
+        }
+        const ctrl = new AbortController();
+        activeAbortControllers.add(ctrl);
+        const onExtAbort = () => {
+          try { ctrl.abort(); } catch {}
+        };
+        if (externalSignal) {
+          if (externalSignal.aborted) {
+            try { ctrl.abort(); } catch {}
+          } else if (typeof externalSignal.addEventListener === 'function') {
+            externalSignal.addEventListener('abort', onExtAbort, { once: true });
+          }
+        }
+        return {
+          signal: ctrl.signal,
+          cleanup() {
+            activeAbortControllers.delete(ctrl);
+            if (externalSignal && typeof externalSignal.removeEventListener === 'function') {
+              try { externalSignal.removeEventListener('abort', onExtAbort); } catch {}
+            }
+          },
+        };
+      }
+      async function abortableFetch(url, init = {}, externalSignal) {
+        if (disposed || scope?.isDisposed?.()) return null;
+        const { signal, cleanup } = registerFetchSignal(externalSignal);
+        try {
+          return await fetchFn(url, { ...init, signal });
+        } finally {
+          cleanup();
+        }
+      }
+      function setBoundedGenLen(cascadeId, len) {
+        if (!cascadeId || !(len > 0)) return;
+        setBoundedLruMap(knownGenLenMap, cascadeId, len, MAX_CASCADE_LEN_ENTRIES);
+      }
+      function recordStepEvent(cascadeId, explicitCount) {
+        if (!cascadeId) return;
+        if (typeof explicitCount === 'number' && explicitCount >= 0) {
+          setBoundedLruMap(rcStepCountMap, cascadeId, explicitCount, MAX_CASCADE_LEN_ENTRIES);
+          return;
+        }
+        const prev = rcStepCountMap.get(cascadeId) || 0;
+        setBoundedLruMap(rcStepCountMap, cascadeId, prev + 1, MAX_CASCADE_LEN_ENTRIES);
+      }
+      function getStepCount(cascadeId) {
+        return cascadeId && rcStepCountMap.has(cascadeId) ? rcStepCountMap.get(cascadeId) : -1;
+      }
+      function canUseLocalHttp(csrf) {
+        const win = window || (typeof globalThis !== 'undefined' ? globalThis.window : null);
+        if (win?.__APP_CONFIG__?.isRemoteControl) return false;
+        const effCsrf = csrf || win?.__APP_CONFIG__?.csrfToken;
+        return Boolean(effCsrf && typeof fetchFn === 'function');
+      }
+      function resolveCsrf(csrf) {
+        return csrf || window?.__APP_CONFIG__?.csrfToken || '';
+      }
+      try {
+        const rawCache = localStorage?.getItem?.(STATS_CACHE_KEY);
+        if (rawCache) {
+          const entries = JSON.parse(rawCache);
+          if (Array.isArray(entries)) {
+            for (const [k, v] of entries) {
+              setBoundedLruMap(stateCache, k, v, MAX_CACHE_ENTRIES);
+              if (v && typeof v.knownGenLen === 'number' && v.knownGenLen > 0) {
+                setBoundedGenLen(k, v.knownGenLen);
+              }
+            }
+          }
+        }
+      } catch {}
+      function flushStatsCacheToStorage() {
+        cacheFlushTimer = null;
+        try {
+          localStorage?.setItem?.(STATS_CACHE_KEY, JSON.stringify(Array.from(stateCache.entries())));
+        } catch {}
+      }
+      function setBoundedCache(cascadeId, data) {
+        setBoundedLruMap(stateCache, cascadeId, data, MAX_CACHE_ENTRIES);
+        const setTimer = getTimerFn('setTimeout', typeof setTimeout === 'function' ? setTimeout : null);
+        if (setTimer && stateCache.size > 1) {
+          if (!cacheFlushTimer) {
+            cacheFlushTimer = setTimer(flushStatsCacheToStorage, 250);
+            if (cacheFlushTimer && typeof cacheFlushTimer.unref === 'function') cacheFlushTimer.unref();
+          }
+        } else {
+          flushStatsCacheToStorage();
+        }
+      }
+      async function callRpcJson(methodName, reqPayload, csrf, el) {
+        if (disposed || scope?.isDisposed?.()) return null;
+        const svc = typeof getRemoteRpcServiceForElement === 'function' ? getRemoteRpcServiceForElement(el) : null;
+        const rpcPath = resolvedHostConfig.buildRpcPath(methodName);
+        const rpcMethodKey = methodName.charAt(0).toLowerCase() + methodName.slice(1);
+        if (svc && typeof svc[rpcMethodKey] === 'function') {
+          try {
+            const res = await svc[rpcMethodKey](reqPayload || {});
+            if (res !== undefined && res !== null) return res;
+          } catch {}
+        }
+        if (svc && typeof svc.callJson === 'function') {
+          try {
+            const res = await svc.callJson(rpcPath, reqPayload || {});
+            if (res !== undefined && res !== null) return res;
+          } catch {}
+        }
+        const effCsrf = resolveCsrf(csrf);
+        if (canUseLocalHttp(effCsrf)) {
+          try {
+            const r = await abortableFetch(rpcPath, {
+              method: 'POST',
+              headers: resolvedHostConfig.buildRpcHeaders(effCsrf),
+              body: JSON.stringify(reqPayload || {}),
+            });
+            if (r && r.ok !== false) return await r.json();
+          } catch {}
+        }
+        return null;
+      }
+      function getQuota({ csrf, el } = {}) {
+        if (disposed || scope?.isDisposed?.()) return Promise.resolve(quotaData);
+        const now = Date.now();
+        if (now < quotaBackoffUntil) return Promise.resolve(quotaData);
+        if (now - lastQuotaFetch < 15000 && quotaData) return Promise.resolve(quotaData);
+        if (inFlightQuota) return inFlightQuota;
+        lastQuotaFetch = now;
+        const effCsrf = resolveCsrf(csrf);
+        inFlightQuota = (async () => {
+          let hadErrorStatus = false;
+          try {
+            let j = null;
+            if (canUseLocalHttp(effCsrf)) {
+              try {
+                const r = await abortableFetch(resolvedHostConfig.buildRpcPath('RetrieveUserQuotaSummary'), {
+                  method: 'POST',
+                  headers: resolvedHostConfig.buildRpcHeaders(effCsrf),
+                  body: '{}',
+                });
+                if (r && r.ok !== false && (!r.status || r.status < 400)) {
+                  j = await r.json();
+                } else if (r && (r.status === 401 || r.status === 429 || r.status >= 500 || r.ok === false)) {
+                  hadErrorStatus = true;
+                }
+              } catch {
+                hadErrorStatus = true;
+              }
+            }
+            if (!j && !disposed && typeof getRemoteRpcServiceForElement === 'function') {
+              const svc = getRemoteRpcServiceForElement(el);
+              if (svc && typeof svc.retrieveUserQuotaSummary === 'function') {
+                j = await svc.retrieveUserQuotaSummary({});
+              }
+            }
+            const parsedQuota = parseQuotaResponse(j);
+            if (parsedQuota) {
+              quotaData = parsedQuota;
+              quotaFailureCount = 0;
+              quotaBackoffUntil = 0;
+              if (typeof onQuotaUpdated === 'function') {
+                try { onQuotaUpdated(quotaData); } catch {}
+              }
+            } else if (hadErrorStatus || j === null) {
+              quotaFailureCount += 1;
+              const backoffMs = Math.min(60000, 15000 * (2 ** Math.min(3, quotaFailureCount - 1)));
+              quotaBackoffUntil = Date.now() + backoffMs;
+            }
+          } catch {
+            quotaFailureCount += 1;
+            const backoffMs = Math.min(60000, 15000 * (2 ** Math.min(3, quotaFailureCount - 1)));
+            quotaBackoffUntil = Date.now() + backoffMs;
+          } finally {
+            inFlightQuota = null;
+          }
+          return quotaData;
+        })();
+        return inFlightQuota;
+      }
+      async function fetchTailMetasBounded({ cascadeId, totalGenLen, totalStepsLen, cachedGenLen, tailSize = 3, callGenMeta }) {
+        let knownLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cachedGenLen || -1);
+        if (knownLen > 0) {
+          const off = Math.max(0, knownLen - tailSize);
+          const metas = await callGenMeta(off);
+          if (metas.length > 0) {
+            const nextLen = off + metas.length;
+            setBoundedGenLen(cascadeId, nextLen);
+            return { metas, knownGenLen: nextLen };
+          }
+        }
+        const sc = totalStepsLen > 0 ? totalStepsLen : 40;
+        if (sc <= 60) {
+          const metas = await callGenMeta(0);
+          if (metas.length > 0) setBoundedGenLen(cascadeId, metas.length);
+          return { metas, knownGenLen: metas.length };
+        }
+        let cur = Math.ceil(sc * 0.42);
+        while (cur > 0) {
+          const metas = await callGenMeta(cur);
+          if (metas.length > 0) {
+            const nextLen = cur + metas.length;
+            setBoundedGenLen(cascadeId, nextLen);
+            return { metas, knownGenLen: nextLen };
+          }
+          const stepDown = Math.max(35, Math.floor(cur * 0.22));
+          cur = Math.max(0, cur - stepDown);
+        }
+        const metas0 = await callGenMeta(0);
+        if (metas0.length > 0) setBoundedGenLen(cascadeId, metas0.length);
+        return { metas: metas0, knownGenLen: metas0.length };
+      }
+      function getStats({ cascadeId, rawState, getLatestState, totalGenLen: extGenLen, totalStepsLen: extStepsLen, csrf, el } = {}) {
+        if (disposed || scope?.isDisposed?.() || !cascadeId || cascadeId === 'remote-session') {
+          return Promise.resolve(null);
+        }
+        const fullState = isStateForCascade(rawState, cascadeId) ? rawState : null;
+        const cached = stateCache.get(cascadeId);
+        const backoffRec = statsBackoffMap.get(cascadeId);
+        if (backoffRec && Date.now() < backoffRec.until) {
+          return Promise.resolve(cached || null);
+        }
+        const baseKnownGenLen = knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1;
+        const rcStepCount = getStepCount(cascadeId);
+        const ver = extractVersionMetrics(fullState, rcStepCount, baseKnownGenLen);
+        const totalGenLen = typeof extGenLen === 'number' && extGenLen > 0 ? extGenLen : ver.totalGenLen;
+        const totalStepsLen = typeof extStepsLen === 'number' && extStepsLen > 0 ? extStepsLen : ver.totalStepsLen;
+        const knownGenLen = totalGenLen > 0 ? totalGenLen : baseKnownGenLen;
+        const cacheTtlMs = ver.hasLiveVersion ? 12000 : 3000;
+        if (cached && Date.now() - cached.ts < cacheTtlMs) {
+          if (ver.hasLiveVersion) {
+            if (cached.versionKey === ver.versionKey) return Promise.resolve(cached);
+          } else if (ver.rcSteps < 0 || cached.rcSteps === undefined || cached.rcSteps === ver.rcSteps) {
+            return Promise.resolve(cached);
+          }
+        }
+        if (inFlightStats.has(cascadeId)) {
+          return inFlightStats.get(cascadeId);
+        }
+        const effCsrf = resolveCsrf(csrf);
+        const promise = (async () => {
+          try {
+            let parsed = null;
+            let discoveredGenLen = knownGenLen;
+            let rpcError = false;
+            if (canUseLocalHttp(effCsrf)) {
+              try {
+                const callLocal = async (offset) => {
+                  const r = await abortableFetch(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
+                    method: 'POST',
+                    headers: resolvedHostConfig.buildRpcHeaders(effCsrf),
+                    body: JSON.stringify({ cascadeId, generatorMetadataOffset: offset }),
+                  });
+                  if (r && r.ok !== false && (!r.status || r.status < 400)) {
+                    const j = await r.json();
+                    return j?.generatorMetadata || [];
+                  }
+                  if (r && (r.status === 401 || r.status === 429 || r.status >= 500 || r.ok === false)) {
+                    rpcError = true;
+                  }
+                  return [];
+                };
+                const res = await fetchTailMetasBounded({
+                  cascadeId,
+                  totalGenLen,
+                  totalStepsLen,
+                  cachedGenLen: cached?.knownGenLen,
+                  tailSize: 2,
+                  callGenMeta: callLocal,
+                });
+                if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
+                parsed = extractStatsFromMetas(res.metas);
+                if (!parsed.foundCtx && discoveredGenLen > 2) {
+                  const widerMetas = await callLocal(Math.max(0, discoveredGenLen - 15));
+                  parsed = extractStatsFromMetas(widerMetas);
+                }
+              } catch {
+                rpcError = true;
+              }
+            }
+            if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && !disposed && typeof getRemoteRpcServiceForElement === 'function') {
+              const svc = getRemoteRpcServiceForElement(el);
+              if (svc && typeof svc.getCascadeTrajectoryGeneratorMetadata === 'function') {
+                const callRemote = async (offset) => {
+                  const j = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: offset });
+                  return j?.generatorMetadata || [];
+                };
+                const res = await fetchTailMetasBounded({
+                  cascadeId,
+                  totalGenLen,
+                  totalStepsLen,
+                  cachedGenLen: cached?.knownGenLen,
+                  tailSize: 2,
+                  callGenMeta: callRemote,
+                });
+                if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
+                parsed = extractStatsFromMetas(res.metas);
+                if (!parsed.foundCtx && discoveredGenLen > 2) {
+                  const widerMetas = await callRemote(Math.max(0, discoveredGenLen - 15));
+                  parsed = extractStatsFromMetas(widerMetas);
+                }
+              }
+              if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && svc && typeof svc.getCascadeTrajectory === 'function' && !svc.isRemoteControlHost) {
+                const t = await svc.getCascadeTrajectory({ cascadeId });
+                const metas = t?.trajectory?.generatorMetadata || [];
+                if (metas.length > 0) discoveredGenLen = metas.length;
+                parsed = extractStatsFromMetas(metas);
+              }
+            }
+            const latestRaw = typeof getLatestState === 'function' ? getLatestState() : null;
+            const latestState = isStateForCascade(latestRaw, cascadeId) ? latestRaw : fullState;
+            parsed = applyRealtimeCompactionAndUsage(parsed, latestState);
+            if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
+              if (rpcError) {
+                const failures = (backoffRec?.failures || 0) + 1;
+                const waitMs = Math.min(30000, 3000 * (2 ** Math.min(3, failures - 1)));
+                setBoundedLruMap(statsBackoffMap, cascadeId, { failures, until: Date.now() + waitMs }, MAX_CASCADE_LEN_ENTRIES);
+              }
+              return cached || null;
+            }
+            statsBackoffMap.delete(cascadeId);
+            if (discoveredGenLen > 0) {
+              setBoundedGenLen(cascadeId, discoveredGenLen);
+            }
+            const finalVer = extractVersionMetrics(latestState, getStepCount(cascadeId), discoveredGenLen);
+            const data = {
+              used: parsed.used,
+              trajectoryMax: parsed.trajectoryMax,
+              cacheRead: parsed.cacheRead,
+              inputTok: parsed.inputTok,
+              cachePct: parsed.cachePct,
+              lastMetaStepIndex: parsed.lastMetaStepIndex,
+              knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
+              rcSteps: finalVer.rcSteps,
+              versionKey: finalVer.versionKey,
+              ts: Date.now(),
+            };
+            setBoundedCache(cascadeId, data);
+            return data;
+          } catch {
+            return cached || null;
+          } finally {
+            inFlightStats.delete(cascadeId);
+          }
+        })();
+        inFlightStats.set(cascadeId, promise);
+        return promise;
+      }
+      function getImmediateStats(cascadeId, snapshot) {
+        const cached = cascadeId ? (stateCache.get(cascadeId) || null) : null;
+        if (!isStateForCascade(snapshot, cascadeId)) {
+          return cached;
+        }
+        const merged = applyRealtimeCompactionAndUsage(cached ? { ...cached, foundCtx: true } : null, snapshot);
+        if (!merged || (!cached && !merged.foundCtx && !merged.foundUsage)) {
+          return cached;
+        }
+        return cached ? { ...cached, used: merged.used, trajectoryMax: merged.trajectoryMax } : merged;
+      }
+      async function getAllTrajectories(el, csrf) {
+        return await callRpcJson('GetAllCascadeTrajectories', {}, csrf, el);
+      }
+      async function updateAnnotations({ cascadeIds, annotations, mergeAnnotations = true, el, csrf }) {
+        const res = await callRpcJson(
+          'UpdateConversationAnnotations',
+          { cascadeIds, annotations, mergeAnnotations },
+          csrf,
+          el
+        );
+        return Boolean(res !== null);
+      }
+      async function getGeneratorMetadataRange({ cascadeId, offset, el, csrf }) {
+        const j = await callRpcJson(
+          'GetCascadeTrajectoryGeneratorMetadata',
+          { cascadeId, generatorMetadataOffset: offset || 0 },
+          csrf,
+          el
+        );
+        if (j && Array.isArray(j.generatorMetadata)) {
+          if (j.generatorMetadata.length > 0) {
+            setBoundedGenLen(cascadeId, (offset || 0) + j.generatorMetadata.length);
+          }
+          return j.generatorMetadata;
+        }
+        const svc = typeof getRemoteRpcServiceForElement === 'function' ? getRemoteRpcServiceForElement(el) : null;
+        if (svc && typeof svc.getCascadeTrajectory === 'function' && !svc.isRemoteControlHost) {
+          const t = await svc.getCascadeTrajectory({ cascadeId });
+          const metas = t?.trajectory?.generatorMetadata || [];
+          if (metas.length > 0) setBoundedGenLen(cascadeId, metas.length);
+          return metas;
+        }
+        return [];
+      }
+      function dispose() {
+        disposed = true;
+        for (const ctrl of activeAbortControllers) {
+          try { ctrl.abort(); } catch {}
+        }
+        activeAbortControllers.clear();
+        if (cacheFlushTimer) {
+          const clearTimer = getTimerFn('clearTimeout', typeof clearTimeout === 'function' ? clearTimeout : null);
+          if (clearTimer) {
+            try { clearTimer(cacheFlushTimer); } catch {}
+          }
+          cacheFlushTimer = null;
+        }
+        stateCache.clear();
+        inFlightStats.clear();
+        knownGenLenMap.clear();
+        rcStepCountMap.clear();
+        statsBackoffMap.clear();
+      }
+      return {
+        callRpcJson,
+        getStats,
+        getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
+        getImmediateStats,
+        getQuota,
+        getLatestQuota: () => quotaData,
+        getAllTrajectories,
+        updateAnnotations,
+        getGeneratorMetadataRange,
+        recordStepEvent,
+        getStepCount,
+        getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
+        setBoundedGenLen,
+        dispose,
+      };
+    }
+    module.exports = {
+      MAX_CACHE_ENTRIES,
+      MAX_CASCADE_LEN_ENTRIES,
+      STATS_CACHE_KEY,
+      setBoundedLruMap,
+      createStorageAdapter,
+      createLocalHttpTransport,
+    };
+  },
+  "./drivers/antigravity/remote-port-driver": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
+    'use strict';
+    /**
+     * Antigravity Remote Control Port Driver (`<ga-remote-control>`).
+     *
+     * Strict isolation guarantees:
+     * 1. WeakMap/closure-isolated `RemoteControlComponent.prototype` lease chaining (never writes `__agyOrig_*`).
+     * 2. Honors active reference-counted iframe auto-load suppression (`__agySuppressAutoIframeLoad` /
+     *    `__agySuppressAutoIframeLoadCount > 0`) so co-loaded plugins' `-v2` MessagePort handshakes never tear down.
+     * 3. NEVER hijacks, rewrites, or promotes cross-origin child iframes (zero `about:blank` / `cd.open()` races).
+     * 4. Tracks inaccessible cross-origin child iframes privately without setting DOM expandos.
+     */
+    const { resolveHostAdapterConfig } = require('./host-config');
+    const RC_PROTO_CHAIN_SYMBOL = Symbol.for('agy.rc.proto.chain.v2');
     const RC_TAP_METHODS = Object.freeze([
       'handleIframeMessage',
       'proxyCommand',
@@ -660,96 +2227,141 @@
       }
       return null;
     }
-    function findAnchoredMarkerSpan(text, beginRe, endRe) {
-      beginRe.lastIndex = 0;
-      const bMatch = beginRe.exec(text);
-      if (!bMatch) return { start: -1, end: -1 };
-      const start = bMatch.index;
-      endRe.lastIndex = bMatch.index + bMatch[0].length;
-      const eMatch = endRe.exec(text);
-      if (!eMatch) return { start, end: -1 };
-      let end = eMatch.index + eMatch[0].length;
-      while (true) {
-        const afterEnd = text.slice(end);
-        const nlMatch = /^(?:\r?\n)+/.exec(afterEnd);
-        if (!nlMatch) break;
-        const nextLineIdx = end + nlMatch[0].length;
-        endRe.lastIndex = nextLineIdx;
-        const nextEnd = endRe.exec(text);
-        if (nextEnd && nextEnd.index === nextLineIdx) {
-          end = nextEnd.index + nextEnd[0].length;
-        } else {
-          break;
-        }
-      }
-      return { start, end };
-    }
-    function parseAutoinjectCompanionManifest(bundleText, discoveredPluginNames) {
-      const text = typeof bundleText === 'string' ? bundleText : '';
-      const pluginNames = discoveredPluginNames instanceof Set ? discoveredPluginNames : new Set(discoveredPluginNames || []);
-      const mcpBeginStr = ['BEGIN_AGY_MCP', 'MANAGER'].join('_');
-      const mcpEndStr = ['END_AGY_MCP', 'MANAGER'].join('_');
-      const koBeginStr = ['BEGIN_AGY_KO', 'THOUGHT_LOCALIZER'].join('_');
-      const koEndStr = ['END_AGY_KO', 'THOUGHT_LOCALIZER'].join('_');
-      const mcpBeginRe = new RegExp(`^(?:\\/\\/ === ${mcpBeginStr}(?:_V\\d+)? ===|\\/\\* === ${mcpBeginStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-      const mcpEndRe = new RegExp(`^(?:\\/\\/ === ${mcpEndStr}(?:_V\\d+)? ===|\\/\\* === ${mcpEndStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-      const koBeginRe = new RegExp(`^(?:\\/\\/ === ${koBeginStr}(?:_V\\d+)? ===|\\/\\* === ${koBeginStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-      const koEndRe = new RegExp(`^(?:\\/\\/ === ${koEndStr}(?:_V\\d+)? ===|\\/\\* === ${koEndStr}(?:_V\\d+)? === \\*\\/)[ \\t]*\\r?$`, 'gm');
-      const mcpSpan = findAnchoredMarkerSpan(text, mcpBeginRe, mcpEndRe);
-      const koSpan = findAnchoredMarkerSpan(text, koBeginRe, koEndRe);
-      const mcpManagerCode = mcpSpan.start !== -1 && mcpSpan.end > mcpSpan.start ? text.slice(mcpSpan.start, mcpSpan.end).trim() : '';
-      const koTranslatorCode = koSpan.start !== -1 && koSpan.end > koSpan.start ? text.slice(koSpan.start, koSpan.end).trim() : '';
-      const firstMarkerIdx = [mcpSpan.start, koSpan.start].filter((i) => i !== -1).sort((a, b) => a - b)[0] ?? text.length;
-      const baseSegment = text.slice(0, firstMarkerIdx).trim();
-      const sbFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'StatusBar'].join('')}\\s*\\(`, 'm');
-      const mcpFuncRe = new RegExp(`^[ \\t]*function ${['mount', 'McpManager'].join('')}\\s*\\(`, 'm');
-      const hasStatusbarMarker = sbFuncRe.test(baseSegment);
-      const hasMcpMarker = Boolean(mcpManagerCode) || (!hasStatusbarMarker && mcpFuncRe.test(baseSegment));
-      const hasKoMarker = Boolean(koTranslatorCode);
-      const statusbarBlock = hasStatusbarMarker ? baseSegment : '';
-      return {
-        hasStatusbar: hasStatusbarMarker || pluginNames.has('antigravity-statusbar'),
-        hasMcpManager: hasMcpMarker || pluginNames.has('antigravity-mcp-manager'),
-        hasKoTranslator: hasKoMarker || pluginNames.has('ko-thought-translator'),
-        statusbarBlock,
-        mcpBlock: mcpManagerCode,
-        koBlock: koTranslatorCode,
-        statusbarCode: statusbarBlock,
-        mcpManagerCode,
-        koTranslatorCode,
-      };
-    }
-    function acquireRemoteRuntimeLease({ window: win, document: doc, hostConfig, hooks = {} }) {
+    function createRemotePortDriver({ window: win, document: doc, hostConfig, hooks = {} }) {
       const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
       const hookedPrototypes = new Map();
+      const inaccessibleIframes = typeof WeakSet === 'function' ? new WeakSet() : null;
+      let discoveredRcInstance = null;
+      let probingRcInstance = false;
       let disposed = false;
+      function captureInstance(inst) {
+        if (isRcComponentInstance(inst)) {
+          discoveredRcInstance = inst;
+          if (win && typeof win === 'object') {
+            try {
+              if (!win.__agyRemoteControlInstance || win.__agyRemoteControlInstance.destroyed) {
+                win.__agyRemoteControlInstance = inst;
+              }
+            } catch {}
+          }
+        }
+      }
+      function isTrustedMessageEvent(ev) {
+        if (!ev || typeof ev !== 'object') return false;
+        const iframeWin = getAccessibleIframeWindowNoCache();
+        if (iframeWin && ev.source === iframeWin) return true;
+        const evOrigin = typeof ev.origin === 'string' ? ev.origin.trim() : '';
+        if (!evOrigin) {
+          return Boolean(probingRcInstance && ev.data === '__agy_probe__');
+        }
+        if (win?.location?.origin && evOrigin === win.location.origin) return true;
+        for (const rawCdn of resolvedHostConfig.staticCdnOrigins || []) {
+          try {
+            if (evOrigin === new URL(rawCdn).origin) return true;
+          } catch {}
+        }
+        try {
+          const host = new URL(evOrigin).hostname;
+          if (resolvedHostConfig.isRemoteHost(host)) return true;
+        } catch {}
+        return false;
+      }
+      function getAccessibleIframeWindowNoCache() {
+        try {
+          const iframe = doc?.querySelector?.('ga-remote-control iframe');
+          return iframe?.contentWindow || null;
+        } catch {
+          return null;
+        }
+      }
       function tapPrototype(proto) {
         if (!proto || proto === Object.prototype || disposed) return;
         if (hookedPrototypes.has(proto)) return;
         let protoDisposed = false;
-        const wrappedMethods = new Map();
-        const wrapMethod = (mName, buildWrapper) => {
+        const leaseTokens = [];
+        let chainTable = proto[RC_PROTO_CHAIN_SYMBOL];
+        if (!chainTable || typeof chainTable !== 'object') {
+          chainTable = Object.create(null);
+          try {
+            Object.defineProperty(proto, RC_PROTO_CHAIN_SYMBOL, {
+              value: chainTable,
+              configurable: true,
+              enumerable: false,
+              writable: true,
+            });
+          } catch {
+            proto[RC_PROTO_CHAIN_SYMBOL] = chainTable;
+          }
+        }
+        const wrapMethod = (mName, buildHandler) => {
           if (typeof proto[mName] !== 'function') return;
-          const prevFn = proto[mName];
-          const wrappedFn = buildWrapper(prevFn, () => protoDisposed || disposed);
-          proto[mName] = wrappedFn;
-          wrappedMethods.set(mName, { prevFn, wrappedFn });
+          let methodChain = chainTable[mName];
+          if (!methodChain) {
+            const baseFn = proto[mName];
+            const nodes = [];
+            const dispatcher = function (...args) {
+              let idx = nodes.length - 1;
+              const callNext = (...nextArgs) => {
+                const callArgs = nextArgs.length > 0 ? nextArgs : args;
+                while (idx >= 0) {
+                  const node = nodes[idx--];
+                  if (node && !node.disposed) {
+                    return node.handler.call(this, callNext, ...callArgs);
+                  }
+                }
+                return baseFn.apply(this, callArgs);
+              };
+              return callNext(...args);
+            };
+            methodChain = { baseFn, nodes, dispatcher };
+            chainTable[mName] = methodChain;
+            proto[mName] = dispatcher;
+          } else if (proto[mName] !== methodChain.dispatcher) {
+            const extFn = proto[mName];
+            methodChain.baseFn = extFn;
+            proto[mName] = methodChain.dispatcher;
+          }
+          const node = {
+            disposed: false,
+            handler: buildHandler(() => protoDisposed || disposed || node.disposed),
+          };
+          methodChain.nodes.push(node);
+          leaseTokens.push(() => {
+            if (node.disposed) return;
+            node.disposed = true;
+            const pos = methodChain.nodes.indexOf(node);
+            if (pos >= 0) methodChain.nodes.splice(pos, 1);
+            if (methodChain.nodes.length === 0) {
+              if (proto[mName] === methodChain.dispatcher) {
+                proto[mName] = methodChain.baseFn;
+              }
+              delete chainTable[mName];
+              if (Object.keys(chainTable).length === 0) {
+                try {
+                  delete proto[RC_PROTO_CHAIN_SYMBOL];
+                } catch {}
+              }
+            }
+          });
         };
-        wrapMethod('handleIframeMessage', (prevFn, isOff) => function (ev) {
-          if (isOff()) return prevFn.apply(this, arguments);
-          if (win && this && !this.destroyed) win.__agyRemoteControlInstance = this;
+        wrapMethod('handleIframeMessage', (isOff) => function (next, ev) {
+          if (isOff()) return next.call(this, ev);
+          if (!isTrustedMessageEvent(ev)) {
+            return next.call(this, ev);
+          }
+          captureInstance(this);
           if (ev && ev.data === '__agy_probe__') return;
           if (typeof hooks.onIframeMessage === 'function') {
             try {
               hooks.onIframeMessage(ev, this);
             } catch {}
           }
-          return prevFn.apply(this, arguments);
+          return next.call(this, ev);
         });
         for (const mName of ['proxyCommand', 'streamProxyCommand']) {
-          wrapMethod(mName, (prevFn, isOff) => function (path, body, ...rest) {
-            if (isOff()) return prevFn.call(this, path, body, ...rest);
-            if (win && this && !this.destroyed) win.__agyRemoteControlInstance = this;
+          wrapMethod(mName, (isOff) => function (next, path, body, ...rest) {
+            if (isOff()) return next.call(this, path, body, ...rest);
+            captureInstance(this);
             let nextBody = body;
             if (typeof hooks.transformRpcRequest === 'function') {
               try {
@@ -758,12 +2370,12 @@
                 nextBody = body;
               }
             }
-            return prevFn.call(this, path, nextBody, ...rest);
+            return next.call(this, path, nextBody, ...rest);
           });
         }
-        wrapMethod('handlePortRequest', (prevFn, isOff) => function (msg) {
-          if (isOff()) return prevFn.call(this, msg);
-          if (win && this && !this.destroyed) win.__agyRemoteControlInstance = this;
+        wrapMethod('handlePortRequest', (isOff) => function (next, msg) {
+          if (isOff()) return next.call(this, msg);
+          captureInstance(this);
           let nextMsg = msg;
           if (msg && typeof msg.path === 'string' && typeof hooks.transformPortRequest === 'function') {
             try {
@@ -772,49 +2384,57 @@
               nextMsg = msg;
             }
           }
-          return prevFn.call(this, nextMsg);
+          return next.call(this, nextMsg);
         });
         for (const mName of RC_TAP_METHODS) {
-          if (mName === 'handleIframeMessage' || mName === 'proxyCommand' || mName === 'streamProxyCommand' || mName === 'handlePortRequest') {
+          if (
+            mName === 'handleIframeMessage' ||
+            mName === 'proxyCommand' ||
+            mName === 'streamProxyCommand' ||
+            mName === 'handlePortRequest'
+          ) {
             continue;
           }
-          wrapMethod(mName, (prevFn, isOff) => function () {
-            if (isOff()) return prevFn.apply(this, arguments);
+          wrapMethod(mName, (isOff) => function (next, ...args) {
+            if (isOff()) return next.apply(this, args);
             if (mName === 'onIframeLoad' && isAutoIframeLoadSuppressed(this)) {
               return Promise.resolve();
             }
-            if (win && this && !this.destroyed) {
-              win.__agyRemoteControlInstance = this;
-            }
+            captureInstance(this);
             if (
-              win?.__agyProbingRcInstance &&
+              probingRcInstance &&
               (mName === 'handleUrlChanged' || mName === 'onIframeLoad' || mName === 'onWindowOnline' || mName === 'loadInstances')
             ) {
               return;
             }
             if (mName === 'handleUrlChanged' && typeof hooks.onUrlChanged === 'function') {
               try {
-                hooks.onUrlChanged(arguments[0], this);
+                hooks.onUrlChanged(args[0], this);
               } catch {}
             }
-            return prevFn.apply(this, arguments);
+            return next.apply(this, args);
           });
         }
         hookedPrototypes.set(proto, {
           release() {
             protoDisposed = true;
-            for (const [mName, entry] of wrappedMethods.entries()) {
-              if (proto[mName] === entry.wrappedFn) {
-                proto[mName] = entry.prevFn;
-              }
+            for (let i = leaseTokens.length - 1; i >= 0; i--) {
+              try {
+                leaseTokens[i]();
+              } catch {}
             }
-            wrappedMethods.clear();
+            leaseTokens.length = 0;
           },
         });
       }
       function resolveInstance() {
         if (!win || disposed) return null;
+        if (discoveredRcInstance && !discoveredRcInstance.destroyed) {
+          tapPrototype(Object.getPrototypeOf(discoveredRcInstance));
+          return discoveredRcInstance;
+        }
         if (win.__agyRemoteControlInstance && !win.__agyRemoteControlInstance.destroyed) {
+          captureInstance(win.__agyRemoteControlInstance);
           tapPrototype(Object.getPrototypeOf(win.__agyRemoteControlInstance));
           return win.__agyRemoteControlInstance;
         }
@@ -827,7 +2447,7 @@
             try {
               const comp = ngFn(rcEl);
               if (isRcComponentInstance(comp)) {
-                win.__agyRemoteControlInstance = comp;
+                captureInstance(comp);
                 tapPrototype(Object.getPrototypeOf(comp));
                 return comp;
               }
@@ -836,7 +2456,7 @@
           const ctxKey = Object.keys(rcEl).find((k) => k.startsWith('__ngContext'));
           const found = searchAngularContextBfs(rcEl.__ngContext__ || (ctxKey ? rcEl[ctxKey] : null));
           if (found) {
-            win.__agyRemoteControlInstance = found;
+            captureInstance(found);
             tapPrototype(Object.getPrototypeOf(found));
             return found;
           }
@@ -845,7 +2465,7 @@
           const rootCtxKey = Object.keys(gaRootEl).find((k) => k.startsWith('__ngContext'));
           const foundFromRoot = searchAngularContextBfs(gaRootEl.__ngContext__ || (rootCtxKey ? gaRootEl[rootCtxKey] : null));
           if (foundFromRoot) {
-            win.__agyRemoteControlInstance = foundFromRoot;
+            captureInstance(foundFromRoot);
             tapPrototype(Object.getPrototypeOf(foundFromRoot));
             return foundFromRoot;
           }
@@ -877,13 +2497,13 @@
                   const dbgNode = mod.getDebugNode(targetEl);
                   const dbgComp = dbgNode?.componentInstance || dbgNode?.context;
                   if (isRcComponentInstance(dbgComp)) {
-                    win.__agyRemoteControlInstance = dbgComp;
+                    captureInstance(dbgComp);
                     tapPrototype(Object.getPrototypeOf(dbgComp));
                     return dbgComp;
                   }
                   const foundFromDbg = searchAngularContextBfs(dbgComp || dbgNode);
                   if (foundFromDbg) {
-                    win.__agyRemoteControlInstance = foundFromDbg;
+                    captureInstance(foundFromDbg);
                     tapPrototype(Object.getPrototypeOf(foundFromDbg));
                     return foundFromDbg;
                   }
@@ -891,7 +2511,7 @@
                 if (typeof mod.getComponent === 'function') {
                   const comp = mod.getComponent(targetEl);
                   if (isRcComponentInstance(comp)) {
-                    win.__agyRemoteControlInstance = comp;
+                    captureInstance(comp);
                     tapPrototype(Object.getPrototypeOf(comp));
                     return comp;
                   }
@@ -901,7 +2521,7 @@
                   const lCtx = getLCtx(targetEl);
                   const foundFromLCtx = extractRcFromAngularLContext(lCtx) || searchAngularContextBfs(lCtx?.lView || lCtx);
                   if (foundFromLCtx) {
-                    win.__agyRemoteControlInstance = foundFromLCtx;
+                    captureInstance(foundFromLCtx);
                     tapPrototype(Object.getPrototypeOf(foundFromLCtx));
                     return foundFromLCtx;
                   }
@@ -914,16 +2534,16 @@
             }
           }
         }
-        win.__agyProbingRcInstance = true;
+        probingRcInstance = true;
         try {
           const BaseEvt = win.Event || (typeof Event !== 'undefined' ? Event : null);
-          if (!win.__agyRemoteControlInstance && BaseEvt && typeof effDoc?.dispatchEvent === 'function') {
+          if (!discoveredRcInstance && BaseEvt && typeof effDoc?.dispatchEvent === 'function') {
             effDoc.dispatchEvent(new BaseEvt('visibilitychange'));
           }
-          if (!win.__agyRemoteControlInstance && BaseEvt && typeof win.dispatchEvent === 'function') {
+          if (!discoveredRcInstance && BaseEvt && typeof win.dispatchEvent === 'function') {
             win.dispatchEvent(new BaseEvt('online'));
           }
-          if (!win.__agyRemoteControlInstance && typeof win.dispatchEvent === 'function') {
+          if (!discoveredRcInstance && typeof win.dispatchEvent === 'function') {
             const Evt = win.MessageEvent || (typeof MessageEvent !== 'undefined' ? MessageEvent : null);
             if (Evt) {
               const iframeEl = rcEl?.querySelector?.('iframe') || effDoc?.querySelector?.('ga-remote-control iframe') || null;
@@ -948,7 +2568,7 @@
                 }
               }
               for (const orig of candidateOrigins) {
-                if (win.__agyRemoteControlInstance) break;
+                if (discoveredRcInstance) break;
                 win.dispatchEvent(
                   new Evt('message', {
                     data: { type: 'URL_CHANGED', path: '' },
@@ -957,19 +2577,104 @@
                   })
                 );
               }
-              if (!win.__agyRemoteControlInstance) {
+              if (!discoveredRcInstance) {
                 win.dispatchEvent(new Evt('message', { data: '__agy_probe__' }));
               }
             }
           }
         } catch {} finally {
-          win.__agyProbingRcInstance = false;
+          probingRcInstance = false;
         }
-        return win.__agyRemoteControlInstance && !win.__agyRemoteControlInstance.destroyed
-          ? win.__agyRemoteControlInstance
-          : null;
+        const active = discoveredRcInstance || win.__agyRemoteControlInstance;
+        return active && !active.destroyed ? active : null;
       }
-      function release() {
+      function getAccessibleIframeWindow() {
+        try {
+          const iframe = doc?.querySelector?.('ga-remote-control iframe');
+          if (!iframe) return null;
+          if (inaccessibleIframes && inaccessibleIframes.has(iframe)) {
+            try {
+              if (iframe.contentDocument) {
+                inaccessibleIframes.delete(iframe);
+              } else {
+                return null;
+              }
+            } catch {
+              return null;
+            }
+          }
+          const cwin = iframe.contentWindow;
+          if (!cwin) return null;
+          void cwin.document;
+          return cwin;
+        } catch {
+          try {
+            const iframe = doc?.querySelector?.('ga-remote-control iframe');
+            if (iframe && inaccessibleIframes) inaccessibleIframes.add(iframe);
+          } catch {}
+          return null;
+        }
+      }
+      function getAccessibleIframeDocument() {
+        try {
+          const iframe = doc?.querySelector?.('ga-remote-control iframe');
+          if (!iframe) return null;
+          const cdoc = iframe.contentDocument || iframe.contentWindow?.document;
+          if (cdoc && inaccessibleIframes) inaccessibleIframes.delete(iframe);
+          return cdoc || null;
+        } catch {
+          try {
+            const iframe = doc?.querySelector?.('ga-remote-control iframe');
+            if (iframe && inaccessibleIframes) inaccessibleIframes.add(iframe);
+          } catch {}
+          return null;
+        }
+      }
+      function createRcServiceAdapter(rcInst, codec, injectCheckpointLimitFn) {
+        async function callJson(rpcPath, reqObj) {
+          if (!rcInst || typeof rcInst.proxyCommand !== 'function') return null;
+          const payloadObj =
+            /\/SendUserCascadeMessage$/i.test(rpcPath) && typeof injectCheckpointLimitFn === 'function'
+              ? injectCheckpointLimitFn(rpcPath, reqObj || {}, rcInst)
+              : (reqObj || {});
+          const bytes = codec.encodeTextToBytes(JSON.stringify(payloadObj));
+          const res = await rcInst.proxyCommand(rpcPath, bytes);
+          if (!res || !res.payload) return null;
+          const text = codec.decodeBytesToText(res.payload);
+          return text ? JSON.parse(text) : null;
+        }
+        return {
+          isRemoteControlHost: true,
+          rcInst,
+          callJson,
+          async retrieveUserQuotaSummary(req) {
+            return await callJson(resolvedHostConfig.buildRpcPath('RetrieveUserQuotaSummary'), req || {});
+          },
+          async getCascadeTrajectoryGeneratorMetadata(req) {
+            return await callJson(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), req || {});
+          },
+          async getCascadeTrajectory(req) {
+            const metaRes = await callJson(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
+              cascadeId: req?.cascadeId,
+              generatorMetadataOffset: req?.generatorMetadataOffset || 0,
+            });
+            if (metaRes && Array.isArray(metaRes.generatorMetadata)) {
+              return { trajectory: { generatorMetadata: metaRes.generatorMetadata } };
+            }
+            return await callJson(resolvedHostConfig.buildRpcPath('GetCascadeTrajectory'), req || {});
+          },
+          async getAllCascadeTrajectories() {
+            return await callJson(resolvedHostConfig.buildRpcPath('GetAllCascadeTrajectories'), {});
+          },
+          async updateConversationAnnotations(req) {
+            return await callJson(resolvedHostConfig.buildRpcPath('UpdateConversationAnnotations'), req || {});
+          },
+          async sendUserCascadeMessage(req) {
+            return await callJson(resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'), req || {});
+          },
+        };
+      }
+      function dispose() {
         if (disposed) return;
         disposed = true;
         for (const [, rec] of hookedPrototypes.entries()) {
@@ -978,880 +2683,1995 @@
           } catch {}
         }
         hookedPrototypes.clear();
-        if (win) {
-          try {
-            delete win.__agyProbingRcInstance;
-          } catch {}
-        }
+        discoveredRcInstance = null;
+        probingRcInstance = false;
       }
       return {
         resolvedHostConfig,
         tapPrototype,
         resolveInstance,
-        release,
+        getAccessibleIframeWindow,
+        getAccessibleIframeDocument,
+        createRcServiceAdapter,
+        dispose,
+      };
+    }
+    function createDocumentHostDriver({ document: defaultDoc, remotePortDriver }) {
+      const SAFE_CW_CSS_RE = /^\d+(?:\.\d+)?[KkMm]$/;
+      return {
+        getAccessibleDocs(rootDoc = defaultDoc) {
+          const docs = [];
+          if (!rootDoc) return docs;
+          docs.push(rootDoc);
+          const iframeDoc = remotePortDriver?.getAccessibleIframeDocument?.();
+          if (iframeDoc && iframeDoc !== rootDoc) {
+            docs.push(iframeDoc);
+          }
+          return docs;
+        },
+        getIframeDocument() {
+          return remotePortDriver?.getAccessibleIframeDocument?.() || null;
+        },
+        buildWarningSuppressionCss(underDefaultCwSet) {
+          const selectors = ['[data-testid="model-selector-trigger"][data-agy-cw-warn="0"] div:has(> .text-warning)'];
+          if (underDefaultCwSet) {
+            for (const cw of underDefaultCwSet) {
+              const clean = String(cw || '').trim();
+              if (SAFE_CW_CSS_RE.test(clean)) {
+                selectors.push(`[data-testid="model-selector-trigger"][data-context-window="${clean}"] div:has(> .text-warning)`);
+              }
+            }
+          }
+          return `\n    ${selectors.join(',\n    ')} {\n      display: none !important;\n    }\n`;
+        },
+        findFallbackSessionTarget(rootDoc = defaultDoc) {
+          const view = rootDoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]') || null;
+          const inputBox = view?.querySelector?.('[data-testid="agent-input-box"]') || null;
+          return { view, inputBox };
+        },
       };
     }
     module.exports = {
+      RC_PROTO_CHAIN_SYMBOL,
+      RC_TAP_METHODS,
       isAutoIframeLoadSuppressed,
-      parseAutoinjectCompanionManifest,
-      acquireRemoteRuntimeLease,
+      createRemotePortDriver,
+      createDocumentHostDriver,
     };
   },
-  "./companion-loader": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
+  "./drivers/antigravity/react-fiber-driver": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
     'use strict';
     /**
-     * Strict CSP / TrustedTypes Companion Script Loader for Remote Control Web.
+     * Antigravity Desktop Electron / React Fiber / Redux / Fetch Engine Driver.
      *
-     * Enforces:
-     * - Scoped policy names (`agy-statusbar*` only; `createHTML === undefined`).
-     * - HTTPS + path allowlist for external script URLs and one-shot token revocation for inline/Blob scripts.
-     * - Cryptographic CSP nonce propagation across IDL `.nonce` and `nonce` attribute.
-     * - Cross-plugin `<script data-agy-companion="...">` and loading-flag synchronization.
+     * Implements `EnginePort` and isolates all React Fiber traversal, Redux `modelSelection`,
+     * `fetch`/`lsClient` checkpoint injection, poisoned `trajectorySync` sanitization (`D-0013`),
+     * `subscribeToPlugins` 600ms timeout guard (`D-0008`), and `<ga-remote-control>` shell view
+     * management — without mutating `Object.prototype` or polluting `window.__agy*`.
      */
-    const { resolveHostAdapterConfig } = require('./host-adapter-config');
-    const OFFICIAL_COMPANION_URLS = Object.freeze([
-      'https://raw.githubusercontent.com/jaeseongs95/antigravity-statusbar/main/dist/statusbar_autoinject.js',
-      'https://raw.githubusercontent.com/jaeseongs95/antigravity-mcp-manager/main/dist/mcp_manager_autoinject.js',
-      'https://raw.githubusercontent.com/jaeseongs95/antigravity-ko-translator/main/plugins/ko-thought-translator/scripts/ko_thought_autoinject.js',
-    ]);
-    const companionPolicyControllers = typeof WeakMap === 'function' ? new WeakMap() : null;
-    function isAllowedStatusBarScriptUrl(rawUrl, resolvedHostConfig) {
-      let parsed;
+    const { PRESET_CONTEXT_WINDOWS } = require('../../domain/context-window-policy');
+    const { isStateForCascade } = require('../../domain/metrics-calculator');
+    const { resolveHostAdapterConfig } = require('./host-config');
+    const {
+      UUID_RE,
+      CONVO_RPC_RE,
+      createTextCodec,
+      extractCascadeIdFromBody,
+      injectCheckpointPayload,
+    } = require('./protobuf-wire-codec');
+    const { setBoundedLruMap } = require('./local-http-transport');
+    const MAX_CASCADE_MAP_ENTRIES = 200;
+    function cleanupLegacyObjectPrototypeCwGetters(extraWin) {
+      const protos = [Object.prototype];
       try {
-        parsed = new URL(String(rawUrl));
-      } catch {
-        return false;
-      }
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname.includes('..')) {
-        return false;
-      }
-      const candidateUrls = [
-        ...OFFICIAL_COMPANION_URLS,
-        ...Object.values(resolvedHostConfig?.companionScripts || {}),
-      ];
-      for (const cand of candidateUrls) {
-        if (!cand) continue;
+        if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
+          protos.push(extraWin.Object.prototype);
+        }
+      } catch {}
+      for (const proto of protos) {
         try {
-          const cu = new URL(String(cand));
-          if (cu.protocol === 'https:' && parsed.origin === cu.origin && parsed.pathname === cu.pathname) {
-            return true;
+          for (const key of Object.getOwnPropertyNames(proto)) {
+            if (!/^\d+K$/.test(key)) continue;
+            const desc = Object.getOwnPropertyDescriptor(proto, key);
+            if (desc && desc.configurable && typeof desc.get === 'function' && String(desc.get).includes('512000')) {
+              delete proto[key];
+            }
           }
         } catch {}
       }
-      if (/\/(?:prism_bundle|main)\.js$/.test(parsed.pathname)) {
-        const cdnBase = String(resolvedHostConfig?.cdnOrigin || 'https://www.gstatic.com/antigravity').replace(/\/+$/, '');
+    }
+    function registerCustomCwForStyles(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
+      cleanupLegacyObjectPrototypeCwGetters(extraWin);
+      if (!cw) return;
+      const kNum = parseInt(cw, 10);
+      if (!isNaN(kNum) && kNum > 0 && kNum <= 256 && underDefaultCwSet && !underDefaultCwSet.has(cw)) {
+        underDefaultCwSet.add(cw);
+        if (typeof onStyleUpdate === 'function') {
+          try { onStyleUpdate(); } catch {}
+        }
+      }
+    }
+    function extractModelValFromModelOrAlias(moa) {
+      if (!moa || typeof moa !== 'object') return undefined;
+      if (moa.model !== undefined) return moa.model;
+      if (moa.choice && (moa.choice.case === 'model' || moa.choice.case === 'alias') && moa.choice.value !== undefined) {
+        return moa.choice.value;
+      }
+      return undefined;
+    }
+    function resolveModelValueFromLabel(state, label) {
+      if (!label || typeof label !== 'string') return undefined;
+      const trimmed = label.trim();
+      if (!trimmed) return undefined;
+      const configs = state?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+      if (!Array.isArray(configs)) return undefined;
+      for (const cfg of configs) {
+        if (cfg && cfg.label === trimmed) {
+          const v = extractModelValFromModelOrAlias(cfg.modelOrAlias);
+          if (v !== undefined) return v;
+        }
+      }
+      return undefined;
+    }
+    function extractLabelFromSyncedKey(syncedKey) {
+      if (typeof syncedKey !== 'string' || !syncedKey) return undefined;
+      const parts = syncedKey.split(':');
+      if (parts.length >= 4) {
+        const label = parts.slice(2, parts.length - 1).join(':').trim();
+        if (label) return label;
+      }
+      if (parts.length === 3) {
+        const label = parts[1].trim();
+        if (label) return label;
+      }
+      return undefined;
+    }
+    function createReactFiberDriver({
+      window,
+      document,
+      localStorage,
+      cwStore,
+      transport,
+      remotePortDriver,
+      hostConfig,
+      scope,
+      onCascadeSniffed,
+      onRemoteAnnotationsUpdated,
+    }) {
+      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
+      const codec = createTextCodec(window);
+      let activeSniffedCascadeId = '';
+      let lastAppliedCwGlobal = '';
+      const lastAppliedCwByCascade = new Map();
+      let capturedLsClient = null;
+      let lastRcTrajectoryPollTs = 0;
+      let rcTrajectoryPollInFlight = false;
+      let lastDesktopTrajectorySyncTs = 0;
+      let desktopTrajectorySyncInFlight = false;
+      const viewPatchCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const viewMsCtxCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const frozenModelCloneCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const patchedStoreConfigsCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const sanitizedStores = typeof WeakSet === 'function' ? new WeakSet() : null;
+      const patchedCwsObjects = typeof WeakSet === 'function' ? new WeakSet() : null;
+      const hookedFetchWindows = typeof WeakSet === 'function' ? new WeakSet() : null;
+      const hookedLsClients = typeof WeakSet === 'function' ? new WeakSet() : null;
+      const patchedStreamClients = typeof WeakSet === 'function' ? new WeakSet() : null;
+      const cachedCustomizationsStores = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const lastCustomizationsDfsByDoc = typeof WeakMap === 'function' ? new WeakMap() : null;
+      const triggeredStoreRefresh = typeof WeakSet === 'function' ? new WeakSet() : null;
+      const hostViewState = typeof WeakMap === 'function' ? new WeakMap() : null;
+      cleanupLegacyObjectPrototypeCwGetters(window);
+      try {
+        const raw = localStorage?.getItem?.('jetski.developer.customFlagOverrides');
+        const flags = raw ? JSON.parse(raw) : {};
+        let changed = false;
+        if (flags['context-window-selector'] !== true) {
+          flags['context-window-selector'] = true;
+          changed = true;
+        }
+        if (!flags['contextWindowSelector'] || flags['contextWindowSelector'].enabled !== true) {
+          flags['contextWindowSelector'] = { enabled: true };
+          changed = true;
+        }
+        if (changed) {
+          localStorage?.setItem?.('jetski.developer.customFlagOverrides', JSON.stringify(flags));
+        }
+      } catch {}
+      function setTriggerCwAttribute(triggerEl, cwStr) {
+        if (!triggerEl || typeof triggerEl.setAttribute !== 'function') return;
+        const str = String(cwStr);
+        if (triggerEl.getAttribute('data-context-window') !== str) {
+          triggerEl.setAttribute('data-context-window', str);
+        }
+      }
+      function resolveEffectiveView(view) {
+        if (view && view.classList?.contains?.('agy-rc-host-view')) {
+          const cdoc = remotePortDriver?.getAccessibleIframeDocument?.();
+          if (cdoc) {
+            const cid = view.getAttribute('data-cascade-id');
+            if (cid && cid !== 'remote-session') {
+              const exact = cdoc.querySelector(`[data-testid="conversation-view"][data-cascade-id="${cid}"]`);
+              if (exact) return exact;
+            }
+            const anyView = cdoc.querySelector('[data-testid="conversation-view"]');
+            if (anyView) return anyView;
+          }
+        }
+        return view;
+      }
+      function resolveEffectiveInputBox(inputBox) {
+        if (inputBox && inputBox.classList?.contains?.('agy-rc-host-box')) {
+          const cdoc = remotePortDriver?.getAccessibleIframeDocument?.();
+          if (cdoc) {
+            const innerBox = cdoc.querySelector('[data-testid="agent-input-box"]');
+            if (innerBox) return innerBox;
+          }
+        }
+        return inputBox;
+      }
+      function resolveEffectiveCascadeId(body, rcInst) {
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        const fromBody = extractCascadeIdFromBody(body, ignoreUuid, codec);
+        if (fromBody) return fromBody;
+        if (activeSniffedCascadeId && activeSniffedCascadeId !== 'remote-session') {
+          return activeSniffedCascadeId;
+        }
+        const activeView = document?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+        const domCid = activeView?.getAttribute?.('data-cascade-id');
+        if (domCid && domCid !== 'remote-session') return domCid;
+        return null;
+      }
+      function injectCheckpointLimitIntoSendRequest(path, body, rcInst) {
+        if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body || !cwStore) {
+          return body;
+        }
         try {
-          const cdnUrl = new URL(cdnBase);
-          if (
-            cdnUrl.protocol === 'https:' &&
-            parsed.origin === cdnUrl.origin &&
-            (cdnUrl.pathname === '/' || parsed.pathname.startsWith(`${cdnUrl.pathname}/`))
-          ) {
-            return true;
+          const cid = resolveEffectiveCascadeId(body, rcInst);
+          const cw = cwStore.getSavedContextWindow(cid);
+          const limit = cwStore.getLimit(cw);
+          if (!cw || !limit || limit <= 0) return body;
+          return injectCheckpointPayload({
+            path,
+            body,
+            contextWindow: cw,
+            maxTokenLimit: limit,
+            codec,
+          });
+        } catch {
+          return body;
+        }
+      }
+      function notifyCascadeSniffed(cid) {
+        if (typeof onCascadeSniffed === 'function') {
+          try { onCascadeSniffed(cid); } catch {}
+        }
+      }
+      function sniffCascadeIdFromRpc(path, body, rcInst) {
+        if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        const cid = extractCascadeIdFromBody(body, ignoreUuid, codec);
+        if (cid) {
+          const changed = activeSniffedCascadeId !== cid;
+          activeSniffedCascadeId = cid;
+          if (/\/(SendUserCascadeMessage|StartCascade|StreamCascadeReactiveUpdates|StreamAgentStateUpdates)$/i.test(path)) {
+            lastRcTrajectoryPollTs = 0;
+            if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
+              transport?.recordStepEvent?.(cid);
+            }
+            scope?.setTimeout?.(() => {
+              lastRcTrajectoryPollTs = 0;
+              notifyCascadeSniffed(cid);
+            }, 1200);
+          }
+          if (changed) notifyCascadeSniffed(cid);
+        }
+      }
+      function ensureFetchHook(targetWin) {
+        try {
+          const w = targetWin || window;
+          if (!w || typeof w.fetch !== 'function') return;
+          if (hookedFetchWindows && hookedFetchWindows.has(w)) return;
+          if (w.fetch.__agyCwHookV2) return;
+          const origFetch = w.fetch;
+          const wrappedFetch = function (input, init) {
+            let nextInput = input;
+            let nextInit = init;
+            try {
+              const url =
+                typeof input === 'string'
+                  ? input
+                  : input && typeof input.url === 'string'
+                    ? input.url
+                    : input && typeof input.href === 'string'
+                      ? input.href
+                      : '';
+              if (url && CONVO_RPC_RE.test(url)) {
+                if (nextInit && nextInit.body) {
+                  sniffCascadeIdFromRpc(url, nextInit.body, null);
+                  if (/\/SendUserCascadeMessage$/i.test(url)) {
+                    nextInit = { ...nextInit, body: injectCheckpointLimitIntoSendRequest(url, nextInit.body, null) };
+                  }
+                } else if (
+                  input &&
+                  typeof input === 'object' &&
+                  typeof input.arrayBuffer === 'function' &&
+                  typeof input.clone === 'function' &&
+                  /\/SendUserCascadeMessage$/i.test(url)
+                ) {
+                  return input
+                    .clone()
+                    .arrayBuffer()
+                    .then((ab) => {
+                      const rawBytes = new Uint8Array(ab);
+                      sniffCascadeIdFromRpc(url, rawBytes, null);
+                      const injectedBody = injectCheckpointLimitIntoSendRequest(url, rawBytes, null);
+                      const ReqCtor = w.Request || (typeof Request === 'function' ? Request : null);
+                      if (ReqCtor) {
+                        return origFetch.call(this, new ReqCtor(input, { body: injectedBody }), nextInit);
+                      }
+                      return origFetch.call(this, nextInput, { ...(nextInit || {}), body: injectedBody });
+                    })
+                    .catch(() => origFetch.call(this, nextInput, nextInit));
+                }
+              }
+            } catch {}
+            return origFetch.call(this, nextInput, nextInit);
+          };
+          wrappedFetch.__agyCwHookV2 = true;
+          w.fetch = wrappedFetch;
+          if (hookedFetchWindows) hookedFetchWindows.add(w);
+          scope?.add?.(() => {
+            try {
+              if (w.fetch === wrappedFetch) {
+                w.fetch = origFetch;
+              }
+            } catch {}
+          });
+        } catch {}
+      }
+      function hookLsClient(lsClient) {
+        if (!lsClient || typeof lsClient !== 'object') return lsClient;
+        if (hookedLsClients && hookedLsClients.has(lsClient)) return lsClient;
+        if (lsClient.__agyCwHookV2) return lsClient;
+        try {
+          let hooked = false;
+          const origSend = lsClient.sendUserCascadeMessage;
+          let wrappedSend = null;
+          if (typeof origSend === 'function') {
+            wrappedSend = function (req, ...rest) {
+              const nextReq = injectCheckpointLimitIntoSendRequest(
+                resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'),
+                req,
+                null
+              );
+              return origSend.call(this, nextReq, ...rest);
+            };
+            wrappedSend.__agyCwHookV2 = true;
+            lsClient.sendUserCascadeMessage = wrappedSend;
+            hooked = true;
+          }
+          if (hookedLsClients) hookedLsClients.add(lsClient);
+          if (hooked) {
+            scope?.add?.(() => {
+              try {
+                if (wrappedSend && lsClient.sendUserCascadeMessage === wrappedSend) {
+                  lsClient.sendUserCascadeMessage = origSend;
+                }
+              } catch {}
+            });
           }
         } catch {}
-        for (const staticOrig of resolvedHostConfig?.staticCdnOrigins || []) {
+        return lsClient;
+      }
+      let lsDecoratorInstalled = false;
+      function installLsClientDecoratorHook() {
+        if (lsDecoratorInstalled || !window) return;
+        lsDecoratorInstalled = true;
+        try {
+          const hadOwnDec = Object.prototype.hasOwnProperty.call(window, '__JETSKI_LS_CLIENT_DECORATOR__');
+          const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
+          const wrappedDec = function (client) {
+            const decorated = typeof prevDec === 'function' ? prevDec(client) || client : client;
+            if (decorated && typeof decorated === 'object') {
+              capturedLsClient = decorated;
+              if (
+                typeof decorated.subscribeToPlugins === 'function' &&
+                typeof decorated.getAllPlugins === 'function' &&
+                (!patchedStreamClients || !patchedStreamClients.has(decorated))
+              ) {
+                if (patchedStreamClients) patchedStreamClients.add(decorated);
+                const origSubRaw = decorated.subscribeToPlugins;
+                const origSub = origSubRaw.bind(decorated);
+                const wrappedSub = function (req, opts) {
+                  const stream = origSub(req, opts);
+                  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream;
+                  return {
+                    [Symbol.asyncIterator]() {
+                      const it = stream[Symbol.asyncIterator]();
+                      let yieldedFirst = false;
+                      let pendingFirstNext = null;
+                      return {
+                        async next() {
+                          if (!yieldedFirst) {
+                            yieldedFirst = true;
+                            let timer;
+                            const firstPromise = it.next();
+                            firstPromise.catch(() => {});
+                            const setT =
+                              window && typeof window.setTimeout === 'function'
+                                ? window.setTimeout.bind(window)
+                                : setTimeout;
+                            const clearT =
+                              window && typeof window.clearTimeout === 'function'
+                                ? window.clearTimeout.bind(window)
+                                : clearTimeout;
+                            const raceRes = await Promise.race([
+                              firstPromise.then((r) => ({ from: 'stream', r })),
+                              new Promise((resolve) => {
+                                timer = setT(() => resolve({ from: 'timeout' }), 600);
+                              }),
+                            ]);
+                            clearT(timer);
+                            if (raceRes.from === 'stream') return raceRes.r;
+                            pendingFirstNext = firstPromise;
+                            try {
+                              const res = await decorated.getAllPlugins({ workspaceUris: [] });
+                              return { done: false, value: { plugins: res?.plugins || [] } };
+                            } catch {
+                              const p = pendingFirstNext;
+                              pendingFirstNext = null;
+                              return p;
+                            }
+                          }
+                          if (pendingFirstNext) {
+                            const p = pendingFirstNext;
+                            pendingFirstNext = null;
+                            return p;
+                          }
+                          return it.next();
+                        },
+                        return(v) {
+                          return typeof it.return === 'function' ? it.return(v) : Promise.resolve({ done: true, value: v });
+                        },
+                        throw(e) {
+                          return typeof it.throw === 'function' ? it.throw(e) : Promise.reject(e);
+                        },
+                      };
+                    },
+                  };
+                };
+                decorated.subscribeToPlugins = wrappedSub;
+                scope?.add?.(() => {
+                  try {
+                    if (decorated.subscribeToPlugins === wrappedSub) {
+                      decorated.subscribeToPlugins = origSubRaw;
+                    }
+                  } catch {}
+                });
+              }
+            }
+            return decorated;
+          };
+          window.__JETSKI_LS_CLIENT_DECORATOR__ = wrappedDec;
+          scope?.add?.(() => {
+            try {
+              if (window.__JETSKI_LS_CLIENT_DECORATOR__ === wrappedDec) {
+                if (hadOwnDec) window.__JETSKI_LS_CLIENT_DECORATOR__ = prevDec;
+                else delete window.__JETSKI_LS_CLIENT_DECORATOR__;
+              }
+            } catch {}
+          });
+        } catch {}
+      }
+      function ensureModelContextWindowOptions(modelObj, extraCw, forceClone = false) {
+        if (!modelObj || typeof modelObj !== 'object') return modelObj;
+        const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
+        const existingNames = new Set(curArr.map((o) => o && o.name).filter(Boolean));
+        const wanted = [...PRESET_CONTEXT_WINDOWS];
+        if (extraCw && !wanted.includes(extraCw)) {
+          wanted.push(extraCw);
+        }
+        const toAdd = [];
+        for (const cw of wanted) {
+          if (!existingNames.has(cw)) {
+            const limit = cwStore ? cwStore.getLimit(cw) : 256000;
+            const hint = cwStore ? cwStore.getQuotaHint(cw) : cw;
+            toAdd.push({ name: cw, description: hint, expensive: limit > 256000 });
+            existingNames.add(cw);
+          }
+        }
+        if (toAdd.length === 0 && Array.isArray(modelObj.contextWindowOptions)) {
+          return modelObj;
+        }
+        const nextArr = [...curArr, ...toAdd];
+        if (!forceClone) {
           try {
-            const su = new URL(String(staticOrig));
-            if (su.protocol === 'https:' && parsed.origin === su.origin) {
-              return true;
+            if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
+              modelObj.contextWindowOptions.push(...toAdd);
+              return modelObj;
+            }
+            if (Object.isExtensible(modelObj)) {
+              modelObj.contextWindowOptions = nextArr;
+              return modelObj;
             }
           } catch {}
         }
-        if (resolvedHostConfig?.isRemoteHost?.(parsed.hostname)) {
-          return true;
+        const wantedKey = wanted.join('|');
+        if (frozenModelCloneCache) {
+          const byKey = frozenModelCloneCache.get(modelObj);
+          if (byKey && byKey.has(wantedKey)) return byKey.get(wantedKey);
+        }
+        try {
+          const proto = Object.getPrototypeOf(modelObj);
+          const clone =
+            proto && proto !== Object.prototype
+              ? Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr })
+              : { ...modelObj, contextWindowOptions: nextArr };
+          if (frozenModelCloneCache) {
+            let byKey = frozenModelCloneCache.get(modelObj);
+            if (!byKey) {
+              byKey = new Map();
+              frozenModelCloneCache.set(modelObj, byKey);
+            }
+            byKey.set(wantedKey, clone);
+          }
+          return clone;
+        } catch {
+          return modelObj;
         }
       }
-      return false;
-    }
-    function getOrCreateCompanionPolicyController(win, resolvedHostConfig) {
-      if (!win || typeof win !== 'object') return null;
-      if (companionPolicyControllers && companionPolicyControllers.has(win)) {
-        const existing = companionPolicyControllers.get(win);
-        existing.updateHostConfig(resolvedHostConfig);
-        return existing;
+      function ensureContextWindowSelectorFlag(extraCw) {
+        ensureFetchHook(window);
+        const cwin = remotePortDriver?.getAccessibleIframeWindow?.();
+        if (cwin) ensureFetchHook(cwin);
+        if (!document) return;
+        const now = Date.now();
+        const effectiveExtraKey =
+          extraCw && !PRESET_CONTEXT_WINDOWS.includes(extraCw) ? String(extraCw) : '__presets__';
+        const docs = [document, remotePortDriver?.getAccessibleIframeDocument?.()].filter(Boolean);
+        for (const d of docs) {
+          const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
+          for (const view of views) {
+            const currentCid = view.getAttribute?.('data-cascade-id') || '';
+            const prevRec = viewPatchCache ? viewPatchCache.get(view) : null;
+            if (
+              prevRec &&
+              now - prevRec.ts < 3000 &&
+              prevRec.extraCw === effectiveExtraKey &&
+              prevRec.cid === currentCid
+            ) {
+              continue;
+            }
+            const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
+            const startNodes = [triggerEl, view].filter(Boolean);
+            let patchedAny = false;
+            for (const node of startNodes) {
+              const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
+              let fiber = fk ? node[fk] : null;
+              while (fiber) {
+                const val = fiber.memoizedProps?.value;
+                if (val && typeof val === 'object') {
+                  if (typeof val.get === 'function') {
+                    patchedAny = true;
+                    if (!patchedCwsObjects || !patchedCwsObjects.has(val)) {
+                      try {
+                        const origGet = val.get;
+                        const wrappedGet = function (name) {
+                          if (name === 'contextWindowSelector') {
+                            return { enabled: true, feature: { enabled: true } };
+                          }
+                          return origGet.apply(this, arguments);
+                        };
+                        val.get = wrappedGet;
+                        if (patchedCwsObjects) patchedCwsObjects.add(val);
+                        scope?.add?.(() => {
+                          try {
+                            if (val.get === wrappedGet) val.get = origGet;
+                          } catch {}
+                        });
+                      } catch {}
+                    }
+                  }
+                  if ('corpHost' in val && 'cider' in val && 'contextWindow' in val && val.contextWindow === undefined) {
+                    try { val.contextWindow = {}; } catch {}
+                  }
+                  if (val.selectedModel && typeof val.selectedModel === 'object') {
+                    patchedAny = true;
+                    const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
+                    if (nextSm !== val.selectedModel && Object.isExtensible(val)) {
+                      try { val.selectedModel = nextSm; } catch {}
+                    }
+                  }
+                  if (Array.isArray(val.modelOptions)) {
+                    patchedAny = true;
+                    if (Object.isExtensible(val.modelOptions)) {
+                      for (let i = 0; i < val.modelOptions.length; i++) {
+                        const nextOpt = ensureModelContextWindowOptions(val.modelOptions[i], extraCw);
+                        if (nextOpt !== val.modelOptions[i]) {
+                          try { val.modelOptions[i] = nextOpt; } catch {}
+                        }
+                      }
+                    } else if (Object.isExtensible(val)) {
+                      let changedOpt = false;
+                      const mapped = val.modelOptions.map((opt) => {
+                        const nextOpt = ensureModelContextWindowOptions(opt, extraCw);
+                        if (nextOpt !== opt) changedOpt = true;
+                        return nextOpt;
+                      });
+                      if (changedOpt) {
+                        try { val.modelOptions = mapped; } catch {}
+                      }
+                    }
+                  }
+                  if (val.store && typeof val.store.getState === 'function') {
+                    patchedAny = true;
+                    const st = val.store.getState();
+                    const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+                    if (Array.isArray(clientConfigs)) {
+                      let storeRec = patchedStoreConfigsCache ? patchedStoreConfigsCache.get(val.store) : null;
+                      const alreadyHandledRef =
+                        storeRec &&
+                        storeRec.configsRefs.has(clientConfigs) &&
+                        storeRec.extraCwKeys.has(effectiveExtraKey);
+                      if (!alreadyHandledRef) {
+                        let needsReduxUpdate = false;
+                        const updatedConfigs = [];
+                        for (const cfg of clientConfigs) {
+                          const nextCfg = ensureModelContextWindowOptions(cfg, extraCw, true);
+                          updatedConfigs.push(nextCfg);
+                          if (nextCfg !== cfg) needsReduxUpdate = true;
+                        }
+                        if (!storeRec && patchedStoreConfigsCache) {
+                          storeRec = { configsRefs: new WeakSet(), extraCwKeys: new Set() };
+                          patchedStoreConfigsCache.set(val.store, storeRec);
+                        }
+                        if (storeRec) {
+                          storeRec.configsRefs.add(clientConfigs);
+                          storeRec.configsRefs.add(updatedConfigs);
+                          storeRec.extraCwKeys.add(effectiveExtraKey);
+                        }
+                        if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
+                          try {
+                            val.store.dispatch({
+                              type: 'userStatus/setUserStatus',
+                              payload: {
+                                ...st.userStatus,
+                                cascadeModelConfigData: {
+                                  ...st.userStatus.cascadeModelConfigData,
+                                  clientModelConfigs: updatedConfigs,
+                                },
+                              },
+                            });
+                            const afterConfigs = val.store.getState()?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+                            if (storeRec && Array.isArray(afterConfigs)) {
+                              storeRec.configsRefs.add(afterConfigs);
+                            }
+                          } catch {}
+                        }
+                      }
+                    }
+                  }
+                }
+                fiber = fiber.return;
+              }
+            }
+            if (patchedAny && viewPatchCache) {
+              viewPatchCache.set(view, { ts: now, extraCw: effectiveExtraKey, cid: currentCid });
+            }
+          }
+        }
       }
-      let latestHostConfig = resolvedHostConfig;
-      const allowedInlineScripts = new Set();
-      const allowedBlobUrls = new Set();
-      const ttSupported = Boolean(win.trustedTypes && typeof win.trustedTypes.createPolicy === 'function');
-      let policy = null;
-      if (ttSupported) {
-        const names = ['agy-statusbar', 'agy-statusbar-companion', 'agy-rc-statusbar'];
-        for (const name of names) {
-          try {
-            const created = win.trustedTypes.createPolicy(name, {
-              createScript: (s) => {
-                const code = String(s ?? '');
-                if (allowedInlineScripts.has(code)) return code;
-                throw new TypeError('Untrusted inline script rejected by TrustedTypes policy');
-              },
-              createScriptURL: (u) => {
-                const raw = String(u ?? '');
-                if (raw.startsWith('blob:')) {
-                  if (allowedBlobUrls.has(raw)) return raw;
-                  throw new TypeError('Untrusted blob script URL rejected by TrustedTypes policy');
+      function ensureCustomizationsStoreLoaded() {
+        if (!document) return;
+        const now = Date.now();
+        const docs = [document, remotePortDriver?.getAccessibleIframeDocument?.()].filter(Boolean);
+        for (const d of docs) {
+          const cachedStore = cachedCustomizationsStores?.get(d);
+          if (cachedStore && cachedStore.hasReceivedStreamSnapshot && cachedStore.streamingDisabled) {
+            continue;
+          }
+          const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
+          const rootEl = d.querySelector?.('#root, #app') || d.body?.firstElementChild;
+          const startNodes = [...views, rootEl, d].filter(Boolean);
+          for (const node of startNodes) {
+            const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$'));
+            const rawRoot = fk ? node[fk] : null;
+            const startFiber = rawRoot?.stateNode?.current || rawRoot;
+            if (!startFiber) continue;
+            let up = startFiber;
+            let foundStore = null;
+            while (up) {
+              const val = up.memoizedProps?.value;
+              if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
+                foundStore = val;
+                break;
+              }
+              up = up.return;
+            }
+            if (!foundStore && (node === rootEl || node === d)) {
+              const lastDfs = lastCustomizationsDfsByDoc?.get(d) || 0;
+              if (lastDfs && now - lastDfs < 10000) continue;
+              lastCustomizationsDfsByDoc?.set(d, now);
+              const stack = [startFiber];
+              const visited = new Set();
+              while (stack.length > 0 && visited.size < 2500) {
+                const f = stack.pop();
+                if (!f || visited.has(f)) continue;
+                visited.add(f);
+                const val = f.memoizedProps?.value;
+                if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
+                  foundStore = val;
+                  break;
                 }
-                if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
-                  return raw;
+                if (f.sibling) stack.push(f.sibling);
+                if (f.child) stack.push(f.child);
+              }
+            }
+            if (foundStore) {
+              cachedCustomizationsStores?.set(d, foundStore);
+              try {
+                if (typeof foundStore.disableStreaming === 'function' && !foundStore.streamingDisabled) {
+                  foundStore.disableStreaming();
                 }
-                throw new TypeError('Untrusted script URL rejected by TrustedTypes policy');
-              },
-            });
-            if (created) {
-              policy = created;
+                const st = typeof foundStore.state?.getState === 'function' ? foundStore.state.getState() : null;
+                if ((!foundStore.hasReceivedStreamSnapshot || st?.isLoadingPlugins) && !triggeredStoreRefresh?.has(foundStore)) {
+                  triggeredStoreRefresh?.add(foundStore);
+                  Promise.resolve(foundStore.refresh()).catch(() => {
+                    triggeredStoreRefresh?.delete(foundStore);
+                  });
+                }
+              } catch {}
               break;
             }
-          } catch {}
+          }
         }
       }
-      const ctrl = {
-        hasNativePolicy: Boolean(policy),
-        updateHostConfig(nextCfg) {
-          if (nextCfg) latestHostConfig = nextCfg;
-        },
-        allowInline(code) {
-          allowedInlineScripts.add(String(code ?? ''));
-        },
-        revokeInline(code) {
-          allowedInlineScripts.delete(String(code ?? ''));
-        },
-        allowBlob(blobUrl) {
-          allowedBlobUrls.add(String(blobUrl ?? ''));
-        },
-        revokeBlob(blobUrl) {
-          allowedBlobUrls.delete(String(blobUrl ?? ''));
-        },
-        toScript(code) {
-          if (policy && typeof policy.createScript === 'function') {
-            return policy.createScript(code);
+      function getModelSelectorContextForView(view, extraCw) {
+        ensureContextWindowSelectorFlag(extraCw);
+        const effView = resolveEffectiveView(view);
+        if (!effView) return null;
+        const now = Date.now();
+        const currentCid = effView.getAttribute?.('data-cascade-id') || view?.getAttribute?.('data-cascade-id') || '';
+        const cachedRec = viewMsCtxCache?.get(effView);
+        if (
+          cachedRec &&
+          cachedRec.cid === currentCid &&
+          now - cachedRec.ts < 400 &&
+          (!cachedRec.ctx.triggerEl || cachedRec.ctx.triggerEl.isConnected !== false) &&
+          (cachedRec.ctx.msCtx || cachedRec.ctx.reduxStore || cachedRec.ctx.legacyCtx)
+        ) {
+          if (cachedRec.ctx.msCtx?.selectedModel) {
+            ensureModelContextWindowOptions(cachedRec.ctx.msCtx.selectedModel, extraCw);
           }
-          if (ttSupported) {
-            throw new TypeError('TrustedTypes policy creation blocked by CSP');
-          }
-          if (!allowedInlineScripts.has(String(code ?? ''))) {
-            throw new TypeError('Untrusted inline script rejected');
-          }
-          return code;
-        },
-        toScriptURL(rawUrl) {
-          if (policy && typeof policy.createScriptURL === 'function') {
-            return policy.createScriptURL(rawUrl);
-          }
-          if (ttSupported) {
-            throw new TypeError('TrustedTypes policy creation blocked by CSP');
-          }
-          const raw = String(rawUrl ?? '');
-          if (raw.startsWith('blob:')) {
-            if (allowedBlobUrls.has(raw)) return raw;
-            throw new TypeError('Untrusted blob script URL rejected');
-          }
-          if (isAllowedStatusBarScriptUrl(raw, latestHostConfig)) {
-            return raw;
-          }
-          throw new TypeError('Untrusted script URL rejected');
-        },
-      };
-      if (companionPolicyControllers) {
-        companionPolicyControllers.set(win, ctrl);
-      }
-      return ctrl;
-    }
-    function disposeCompanionPolicyController(win) {
-      if (win && companionPolicyControllers) {
-        companionPolicyControllers.delete(win);
-      }
-    }
-    function getScriptNonce(doc) {
-      if (!doc) return '';
-      const nonceEl =
-        doc.querySelector?.('script[nonce]') ||
-        doc.querySelector?.('style[nonce]') ||
-        doc.querySelector?.('link[nonce]');
-      if (nonceEl) {
-        const n = nonceEl.nonce || nonceEl.getAttribute?.('nonce') || '';
-        if (n) return n;
-      }
-      for (const tag of ['script', 'style', 'link']) {
-        const nodes = doc.querySelectorAll?.(tag) || [];
-        for (let i = 0; i < nodes.length; i++) {
-          const el = nodes[i];
-          const n = el && (el.nonce || el.getAttribute?.('nonce') || '');
-          if (n) return n;
+          return cachedRec.ctx;
         }
+        const triggerEl = effView.querySelector?.('[data-testid="model-selector-trigger"]') || null;
+        const startEl = triggerEl || effView;
+        const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
+        let fiber = fk ? startEl[fk] : null;
+        let msCtx = null;
+        let setSelectedModelWithCw = null;
+        let reduxStore = null;
+        let legacyCtx = null;
+        while (fiber) {
+          const props = fiber.memoizedProps;
+          if (!setSelectedModelWithCw && typeof props?.setSelectedModel === 'function' && props.setSelectedModel.length >= 2) {
+            setSelectedModelWithCw = props.setSelectedModel;
+          }
+          const val = props?.value;
+          if (val && typeof val === 'object') {
+            if (!msCtx && typeof val.setSelectedModel === 'function' && ('selectedModel' in val)) {
+              msCtx = val;
+            }
+            if (!setSelectedModelWithCw && typeof val.setSelectedModel === 'function' && val.setSelectedModel.length >= 2) {
+              setSelectedModelWithCw = val.setSelectedModel;
+            }
+            if (!reduxStore && val.store && typeof val.store.dispatch === 'function' && typeof val.store.getState === 'function') {
+              reduxStore = val.store;
+            }
+            if (!legacyCtx && typeof val.setModelForConversation === 'function') {
+              legacyCtx = val;
+            }
+          }
+          fiber = fiber.return;
+        }
+        if (msCtx?.selectedModel) {
+          ensureModelContextWindowOptions(msCtx.selectedModel, extraCw);
+        }
+        const res = { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
+        if ((msCtx || reduxStore || legacyCtx) && viewMsCtxCache) {
+          viewMsCtxCache.set(effView, { ctx: res, ts: now, cid: currentCid });
+        }
+        return res;
       }
-      return '';
-    }
-    function appendScriptSrcAsync(win, doc, rawUrl, policyCtrl, companionId, onDoneCleanup) {
-      return new Promise((resolve) => {
-        let s = null;
+      function getCascadeContextForElement(el) {
+        const effEl = resolveEffectiveInputBox(resolveEffectiveView(el));
+        const candidates = [
+          effEl,
+          effEl?.closest?.('[data-testid="conversation-view"]'),
+          document?.querySelector?.('[data-testid="conversation-view"]'),
+        ].filter(Boolean);
+        for (const node of candidates) {
+          const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
+          let curr = fk ? node[fk] : null;
+          while (curr) {
+            const val = curr.memoizedProps?.value;
+            if (val?.cascadeContext?.state?.agentStateProvider) {
+              return val.cascadeContext;
+            }
+            if (val?.state?.agentStateProvider && (val?.debug || val?.cascadeContext !== undefined || val?.state)) {
+              return val;
+            }
+            curr = curr.return;
+          }
+        }
+        return null;
+      }
+      function getRemoteRpcServiceForElement(el) {
+        if (
+          capturedLsClient &&
+          (typeof capturedLsClient.retrieveUserQuotaSummary === 'function' ||
+            typeof capturedLsClient.getCascadeTrajectory === 'function')
+        ) {
+          return hookLsClient(capturedLsClient);
+        }
+        const cdoc = remotePortDriver?.getAccessibleIframeDocument?.();
+        const effBox = resolveEffectiveInputBox(resolveEffectiveView(el));
+        const candidates = [
+          effBox,
+          el,
+          document?.querySelector?.('[data-testid="conversation-view"]'),
+          cdoc?.querySelector?.('[data-testid="conversation-view"]'),
+        ].filter(Boolean);
+        for (const startEl of candidates) {
+          const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
+          let curr = fk ? startEl[fk] : null;
+          while (curr) {
+            const val = curr.memoizedProps?.value;
+            if (val && typeof val === 'object') {
+              if (
+                typeof val.retrieveUserQuotaSummary === 'function' ||
+                typeof val.getCascadeTrajectory === 'function' ||
+                typeof val.getAllCascadeTrajectories === 'function' ||
+                typeof val.updateConversationAnnotations === 'function'
+              ) {
+                return hookLsClient(val);
+              }
+              const lsClient =
+                val.core?.projectManagementService?.lsClient ||
+                val.projectManagementService?.lsClient ||
+                val.lsClient;
+              if (
+                lsClient &&
+                (typeof lsClient.retrieveUserQuotaSummary === 'function' ||
+                  typeof lsClient.getCascadeTrajectory === 'function' ||
+                  typeof lsClient.getAllCascadeTrajectories === 'function' ||
+                  typeof lsClient.updateConversationAnnotations === 'function')
+              ) {
+                return hookLsClient(lsClient);
+              }
+            }
+            curr = curr.return;
+          }
+        }
+        const rcInst = remotePortDriver?.resolveInstance?.();
+        if (rcInst && typeof rcInst.proxyCommand === 'function') {
+          return remotePortDriver.createRcServiceAdapter(rcInst, codec, injectCheckpointLimitIntoSendRequest);
+        }
+        return null;
+      }
+      function getSelectedModelKey(view, sessionId, infoOpt) {
+        const info = infoOpt || getModelSelectorContextForView(view);
+        const state = info?.reduxStore ? info.reduxStore.getState() : null;
+        const byConvo = state?.modelSelection?.byConversation?.[sessionId];
+        const sm = info?.msCtx?.selectedModel;
+        const raw =
+          byConvo?.model ??
+          (sm && typeof sm === 'object' ? (sm.value ?? sm.label) : sm) ??
+          state?.modelSelection?.default?.model ??
+          info?.legacyCtx?.getModelConfigForConversation?.(sessionId)?.value ??
+          '';
+        return `${sessionId || ''}:${String(raw ?? '')}`;
+      }
+      function sanitizePoisonedModelSelection(reduxStore) {
+        if (!reduxStore || typeof reduxStore.getState !== 'function' || typeof reduxStore.dispatch !== 'function') {
+          return;
+        }
         try {
-          s = doc.createElement('script');
-          if (companionId) s.setAttribute?.('data-agy-companion', companionId);
-          const nonce = getScriptNonce(doc);
-          if (nonce) {
-            s.nonce = nonce;
-            s.setAttribute?.('nonce', nonce);
+          if (sanitizedStores && sanitizedStores.has(reduxStore)) return;
+          const st = reduxStore.getState();
+          const ms = st?.modelSelection;
+          if (!ms || typeof ms !== 'object') return;
+          const syncMap = ms.trajectorySync;
+          const byConvoMap = ms.byConversation;
+          if (!syncMap || typeof syncMap !== 'object') return;
+          const overrideDefaultModel = extractModelValFromModelOrAlias(
+            st?.userStatus?.cascadeModelConfigData?.defaultOverrideModelConfig?.modelOrAlias
+          );
+          let cleanConvoModel;
+          for (const cid of Object.keys(syncMap)) {
+            const entry = syncMap[cid];
+            const step = entry?.pick?.atStep;
+            if (step === undefined || step === -1) {
+              const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+              const mVal = resolveModelValueFromLabel(st, syncedLabel);
+              if (mVal !== undefined) {
+                cleanConvoModel = mVal;
+                if (syncedLabel && /\(medium\)/i.test(syncedLabel)) break;
+              }
+            }
           }
-          s.src = policyCtrl ? policyCtrl.toScriptURL(rawUrl) : rawUrl;
-          if (typeof s.addEventListener !== 'function') {
-            doc.head.appendChild(s);
-            if (typeof onDoneCleanup === 'function') onDoneCleanup();
-            resolve(true);
+          const preferredModel = overrideDefaultModel ?? cleanConvoModel;
+          if (preferredModel === undefined) return;
+          const poisonedCids = [];
+          let recoveredTargetModel;
+          for (const cid of Object.keys(syncMap)) {
+            const entry = syncMap[cid];
+            const step = entry?.pick?.atStep;
+            const hasSyncedKey = typeof entry?.syncedKey === 'string' && entry.syncedKey.length > 0;
+            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+            const isRelocked =
+              hasSyncedKey &&
+              (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined));
+            if (step === 999999 || isRelocked) {
+              poisonedCids.push(cid);
+              const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
+              if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
+                recoveredTargetModel = syncedModelVal;
+              }
+            }
+          }
+          if (poisonedCids.length === 0 && ms.default?.model === preferredModel) {
+            sanitizedStores?.add(reduxStore);
             return;
           }
-          let settled = false;
-          const setTimeoutFn = win?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-          const clearTimeoutFn = win?.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
-          let timer = null;
-          const finish = (ok) => {
-            if (settled) return;
-            settled = true;
-            if (!ok && s) {
-              try {
-                if (typeof s.remove === 'function') s.remove();
-                else if (s.parentNode) s.parentNode.removeChild(s);
-              } catch {}
+          sanitizedStores?.add(reduxStore);
+          const currentDefaultModel = ms.default?.model;
+          const currentDefaultCustomLabel = ms.default?.customLabel;
+          const desiredDefaultCw = cwStore?.hasExplicitDefaultCw?.()
+            ? cwStore.getDefaultCw()
+            : (ms.default?.contextWindow || '256K');
+          const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
+          for (const cid of poisonedCids) {
+            const entry = syncMap[cid];
+            const convo = byConvoMap?.[cid];
+            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
+            const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
+            const targetModel =
+              syncedLabel && !/\(low\)/i.test(syncedLabel) && syncedModelVal !== undefined
+                ? syncedModelVal
+                : (preferredModel ?? syncedModelVal ?? safeDefaultModel ?? convo?.model);
+            const targetCw = cwStore?.getSavedContextWindow?.(cid) || convo?.contextWindow || desiredDefaultCw;
+            if (targetModel !== undefined) {
+              reduxStore.dispatch({
+                type: 'modelSelection/modelPicked',
+                payload: {
+                  conversationId: cid,
+                  model: targetModel,
+                  customLabel: undefined,
+                  contextWindow: targetCw,
+                  pick: { atStep: -1, queuedMessageIds: [] },
+                },
+              });
             }
-            if (timer && clearTimeoutFn) {
-              try { clearTimeoutFn(timer); } catch {}
-            }
-            if (typeof onDoneCleanup === 'function') {
-              try { onDoneCleanup(); } catch {}
-            }
-            resolve(ok);
-          };
-          s.addEventListener('load', () => finish(true), { once: true });
-          s.addEventListener('error', () => finish(false), { once: true });
-          if (setTimeoutFn) {
-            timer = setTimeoutFn(() => finish(false), 4000);
-            if (timer && typeof timer.unref === 'function') timer.unref();
           }
-          doc.head.appendChild(s);
-        } catch {
-          if (s) {
-            try {
-              if (typeof s.remove === 'function') s.remove();
-              else if (s.parentNode) s.parentNode.removeChild(s);
-            } catch {}
-          }
-          if (typeof onDoneCleanup === 'function') {
-            try { onDoneCleanup(); } catch {}
-          }
-          resolve(false);
-        }
-      });
-    }
-    async function injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, companionId, checkLoaded) {
-      const isLoaded = typeof checkLoaded === 'function' ? checkLoaded : () => false;
-      if (code && doc?.head) {
-        let inlineEl = null;
-        try {
-          inlineEl = doc.createElement('script');
-          if (companionId) inlineEl.setAttribute?.('data-agy-companion', companionId);
-          const nonce = getScriptNonce(doc);
-          if (nonce) {
-            inlineEl.nonce = nonce;
-            inlineEl.setAttribute?.('nonce', nonce);
-          }
-          policyCtrl?.allowInline(code);
-          try {
-            inlineEl.text = policyCtrl ? policyCtrl.toScript(code) : code;
-            doc.head.appendChild(inlineEl);
-          } finally {
-            policyCtrl?.revokeInline(code);
-          }
-          if (isLoaded() || typeof inlineEl.addEventListener !== 'function') {
-            return true;
-          }
-          try {
-            if (typeof inlineEl.remove === 'function') inlineEl.remove();
-            else if (inlineEl.parentNode) inlineEl.parentNode.removeChild(inlineEl);
-          } catch {}
-        } catch {
-          if (inlineEl) {
-            try {
-              if (typeof inlineEl.remove === 'function') inlineEl.remove();
-              else if (inlineEl.parentNode) inlineEl.parentNode.removeChild(inlineEl);
-            } catch {}
-          }
-        }
-        try {
-          const BlobCtor = win?.Blob || (typeof Blob === 'function' ? Blob : null);
-          const UrlApi = win?.URL || (typeof URL !== 'undefined' ? URL : null);
-          if (BlobCtor && UrlApi && typeof UrlApi.createObjectURL === 'function') {
-            const blobUrl = UrlApi.createObjectURL(new BlobCtor([code], { type: 'text/javascript' }));
-            policyCtrl?.allowBlob(blobUrl);
-            const revoke = () => {
-              policyCtrl?.revokeBlob(blobUrl);
-              try { UrlApi.revokeObjectURL(blobUrl); } catch {}
-            };
-            const blobOk = await appendScriptSrcAsync(win, doc, blobUrl, policyCtrl, companionId, revoke);
-            if (blobOk && (isLoaded() || typeof doc.createElement('script')?.addEventListener !== 'function')) {
-              return true;
-            }
+          if (safeDefaultModel !== undefined) {
+            reduxStore.dispatch({
+              type: 'modelSelection/modelPicked',
+              payload: {
+                conversationId: undefined,
+                model: safeDefaultModel,
+                customLabel: safeDefaultModel === currentDefaultModel ? currentDefaultCustomLabel : undefined,
+                contextWindow: desiredDefaultCw,
+              },
+            });
           }
         } catch {}
       }
-      if (url && doc?.head) {
-        const sep = url.includes('?') ? '&' : '?';
-        const remoteUrl = `${url}${sep}t=${Date.now()}`;
-        const remoteOk = await appendScriptSrcAsync(win, doc, remoteUrl, policyCtrl, companionId, null);
-        if (remoteOk) {
+      function applyContextLimit(arg1, sessionIdArg, cwArg, userTriggeredArg = false) {
+        const isOptsObj = Boolean(
+          arg1 &&
+            typeof arg1 === 'object' &&
+            arg1.nodeType === undefined &&
+            ('contextWindow' in arg1 || 'viewEl' in arg1 || 'sessionId' in arg1)
+        );
+        const viewEl = isOptsObj ? arg1.viewEl : arg1;
+        const sessionId = isOptsObj ? arg1.sessionId : sessionIdArg;
+        const contextWindow = isOptsObj ? arg1.contextWindow : cwArg;
+        const userTriggered = isOptsObj ? Boolean(arg1.userTriggered) : Boolean(userTriggeredArg);
+        const targetCw = cwStore?.normalize?.(contextWindow);
+        if (!viewEl || !sessionId || !targetCw) return false;
+        const info = getModelSelectorContextForView(viewEl, targetCw);
+        if (!info) return false;
+        const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
+        if (reduxStore) sanitizePoisonedModelSelection(reduxStore);
+        if (triggerEl && typeof triggerEl.setAttribute === 'function') {
+          const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
+          if (triggerEl.getAttribute('data-agy-cw-warn') !== warnAttr) {
+            triggerEl.setAttribute('data-agy-cw-warn', warnAttr);
+          }
+        }
+        const currentInDom = triggerEl ? cwStore.normalize(triggerEl.getAttribute?.('data-context-window')) : null;
+        const selectedModel = getSelectedModelKey(viewEl, sessionId, info);
+        const applyKey = (selectedModel || '') + ':' + String(targetCw);
+        const lastAppliedForCascade = lastAppliedCwByCascade.get(sessionId);
+        const initialState = reduxStore ? reduxStore.getState() : null;
+        const initialByConvo = initialState?.modelSelection?.byConversation?.[sessionId];
+        const defaultReduxCw = cwStore.normalize(initialState?.modelSelection?.default?.contextWindow) || '256K';
+        const effectiveInitialReduxCw = cwStore.normalize(initialByConvo?.contextWindow) || defaultReduxCw;
+        const reduxAlreadyMatches = !reduxStore || effectiveInitialReduxCw === targetCw;
+        if (
+          (currentInDom === targetCw || lastAppliedForCascade === applyKey || lastAppliedCwGlobal === applyKey) &&
+          reduxAlreadyMatches &&
+          !userTriggered
+        ) {
+          lastAppliedCwGlobal = applyKey;
+          setBoundedLruMap(lastAppliedCwByCascade, sessionId, applyKey, MAX_CASCADE_MAP_ENTRIES);
+          setTriggerCwAttribute(triggerEl, targetCw);
           return true;
         }
-      }
-      return false;
-    }
-    function ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, hostConfig) {
-      try {
-        const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
-        const isRemoteWeb = resolvedHostConfig.isRemoteHost(win?.location?.hostname);
-        if (!isRemoteWeb || !doc?.head) return Promise.resolve(null);
-        const effFetch = fetchFn || win?.fetch;
-        const setFlagGroup = (keys, val) => {
-          for (const k of keys) {
-            win[k] = val;
-          }
-        };
-        const hasExistingCompanionTag = (companionId) => {
-          try {
-            if (!companionId || typeof doc.querySelector !== 'function') return false;
-            const el = doc.querySelector(`script[data-agy-companion="${companionId}"]`);
-            return Boolean(
-              el &&
-                String(el.tagName || '').toUpperCase() === 'SCRIPT' &&
-                typeof el.getAttribute === 'function' &&
-                el.getAttribute('data-agy-companion') === companionId
-            );
-          } catch {
-            return false;
-          }
-        };
-        const loadScript = async (companionId, flagKeys, url, fallbackCode, checkLoaded) => {
-          const keys = Array.isArray(flagKeys) ? flagKeys : [flagKeys];
-          if (keys.some((k) => Boolean(win[k])) || hasExistingCompanionTag(companionId)) return false;
-          setFlagGroup(keys, true);
-          const policyCtrl = getOrCreateCompanionPolicyController(win, resolvedHostConfig);
-          try {
-            if (fallbackCode) {
-              const ok = await injectCompanionCodeOrUrl(win, doc, fallbackCode, url, policyCtrl, companionId, checkLoaded);
-              if (!ok) setFlagGroup(keys, false);
-              return ok;
-            }
-            if (typeof effFetch === 'function' && url) {
-              const sep = url.includes('?') ? '&' : '?';
-              const r = await Promise.resolve(effFetch(`${url}${sep}t=${Date.now()}`)).catch(() => null);
-              const code = r && r.ok !== false && typeof r.text === 'function' ? await r.text() : '';
-              if (code) {
-                const ok = await injectCompanionCodeOrUrl(win, doc, code, url, policyCtrl, companionId, checkLoaded);
-                if (!ok) setFlagGroup(keys, false);
-                return ok;
+        if (msCtx || reduxStore) {
+          const state = initialState;
+          const byConvo = initialByConvo;
+          const currentInRedux = reduxStore
+            ? effectiveInitialReduxCw
+            : (cwStore.normalize(msCtx?.contextWindow?.selected) || currentInDom || '256K');
+          const selectedModelObj = msCtx?.selectedModel;
+          if (selectedModelObj) ensureModelContextWindowOptions(selectedModelObj, targetCw);
+          let dispatched = false;
+          if (currentInRedux !== targetCw || userTriggered) {
+            const prevDefault = state?.modelSelection?.default;
+            const prevDefaultModel = prevDefault?.model;
+            const prevDefaultCustomLabel = prevDefault?.customLabel;
+            const prevDefaultCw = prevDefault?.contextWindow;
+            if (reduxStore) {
+              const syncEntry = state?.modelSelection?.trajectorySync?.[sessionId];
+              const syncedModelVal =
+                syncEntry?.pick?.atStep === 999999
+                  ? resolveModelValueFromLabel(state, extractLabelFromSyncedKey(syncEntry?.syncedKey))
+                  : undefined;
+              const modelVal = syncedModelVal ?? byConvo?.model ?? selectedModelObj?.value ?? prevDefaultModel;
+              const isCustomModel = Boolean(selectedModelObj?.isCustom && selectedModelObj?.value === modelVal);
+              const customLabel = isCustomModel ? selectedModelObj?.label : undefined;
+              if (modelVal !== undefined) {
+                reduxStore.dispatch({
+                  type: 'modelSelection/modelPicked',
+                  payload: {
+                    conversationId: sessionId,
+                    model: modelVal,
+                    customLabel,
+                    contextWindow: targetCw,
+                  },
+                });
+                dispatched = true;
               }
+            } else if (msCtx?.contextWindow && typeof msCtx.contextWindow.select === 'function' && selectedModelObj) {
+              msCtx.contextWindow.select(selectedModelObj, targetCw);
+              dispatched = true;
+            } else if (typeof setSelectedModelWithCw === 'function' && selectedModelObj) {
+              setSelectedModelWithCw(selectedModelObj, targetCw);
+              dispatched = true;
+            } else if (typeof msCtx?.setSelectedModel === 'function' && selectedModelObj) {
+              msCtx.setSelectedModel(selectedModelObj, targetCw);
+              dispatched = true;
             }
-            if (url) {
-              const ok = await injectCompanionCodeOrUrl(win, doc, '', url, policyCtrl, companionId, checkLoaded);
-              if (!ok) setFlagGroup(keys, false);
-              return ok;
-            }
-            setFlagGroup(keys, false);
-            return false;
-          } catch {
-            setFlagGroup(keys, false);
-            return false;
-          }
-        };
-        const resolveHostInfo = async () => {
-          if (win.__agyHostInstalledPlugins && typeof win.__agyHostInstalledPlugins === 'object') {
-            return { resolved: true, ...win.__agyHostInstalledPlugins };
-          }
-          if (hostBridge && typeof hostBridge.fetchHostInstalledPluginInfo === 'function') {
-            const info = await hostBridge.fetchHostInstalledPluginInfo(
-              win.__APP_CONFIG__?.csrfToken,
-              doc.querySelector?.('[data-testid="conversation-view"]')
-            );
-            if (info && info.resolved) {
-              win.__agyHostInstalledPlugins = info;
-              return info;
-            }
-            if (info) {
-              return info;
-            }
-          }
-          return { resolved: false, hasStatusbar: true, hasMcpManager: false, hasKoTranslator: false };
-        };
-        let attempts = 0;
-        const tryLoadInstalledCompanions = async () => {
-          attempts += 1;
-          const info = await resolveHostInfo();
-          if (!info.resolved) {
-            if (attempts < 5) {
-              const setTimeoutFn = win.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-              if (setTimeoutFn) {
-                const t = setTimeoutFn(tryLoadInstalledCompanions, 1500);
-                if (t && typeof t.unref === 'function') t.unref();
-              }
-            }
-            if (!info.hasMcpManager && !info.hasKoTranslator) {
-              return info;
-            }
-          }
-          if (info.hasMcpManager && !win.agyMcpManager && !win.__agyKoFetchingMcpManager) {
-            await loadScript(
-              'mcp-manager',
-              ['__agyLoadingMcpManagerCompanion'],
-              resolvedHostConfig.companionScripts.mcpManagerUrl,
-              info.mcpBlock || info.mcpManagerCode || '',
-              () => Boolean(win.agyMcpManager)
-            );
-          }
-          if (info.hasKoTranslator && !win.__agyKoLocalizerActive && !win.__agyKoThoughtCleanup) {
-            await loadScript(
-              'ko-thought-translator',
-              ['__agyLoadingKoTranslatorCompanion', '__agyLoadingKoThoughtCompanion'],
-              resolvedHostConfig.companionScripts.koTranslatorUrl,
-              info.koBlock || info.koTranslatorCode || '',
-              () => Boolean(win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup)
-            );
-          }
-          return info;
-        };
-        return tryLoadInstalledCompanions();
-      } catch {
-        return Promise.resolve(null);
-      }
-    }
-    module.exports = {
-      OFFICIAL_COMPANION_URLS,
-      isAllowedStatusBarScriptUrl,
-      getOrCreateCompanionPolicyController,
-      disposeCompanionPolicyController,
-      getScriptNonce,
-      ensureRemoteCompanionScripts,
-    };
-  },
-  "./context-window-policy": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
-    'use strict';
-    const CONTEXT_WINDOWS = ['256K', '512K', '900K'];
-    const PRESET_CONTEXT_WINDOWS = ['128K', '256K', '384K', '512K', '750K', '900K'];
-    const CW_LIMITS = {
-      '128K': 128000,
-      '256K': 256000,
-      '384K': 384000,
-      '512K': 512000,
-      '750K': 750000,
-      '900K': 900000,
-    };
-    const CW_QUOTA_HINTS = {
-      '128K': '절약 모드 (~0.7x)',
-      '256K': '기본 쿼터 (1.0x)',
-      '384K': '중간 한도 (~1.15x)',
-      '512K': '턴당 약 1.3배 쿼터 소비',
-      '750K': '대용량 (~1.6x)',
-      '900K': '턴당 약 1.8배 쿼터 소비',
-    };
-    const STORAGE_MAP_KEY = 'agy-session-ctx-windows-v1';
-    const STORAGE_TS_MAP_KEY = 'agy-session-ctx-ts-v1';
-    const DEFAULT_CW_KEY = 'agy-default-ctx-window';
-    function normalizeContextWindow(raw, onNormalized) {
-      if (raw === null || raw === undefined) return null;
-      const s = String(raw).trim().toUpperCase().replace(/,/g, '');
-      if (!s) return null;
-      const m = s.match(/^(\d+(?:\.\d+)?)\s*([KM])?$/);
-      if (!m) return null;
-      const num = parseFloat(m[1]);
-      const unit = m[2] || '';
-      if (isNaN(num) || num <= 0) return null;
-      let kVal;
-      if (unit === 'M') {
-        kVal = Math.round(num * 1000);
-      } else if (unit === 'K') {
-        kVal = Math.round(num);
-      } else {
-        kVal = num >= 10000 ? Math.round(num / 1000) : Math.round(num);
-      }
-      if (kVal < 32) kVal = 32;
-      if (kVal > 980) kVal = 980;
-      const cw = `${kVal}K`;
-      if (typeof onNormalized === 'function') {
-        onNormalized(cw);
-      }
-      return cw;
-    }
-    function getCwLimit(cw, onNormalized) {
-      if (CW_LIMITS[cw]) return CW_LIMITS[cw];
-      const norm = normalizeContextWindow(cw, onNormalized);
-      if (!norm) return 256000;
-      return parseInt(norm, 10) * 1000;
-    }
-    function getCwQuotaHint(cw, onNormalized) {
-      if (CW_QUOTA_HINTS[cw]) return CW_QUOTA_HINTS[cw];
-      const tok = getCwLimit(cw, onNormalized);
-      if (tok < 256000) return '절약 모드 (<1.0x)';
-      if (tok === 256000) return '기본 쿼터 (1.0x)';
-      const mult = (1 + ((tok - 256000) / (900000 - 256000)) * 0.8).toFixed(1);
-      return `직접 지정 (~${mult}x 추정)`;
-    }
-    function createContextWindowStore({ document, localStorage, nativeStorage, onCustomCw, onSaveCw }) {
-      const sessionCwMap = new Map();
-      const sessionCwTsMap = new Map();
-      let defaultCwCache = '512K';
-      let hasExplicitDefault = false;
-      const normalize = (raw) => normalizeContextWindow(raw, onCustomCw);
-      function readCookie(name) {
-        try {
-          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const m = (document?.cookie || '').match(new RegExp('(?:^|; )' + escaped + '=([^;]*)'));
-          return m ? decodeURIComponent(m[1]) : null;
-        } catch {
-          return null;
-        }
-      }
-      function writeCookie(name, val) {
-        try {
-          if (document) {
-            document.cookie = `${name}=${encodeURIComponent(val)}; path=/; max-age=31536000; SameSite=Lax`;
-          }
-        } catch {}
-      }
-      function trimSessionMaps(maxEntries = 200) {
-        while (sessionCwMap.size > maxEntries) {
-          const firstKey = sessionCwMap.keys().next().value;
-          if (firstKey === undefined) break;
-          sessionCwMap.delete(firstKey);
-          sessionCwTsMap.delete(firstKey);
-        }
-      }
-      function loadMapFromRaw(raw) {
-        if (!raw) return;
-        try {
-          const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (obj && typeof obj === 'object') {
-            for (const [k, v] of Object.entries(obj)) {
-              const norm = normalize(v);
-              if (norm) {
-                sessionCwMap.set(k, norm);
-                if (!sessionCwTsMap.has(k)) {
-                  sessionCwTsMap.set(k, 1);
-                }
-              }
-            }
-            trimSessionMaps(200);
-          }
-        } catch {}
-      }
-      function loadTsMapFromRaw(raw) {
-        if (!raw) return;
-        try {
-          const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (obj && typeof obj === 'object') {
-            for (const [k, v] of Object.entries(obj)) {
-              const tsNum = Number(v);
-              if (!isNaN(tsNum) && tsNum > 0) {
-                const prev = sessionCwTsMap.get(k) || 0;
-                if (tsNum > prev) sessionCwTsMap.set(k, tsNum);
+            if (dispatched && reduxStore) {
+              const nextState = reduxStore.getState();
+              const defObj = nextState?.modelSelection?.default;
+              const desiredDefaultCw =
+                prevDefaultCw !== undefined
+                  ? prevDefaultCw
+                  : (cwStore.hasExplicitDefaultCw?.() ? cwStore.getDefaultCw() : '256K');
+              const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
+              const desiredDefaultCustomLabel =
+                prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
+              const defCwNormalized = cwStore.normalize(defObj?.contextWindow) || '256K';
+              const desiredCwNormalized = cwStore.normalize(desiredDefaultCw) || '256K';
+              if (
+                defObj &&
+                (defObj.model !== desiredDefaultModel ||
+                  defObj.customLabel !== desiredDefaultCustomLabel ||
+                  defCwNormalized !== desiredCwNormalized)
+              ) {
+                reduxStore.dispatch({
+                  type: 'modelSelection/modelPicked',
+                  payload: {
+                    conversationId: undefined,
+                    model: desiredDefaultModel,
+                    customLabel: desiredDefaultCustomLabel,
+                    contextWindow: desiredDefaultCw,
+                  },
+                });
               }
             }
           }
-        } catch {}
-      }
-      function serializeSessionMap() {
-        trimSessionMaps(200);
-        return JSON.stringify(Object.fromEntries(sessionCwMap.entries()));
-      }
-      function serializeSessionTsMap() {
-        const out = {};
-        for (const [k, ts] of sessionCwTsMap.entries()) {
-          if (typeof ts === 'number' && ts > 0 && (k === '__default__' || sessionCwMap.has(k))) {
-            out[k] = ts;
+          if (dispatched || currentInRedux === targetCw) {
+            lastAppliedCwGlobal = applyKey;
+            setBoundedLruMap(lastAppliedCwByCascade, sessionId, applyKey, MAX_CASCADE_MAP_ENTRIES);
+            setTriggerCwAttribute(triggerEl, targetCw);
+            return true;
           }
+          return false;
         }
-        return JSON.stringify(out);
-      }
-      try {
-        const lsDef = normalize(localStorage?.getItem(DEFAULT_CW_KEY));
-        if (lsDef) {
-          defaultCwCache = lsDef;
-          hasExplicitDefault = true;
-        }
-        const cDef = normalize(readCookie('agy_default_cw'));
-        if (cDef) {
-          defaultCwCache = cDef;
-          hasExplicitDefault = true;
-        }
-        loadTsMapFromRaw(localStorage?.getItem(STORAGE_TS_MAP_KEY));
-        loadMapFromRaw(localStorage?.getItem(STORAGE_MAP_KEY));
-      } catch {}
-      async function loadPersistentContextSettings() {
-        if (nativeStorage && typeof nativeStorage.getItems === 'function') {
-          try {
-            const items = await nativeStorage.getItems();
-            if (items) {
-              const savedDef = normalize(items[DEFAULT_CW_KEY]);
-              if (savedDef) {
-                defaultCwCache = savedDef;
-                hasExplicitDefault = true;
-              }
-              if (items[STORAGE_TS_MAP_KEY]) {
-                loadTsMapFromRaw(items[STORAGE_TS_MAP_KEY]);
-              }
-              if (items[STORAGE_MAP_KEY]) {
-                loadMapFromRaw(items[STORAGE_MAP_KEY]);
-                try {
-                  localStorage?.setItem(STORAGE_MAP_KEY, serializeSessionMap());
-                  localStorage?.setItem(STORAGE_TS_MAP_KEY, serializeSessionTsMap());
-                } catch {}
-              }
+        if (legacyCtx) {
+          const modelCfg = legacyCtx.getModelConfigForConversation(sessionId);
+          if (!modelCfg || modelCfg.value === undefined) return false;
+          const currentInEngine = legacyCtx.getContextWindowForConversation(sessionId) || '256K';
+          if (currentInEngine !== targetCw || userTriggered) {
+            if (currentInEngine === targetCw && currentInDom !== targetCw) {
+              const tempCw = targetCw === '256K' ? '512K' : '256K';
+              legacyCtx.setModelForConversation(sessionId, modelCfg.value, true, modelCfg.label, tempCw);
             }
-          } catch {}
-        }
-      }
-      function readSessionCookie(cascadeId) {
-        const raw = readCookie('agy_cw_' + cascadeId);
-        if (!raw || typeof raw !== 'string') return null;
-        const parts = raw.split('|');
-        const cw = normalize(parts[0]);
-        if (!cw) return null;
-        const tsRaw = parts.length > 1 ? parseInt(parts[1], 10) : 1;
-        const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
-        return { cw, ts };
-      }
-      function getSavedContextWindow(cascadeId) {
-        if (cascadeId && sessionCwMap.has(cascadeId)) {
-          const v = normalize(sessionCwMap.get(cascadeId));
-          if (v) return v;
-        }
-        if (cascadeId) {
-          const cSession = readSessionCookie(cascadeId);
-          if (cSession) {
-            sessionCwMap.set(cascadeId, cSession.cw);
-            const prevTs = sessionCwTsMap.get(cascadeId) || 0;
-            if (cSession.ts > prevTs) {
-              sessionCwTsMap.set(cascadeId, cSession.ts);
-            }
-            return cSession.cw;
+            legacyCtx.setModelForConversation(sessionId, modelCfg.value, true, modelCfg.label, targetCw);
           }
-        }
-        return normalize(defaultCwCache) || '512K';
-      }
-      function saveContextWindowSetting(cascadeId, targetCw, opts = {}) {
-        const norm = normalize(targetCw);
-        if (!norm) return null;
-        const ts = typeof opts?.updatedAtMs === 'number' && opts.updatedAtMs > 0 ? opts.updatedAtMs : Date.now();
-        if (cascadeId) {
-          if (sessionCwMap.has(cascadeId)) sessionCwMap.delete(cascadeId);
-          sessionCwMap.set(cascadeId, norm);
-          sessionCwTsMap.set(cascadeId, ts);
-          writeCookie('agy_cw_' + cascadeId, `${norm}|${ts}`);
-          const serialized = serializeSessionMap();
-          const serializedTs = serializeSessionTsMap();
-          try {
-            localStorage?.setItem(STORAGE_MAP_KEY, serialized);
-            localStorage?.setItem(STORAGE_TS_MAP_KEY, serializedTs);
-          } catch {}
-          if (!opts?.deferNativeFlush && nativeStorage && typeof nativeStorage.updateItems === 'function') {
-            try {
-              nativeStorage.updateItems({
-                [STORAGE_MAP_KEY]: serialized,
-                [STORAGE_TS_MAP_KEY]: serializedTs,
-              });
-            } catch {}
-          }
-          if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
-            try { onSaveCw(cascadeId, norm, ts); } catch {}
-          }
-        } else {
-          defaultCwCache = norm;
-          hasExplicitDefault = true;
-          sessionCwTsMap.set('__default__', ts);
-          const serializedTs = serializeSessionTsMap();
-          writeCookie('agy_default_cw', norm);
-          try {
-            localStorage?.setItem(DEFAULT_CW_KEY, norm);
-            localStorage?.setItem(STORAGE_TS_MAP_KEY, serializedTs);
-          } catch {}
-          if (!opts?.deferNativeFlush && nativeStorage && typeof nativeStorage.updateItems === 'function') {
-            try {
-              nativeStorage.updateItems({
-                [DEFAULT_CW_KEY]: norm,
-                [STORAGE_TS_MAP_KEY]: serializedTs,
-              });
-            } catch {}
-          }
-          if (!opts?.fromRemoteSync && typeof onSaveCw === 'function') {
-            try { onSaveCw(null, norm, ts); } catch {}
-          }
-        }
-        return norm;
-      }
-      function encodeRemoteAnnotationProfile(cascadeId) {
-        if (!cascadeId) return null;
-        if (!sessionCwMap.has(cascadeId)) {
-          if (!hasSessionOverride(cascadeId)) return null;
-          getSavedContextWindow(cascadeId);
-        }
-        const sessionCw = normalize(sessionCwMap.get(cascadeId));
-        if (!sessionCw) return null;
-        const defCw = normalize(defaultCwCache) || '512K';
-        const ts = sessionCwTsMap.get(cascadeId) || 1;
-        return `${sessionCw}|${defCw}|${ts}`;
-      }
-      function parseRemoteAnnotationProfile(rawProfile) {
-        if (!rawProfile || typeof rawProfile !== 'string') return null;
-        const trimmed = rawProfile.trim();
-        if (!trimmed) return null;
-        if (!trimmed.includes('|')) {
-          const single = normalize(trimmed);
-          return single ? { sessionCw: single, defaultCw: null, ts: 1 } : null;
-        }
-        const parts = trimmed.split('|');
-        const sessionCw = normalize(parts[0]);
-        const defaultCw = normalize(parts[1]);
-        const tsRaw = parseInt(parts[2], 10);
-        const ts = !isNaN(tsRaw) && tsRaw > 0 ? tsRaw : 1;
-        if (!sessionCw && !defaultCw) return null;
-        return { sessionCw, defaultCw, ts };
-      }
-      function syncFromRemoteAnnotations(summariesMap) {
-        if (!summariesMap || typeof summariesMap !== 'object') {
-          return { changed: false, unsyncedLocalIds: [] };
-        }
-        let changed = false;
-        let mapUpdated = false;
-        let defUpdated = false;
-        for (const [cid, sum] of Object.entries(summariesMap)) {
-          hasSessionOverride(cid);
-          const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
-          if (!parsed) continue;
-          if (parsed.sessionCw) {
-            const localCw = sessionCwMap.get(cid);
-            const localTs = sessionCwTsMap.get(cid) || 0;
-            if (!localCw || parsed.ts > localTs) {
-              saveContextWindowSetting(cid, parsed.sessionCw, {
-                fromRemoteSync: true,
-                deferNativeFlush: true,
-                updatedAtMs: parsed.ts,
-              });
-              mapUpdated = true;
-              if (localCw !== parsed.sessionCw) {
-                changed = true;
-              }
-            }
-          }
-          if (parsed.defaultCw) {
-            const localDefTs = sessionCwTsMap.get('__default__') || 0;
-            if (parsed.ts > localDefTs && parsed.defaultCw !== defaultCwCache) {
-              saveContextWindowSetting(null, parsed.defaultCw, {
-                fromRemoteSync: true,
-                deferNativeFlush: true,
-                updatedAtMs: parsed.ts,
-              });
-              defUpdated = true;
-              changed = true;
-            }
-          }
-        }
-        if ((mapUpdated || defUpdated) && nativeStorage && typeof nativeStorage.updateItems === 'function') {
-          try {
-            const payload = {
-              [STORAGE_TS_MAP_KEY]: serializeSessionTsMap(),
-            };
-            if (mapUpdated) payload[STORAGE_MAP_KEY] = serializeSessionMap();
-            if (defUpdated) payload[DEFAULT_CW_KEY] = defaultCwCache;
-            nativeStorage.updateItems(payload);
-          } catch {}
-        }
-        const unsyncedLocalIds = [];
-        for (const [cid, localCw] of sessionCwMap.entries()) {
-          if (!cid || cid === 'remote-session') continue;
-          if ((sessionCwTsMap.get(cid) || 0) < 1) continue;
-          const sum = summariesMap[cid];
-          if (!sum) continue;
-          const parsed = parseRemoteAnnotationProfile(sum?.annotations?.activeProfile);
-          if (!parsed || parsed.sessionCw !== localCw) {
-            unsyncedLocalIds.push(cid);
-          }
-        }
-        return { changed, unsyncedLocalIds };
-      }
-      function hasSessionOverride(cascadeId) {
-        if (!cascadeId) return false;
-        if (sessionCwMap.has(cascadeId)) return true;
-        const cSession = readSessionCookie(cascadeId);
-        if (cSession) {
-          sessionCwMap.set(cascadeId, cSession.cw);
-          const prevTs = sessionCwTsMap.get(cascadeId) || 0;
-          if (cSession.ts > prevTs) {
-            sessionCwTsMap.set(cascadeId, cSession.ts);
-          }
-          trimSessionMaps(200);
+          lastAppliedCwGlobal = applyKey;
+          setBoundedLruMap(lastAppliedCwByCascade, sessionId, applyKey, MAX_CASCADE_MAP_ENTRIES);
+          setTriggerCwAttribute(triggerEl, targetCw);
           return true;
         }
         return false;
       }
-      function seedSessionIfEmpty(cascadeId, rawCw) {
-        if (!cascadeId || hasSessionOverride(cascadeId)) return;
-        const norm = normalize(rawCw);
-        if (norm) {
-          sessionCwMap.set(cascadeId, norm);
-          if (!sessionCwTsMap.has(cascadeId)) {
-            sessionCwTsMap.set(cascadeId, Date.now());
+      function pullAndBackfillTrajectorySummaries(summaries, csrf, viewOrEl) {
+        if (!summaries || typeof summaries !== 'object' || typeof cwStore?.syncFromRemoteAnnotations !== 'function') {
+          return false;
+        }
+        const { changed, unsyncedLocalIds } = cwStore.syncFromRemoteAnnotations(summaries);
+        if (Array.isArray(unsyncedLocalIds) && unsyncedLocalIds.length > 0 && transport?.updateAnnotations) {
+          for (const cid of unsyncedLocalIds) {
+            const profileStr = cwStore.encodeRemoteAnnotationProfile(cid);
+            if (profileStr) {
+              transport
+                .updateAnnotations({
+                  cascadeIds: [cid],
+                  annotations: { activeProfile: profileStr },
+                  mergeAnnotations: true,
+                  el: viewOrEl,
+                  csrf,
+                })
+                .catch?.(() => {});
+            }
           }
-          trimSessionMaps(200);
         }
-      }
-      function migrateSessionOverride(fromCascadeId, toCascadeId) {
-        if (!fromCascadeId || !toCascadeId || fromCascadeId === toCascadeId) return null;
-        hasSessionOverride(fromCascadeId);
-        hasSessionOverride(toCascadeId);
-        const ts = sessionCwTsMap.get(fromCascadeId) || 1;
-        const cw = sessionCwMap.get(fromCascadeId);
-        if (!cw || ts < 1) return null;
-        sessionCwMap.delete(fromCascadeId);
-        sessionCwTsMap.delete(fromCascadeId);
-        const existingTs = sessionCwTsMap.get(toCascadeId) || 0;
-        if (ts >= existingTs) {
-          return saveContextWindowSetting(toCascadeId, cw, { updatedAtMs: ts });
+        if (changed && typeof onRemoteAnnotationsUpdated === 'function') {
+          try { onRemoteAnnotationsUpdated(); } catch {}
         }
-        return sessionCwMap.get(toCascadeId) || null;
+        return changed;
       }
-      function getDefaultCw() {
-        return normalize(defaultCwCache) || '512K';
+      function syncDesktopAnnotations(csrf, viewOrEl, force = false) {
+        const nativeView = document?.querySelector?.('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
+        if (!nativeView && document?.querySelector?.('ga-remote-control')) return Promise.resolve(false);
+        const now = Date.now();
+        if (desktopTrajectorySyncInFlight || (!force && now - lastDesktopTrajectorySyncTs < 4000)) {
+          return Promise.resolve(false);
+        }
+        if (!transport?.getAllTrajectories) return Promise.resolve(false);
+        lastDesktopTrajectorySyncTs = now;
+        desktopTrajectorySyncInFlight = true;
+        return Promise.resolve(transport.getAllTrajectories(viewOrEl, csrf))
+          .then((all) => {
+            const summaries = all?.trajectorySummaries;
+            if (summaries) return pullAndBackfillTrajectorySummaries(summaries, csrf, viewOrEl);
+            return false;
+          })
+          .catch(() => false)
+          .finally(() => {
+            desktopTrajectorySyncInFlight = false;
+          });
       }
+      function ensureRemoteHostView(onCascadeChange) {
+        if (!document) return null;
+        const nativeView = document.querySelector?.('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
+        if (nativeView) return null;
+        const rcEl = document.querySelector?.('ga-remote-control');
+        if (!rcEl) return null;
+        const rcInst = remotePortDriver?.resolveInstance?.();
+        const appContainer = rcEl.querySelector?.('.app-container') || rcEl;
+        let hostView = appContainer.querySelector?.('.agy-rc-host-view') || null;
+        if (!hostView) {
+          hostView = document.createElement('div');
+          hostView.className = 'agy-rc-host-view';
+          hostView.setAttribute('data-testid', 'conversation-view');
+          const hostBox = document.createElement('div');
+          hostBox.className = 'agy-rc-host-box';
+          hostBox.setAttribute('data-testid', 'agent-input-box');
+          hostView.appendChild(hostBox);
+          appContainer.appendChild(hostView);
+        }
+        const stateRec = hostViewState?.get(hostView) || { lastChildPathCid: '', observedSteps: -1 };
+        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
+        const cdoc = remotePortDriver?.getAccessibleIframeDocument?.();
+        const innerView = cdoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
+        const rawInnerCid = innerView?.getAttribute?.('data-cascade-id');
+        const innerCid = rawInnerCid && UUID_RE.test(rawInnerCid) && rawInnerCid !== ignoreUuid ? rawInnerCid : '';
+        const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
+        const pathMatch = String(childPath).match(UUID_RE);
+        const pathCid = pathMatch && pathMatch[0] && pathMatch[0] !== ignoreUuid ? pathMatch[0] : '';
+        let activeCid = '';
+        if (innerCid) {
+          activeCid = innerCid;
+          if (activeSniffedCascadeId !== innerCid) activeSniffedCascadeId = innerCid;
+        } else if (pathCid && pathCid !== stateRec.lastChildPathCid) {
+          stateRec.lastChildPathCid = pathCid;
+          activeCid = pathCid;
+          activeSniffedCascadeId = pathCid;
+        } else {
+          activeCid = activeSniffedCascadeId || pathCid || '';
+        }
+        hostViewState?.set(hostView, stateRec);
+        const currentAttr = hostView.getAttribute('data-cascade-id');
+        const nextAttr = activeCid || currentAttr || 'remote-session';
+        if (currentAttr !== nextAttr) {
+          if (currentAttr === 'remote-session' && nextAttr !== 'remote-session') {
+            cwStore?.migrateSessionOverride?.('remote-session', nextAttr);
+          }
+          hostView.setAttribute('data-cascade-id', nextAttr);
+        }
+        const now = Date.now();
+        if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 2500 || nextAttr === 'remote-session')) {
+          lastRcTrajectoryPollTs = now;
+          rcTrajectoryPollInFlight = true;
+          const rcSvc = remotePortDriver.createRcServiceAdapter(rcInst, codec, injectCheckpointLimitIntoSendRequest);
+          rcSvc
+            .getAllCascadeTrajectories()
+            .then((all) => {
+              const summaries = all?.trajectorySummaries || {};
+              const entries = Object.entries(summaries);
+              if (!entries.length) return;
+              const cwChanged = pullAndBackfillTrajectorySummaries(summaries, null, hostView);
+              for (const [id, sum] of entries) {
+                if (typeof sum?.stepCount === 'number') {
+                  transport?.recordStepEvent?.(id, sum.stepCount);
+                }
+              }
+              entries.sort((a, b) => {
+                const vA = Date.parse(a[1]?.annotations?.lastUserViewTime || 0) || 0;
+                const vB = Date.parse(b[1]?.annotations?.lastUserViewTime || 0) || 0;
+                if (vA !== vB) return vB - vA;
+                const mA = Date.parse(a[1]?.lastModifiedTime || 0) || 0;
+                const mB = Date.parse(b[1]?.lastModifiedTime || 0) || 0;
+                return mB - mA;
+              });
+              const [latestId] = entries[0];
+              if (latestId) {
+                const prevId = hostView.getAttribute('data-cascade-id');
+                const hasValidActive = Boolean(
+                  activeSniffedCascadeId && activeSniffedCascadeId !== 'remote-session' && summaries[activeSniffedCascadeId]
+                );
+                if (!hasValidActive && (!prevId || prevId === 'remote-session' || !summaries[prevId])) {
+                  activeSniffedCascadeId = latestId;
+                }
+                const resolvedId = activeSniffedCascadeId || (prevId && prevId !== 'remote-session' ? prevId : latestId);
+                if (prevId === 'remote-session' && resolvedId && resolvedId !== 'remote-session') {
+                  cwStore?.migrateSessionOverride?.('remote-session', resolvedId);
+                }
+                const nextSteps = transport?.getStepCount?.(resolvedId) ?? -1;
+                const prevSteps = stateRec.observedSteps;
+                stateRec.observedSteps = nextSteps;
+                hostViewState?.set(hostView, stateRec);
+                if (prevId !== resolvedId || prevSteps !== nextSteps || cwChanged) {
+                  hostView.setAttribute('data-cascade-id', resolvedId);
+                  if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
+                }
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              rcTrajectoryPollInFlight = false;
+            });
+        }
+        return hostView;
+      }
+      function getActiveSessions(onCascadeChange) {
+        ensureRemoteHostView(onCascadeChange);
+        const sessions = [];
+        const seenBoxes = new Set();
+        const views = Array.from(document?.querySelectorAll?.('[data-testid="conversation-view"]') || []);
+        const cdoc = remotePortDriver?.getAccessibleIframeDocument?.();
+        if (cdoc) {
+          views.push(...Array.from(cdoc.querySelectorAll?.('[data-testid="conversation-view"]') || []));
+        }
+        for (const viewEl of views) {
+          const boxEl = viewEl.querySelector?.('[data-testid="agent-input-box"]') || null;
+          if (!boxEl || seenBoxes.has(boxEl)) continue;
+          seenBoxes.add(boxEl);
+          const isRemoteShell = Boolean(viewEl.classList?.contains?.('agy-rc-host-view'));
+          let sessionId = viewEl.getAttribute?.('data-cascade-id') || '';
+          if (!sessionId || sessionId === 'remote-session') {
+            const effView = resolveEffectiveView(viewEl);
+            const effCid = effView?.getAttribute?.('data-cascade-id');
+            if (effCid && effCid !== 'remote-session') {
+              sessionId = effCid;
+            } else if (activeSniffedCascadeId) {
+              sessionId = activeSniffedCascadeId;
+            }
+          }
+          const effView = resolveEffectiveView(viewEl);
+          const triggerEl = effView?.querySelector?.('[data-testid="model-selector-trigger"]') || null;
+          sessions.push({
+            sessionId: sessionId || 'remote-session',
+            viewEl,
+            inputEl: boxEl,
+            triggerEl,
+            isRemoteShell,
+          });
+        }
+        return sessions;
+      }
+      function getAgentStateProviderForInputBox(inputBox, sessionIdOpt) {
+        const cc = getCascadeContextForElement(inputBox);
+        if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
+        const cid = sessionIdOpt || activeSniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
+        const steps = cid && transport?.getStepCount ? transport.getStepCount(cid) : -1;
+        const knownGenLen = cid && transport?.getKnownGenLen ? transport.getKnownGenLen(cid) : 0;
+        if ((typeof steps === 'number' && steps >= 0) || (typeof knownGenLen === 'number' && knownGenLen > 0)) {
+          return {
+            getState: () => ({
+              conversationId: cid,
+              trajectorySlice: {
+                totalGeneratorMetadataLength: -1,
+                totalStepsLength: typeof steps === 'number' ? steps : -1,
+              },
+            }),
+          };
+        }
+        return null;
+      }
+      function getDebugSnapshot(arg1, arg2, arg3) {
+        let viewEl = null;
+        let inputBox = null;
+        let sessionId = '';
+        if (typeof arg1 === 'string') {
+          sessionId = arg1;
+          viewEl = arg2 || null;
+        } else {
+          viewEl = arg1 || null;
+          inputBox = arg2 || null;
+          sessionId =
+            (typeof arg3 === 'string' && arg3) ||
+            viewEl?.getAttribute?.('data-cascade-id') ||
+            activeSniffedCascadeId ||
+            '';
+        }
+        const cc = getCascadeContextForElement(viewEl || inputBox);
+        const asp = getAgentStateProviderForInputBox(inputBox || viewEl, sessionId);
+        const rawState = asp?.getState?.();
+        const stateMatches = isStateForCascade(rawState, sessionId);
+        const slice = stateMatches ? rawState?.trajectorySlice : null;
+        const rcGenLen = transport?.getKnownGenLen?.(sessionId) || 0;
+        const rcStepLen = transport?.getStepCount?.(sessionId) ?? -1;
+        const totalGenLen =
+          typeof slice?.totalGeneratorMetadataLength === 'number' && slice.totalGeneratorMetadataLength > 0
+            ? slice.totalGeneratorMetadataLength
+            : (rcGenLen > 0 ? rcGenLen : 0);
+        const totalStepsLen =
+          typeof slice?.totalStepsLength === 'number' && slice.totalStepsLength > 0
+            ? slice.totalStepsLength
+            : (rcStepLen > 0 ? rcStepLen : 0);
+        const msInfo = viewEl ? getModelSelectorContextForView(viewEl) : null;
+        const msState = msInfo?.reduxStore ? msInfo.reduxStore.getState() : null;
+        const rawReduxCw =
+          (sessionId && msState?.modelSelection?.byConversation?.[sessionId]?.contextWindow) ||
+          msState?.modelSelection?.default?.contextWindow ||
+          msInfo?.legacyCtx?.getContextWindowForConversation?.(sessionId) ||
+          null;
+        const reduxSessionCw = rawReduxCw ? cwStore?.normalize?.(rawReduxCw) || null : null;
+        const rpcSvc = getRemoteRpcServiceForElement(inputBox || viewEl);
+        return {
+          cascadeId: sessionId,
+          reduxSessionCw,
+          hasRemoteSvc: Boolean(rpcSvc && rpcSvc.isRemoteControlHost),
+          totalGenLen,
+          totalStepsLen,
+          trajectoryId: slice?.trajectoryId || '',
+          rawState: stateMatches ? rawState : null,
+          canToggleInlineDebug: Boolean(cc?.debug && typeof cc.debug.setDebugMode === 'function'),
+          toggleInlineDebug() {
+            const curCc = getCascadeContextForElement(viewEl || inputBox);
+            if (curCc?.debug && typeof curCc.debug.setDebugMode === 'function') {
+              curCc.debug.setDebugMode(!curCc.debug.debugMode);
+            }
+          },
+        };
+      }
+      function observeSessions(onRelevantChange) {
+        const MoCtor = window?.MutationObserver || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
+        if (!MoCtor || !document?.body) return () => {};
+        const isIgnoredNode = (node) => {
+          let cur = node && node.nodeType === 3 ? node.parentElement : node;
+          while (cur && cur.nodeType === 1) {
+            if (
+              cur.id === 'agy-ctx-statusbar-style' ||
+              cur.id === 'agy-ctx-debug-modal' ||
+              (cur.classList &&
+                (cur.classList.contains('agy-ctx-statusbar') ||
+                  cur.classList.contains('agy-ctx-menu') ||
+                  cur.classList.contains('agy-ctx-modal-backdrop'))) ||
+              (cur.getAttribute && cur.getAttribute('data-agy-no-translate') === 'true')
+            ) {
+              return true;
+            }
+            cur = cur.parentElement;
+          }
+          return false;
+        };
+        const obs = new MoCtor((mutations) => {
+          if (!mutations || mutations.length === 0) return;
+          let relevant = false;
+          for (const m of mutations) {
+            if (!isIgnoredNode(m.target)) {
+              relevant = true;
+              break;
+            }
+          }
+          if (relevant && typeof onRelevantChange === 'function') {
+            onRelevantChange();
+          }
+        });
+        obs.observe(document.body, { childList: true, subtree: true });
+        const stop = () => {
+          try { obs.disconnect(); } catch {}
+        };
+        scope?.add?.(stop);
+        return stop;
+      }
+      installLsClientDecoratorHook();
+      ensureFetchHook(window);
       return {
-        normalize,
-        getLimit: (cw) => getCwLimit(cw, onCustomCw),
-        getQuotaHint: (cw) => getCwQuotaHint(cw, onCustomCw),
-        loadPersistentContextSettings,
-        getSavedContextWindow,
-        saveContextWindowSetting,
-        encodeRemoteAnnotationProfile,
-        parseRemoteAnnotationProfile,
-        syncFromRemoteAnnotations,
-        hasSessionOverride,
-        seedSessionIfEmpty,
-        migrateSessionOverride,
-        getDefaultCw,
-        hasExplicitDefaultCw: () => hasExplicitDefault,
+        observeSessions,
+        getActiveSessions,
+        applyContextLimit,
+        triggerCompact: () => false, // Composed in coordinator via CompactDriver
+        getSelectedModelKey,
+        getDebugSnapshot,
+        getAgentStateProviderForInputBox,
+        getRemoteRpcServiceForElement,
+        getModelSelectorContextForView,
+        ensureContextWindowSelectorFlag,
+        ensureCustomizationsStoreLoaded,
+        ensureRemoteHostView,
+        syncDesktopAnnotations,
+        injectCheckpointLimitIntoSendRequest,
+        sniffCascadeIdFromRpc,
+        resolveEffectiveInputBox,
+        resolveEffectiveView,
+        getActiveSniffedCascadeId: () => activeSniffedCascadeId,
+        setActiveSniffedCascadeId: (cid) => {
+          if (cid) activeSniffedCascadeId = cid;
+        },
+        dispose() {
+          lastAppliedCwByCascade.clear();
+          capturedLsClient = null;
+          activeSniffedCascadeId = '';
+        },
       };
     }
     module.exports = {
-      CONTEXT_WINDOWS,
-      PRESET_CONTEXT_WINDOWS,
-      CW_LIMITS,
-      CW_QUOTA_HINTS,
-      normalizeContextWindow,
-      getCwLimit,
-      getCwQuotaHint,
-      createContextWindowStore,
+      MAX_CASCADE_MAP_ENTRIES,
+      cleanupLegacyObjectPrototypeCwGetters,
+      registerCustomCwForStyles,
+      createReactFiberDriver,
     };
   },
-  "./dom-styles": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
+  "./drivers/antigravity/compact-driver": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
     'use strict';
-    const { getScriptNonce } = require('./companion-loader');
+    /**
+     * Antigravity Lexical Editor `/compact` Dispatch Driver.
+     */
+    const { DEFAULT_COMPACT_PROMPT } = require('../../domain/i18n');
+    function createCompactDriver({ window, document, getRemoteRpcServiceForElement, getActiveCascadeId, resolveEffectiveInputBox, compactPrompt }) {
+      const effPrompt = typeof compactPrompt === 'string' && compactPrompt.trim() ? compactPrompt.trim() : DEFAULT_COMPACT_PROMPT;
+      const bindTimer = (name, fallback) =>
+        window && typeof window[name] === 'function' ? window[name].bind(window) : fallback;
+      async function runCompactForInputBox(inputBox, promptOverride) {
+        const promptText =
+          typeof promptOverride === 'string' && promptOverride.trim() ? promptOverride.trim() : effPrompt;
+        const effBox = typeof resolveEffectiveInputBox === 'function' ? resolveEffectiveInputBox(inputBox) : inputBox;
+        if (!effBox) return false;
+        const editable = effBox.querySelector ? effBox.querySelector('[contenteditable="true"]') : null;
+        if (!editable || !editable.__lexicalEditor) {
+          const svc = typeof getRemoteRpcServiceForElement === 'function' ? getRemoteRpcServiceForElement(effBox) : null;
+          const cid =
+            (typeof getActiveCascadeId === 'function' ? getActiveCascadeId(effBox) : null) ||
+            document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id') ||
+            effBox.closest?.('[data-cascade-id]')?.getAttribute?.('data-cascade-id');
+          if (svc && typeof svc.sendUserCascadeMessage === 'function' && cid && cid !== 'remote-session') {
+            try {
+              await svc.sendUserCascadeMessage({
+                cascadeId: cid,
+                items: [
+                  {
+                    item: {
+                      slashCommand: {
+                        info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
+                      },
+                    },
+                  },
+                  {
+                    text: ' ' + promptText,
+                  },
+                ],
+              });
+              return true;
+            } catch {
+              return false;
+            }
+          }
+          return false;
+        }
+        const ed = editable.__lexicalEditor;
+        const PClass = ed._nodes?.get?.('paragraph')?.klass;
+        const MClass = ed._nodes?.get?.('contextScopeItemMention')?.klass;
+        const TClass = ed._nodes?.get?.('text')?.klass;
+        if (!PClass || !MClass || !TClass) return false;
+        ed.update(() => {
+          const root = ed.getEditorState()._nodeMap.get('root').getWritable();
+          root.clear();
+          const p = PClass.importJSON({
+            direction: null,
+            format: '',
+            indent: 0,
+            type: 'paragraph',
+            version: 1,
+            textFormat: 0,
+            textStyle: '',
+          });
+          const mention = MClass.importJSON({
+            trigger: '@',
+            value: 'contextScopeItemMention',
+            data: {
+              mentionText: 'compact',
+              data: JSON.stringify({
+                slashCommand: {
+                  info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
+                },
+              }),
+            },
+            type: 'contextScopeItemMention',
+            version: 1,
+          });
+          const text = TClass.importJSON({
+            detail: 0,
+            format: 0,
+            mode: 'normal',
+            style: '',
+            text: ' ' + promptText,
+            type: 'text',
+            version: 1,
+          });
+          p.append(mention, text);
+          root.append(p);
+        });
+        const setT = bindTimer('setTimeout', typeof setTimeout === 'function' ? setTimeout : null);
+        if (setT) {
+          await new Promise((r) => setT(r, 60));
+        }
+        const fiberKey = Object.keys(editable).find((k) => k.startsWith('__reactFiber$'));
+        let curr = fiberKey ? editable[fiberKey] : null;
+        while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter !== 'function')) {
+          curr = curr.return;
+        }
+        if (curr && curr.memoizedProps && typeof curr.memoizedProps.handleEnter === 'function') {
+          const Evt =
+            window?.KeyboardEvent ||
+            (typeof KeyboardEvent === 'function' ? KeyboardEvent : function (t, o) { Object.assign(this, o, { type: t }); });
+          await curr.memoizedProps.handleEnter(new Evt('keydown', { key: 'Enter' }), ed);
+          return true;
+        }
+        const sendBtn = effBox.querySelector ? effBox.querySelector('[data-testid="send-button"]') : null;
+        if (sendBtn && !sendBtn.disabled && typeof sendBtn.click === 'function') {
+          sendBtn.click();
+          return true;
+        }
+        return false;
+      }
+      return {
+        compactPrompt: effPrompt,
+        runCompactForInputBox,
+      };
+    }
+    module.exports = {
+      createCompactDriver,
+    };
+  },
+  "./drivers/antigravity/companion-driver": function(module, exports, __require) {
+    const require = (spec) => __require("./drivers/antigravity", spec);
+    'use strict';
+    /**
+     * Isolated Antigravity Companion Discovery & Strict Script Loader Driver.
+     * Zero sibling-repo hardcoding, strict HTTPS/CSP/one-shot TrustedScript enforcement,
+     * and deterministic DisposableScope timer cancellation (T-0001, D-0025, D-0032, D-0034, AUDIT-M6).
+     */
+    const { resolveHostAdapterConfig, normalizeHttpsBaseUrl } = require('./host-config');
+    const COLUMN0_COMPANION_BEGIN_RE = /^\/\/ === BEGIN_AGY_([A-Z0-9_]+?) ===[ \t]*\r?$/gm;
+    const DEFAULT_DISCOVERY_TIMEOUT_MS = 1500;
+    function readDocNonceFallback(doc) {
+      try {
+        if (!doc) return '';
+        const node = doc.querySelector?.('script[nonce], style[nonce], link[nonce]');
+        const n = node && (node.nonce || node.getAttribute?.('nonce'));
+        return n ? String(n) : '';
+      } catch {
+        return '';
+      }
+    }
+    function extractColumn0CompanionMarkers(sourceText) {
+      if (!sourceText || typeof sourceText !== 'string') return [];
+      const found = [];
+      const normalized = sourceText.replace(/\r\n/g, '\n');
+      COLUMN0_COMPANION_BEGIN_RE.lastIndex = 0;
+      let m;
+      while ((m = COLUMN0_COMPANION_BEGIN_RE.exec(normalized)) !== null) {
+        const tag = m[1];
+        const endRe = new RegExp(`^// === END_AGY_${tag} ===[ \\t]*$`, 'm');
+        endRe.lastIndex = m.index + m[0].length;
+        const endMatch = endRe.exec(normalized);
+        if (endMatch) {
+          found.push({
+            id: tag.toLowerCase(),
+            beginMarker: m[0].trim(),
+            endMarker: endMatch[0].trim(),
+            code: normalized.slice(m.index, endMatch.index + endMatch[0].length),
+          });
+          COLUMN0_COMPANION_BEGIN_RE.lastIndex = endMatch.index + endMatch[0].length;
+        }
+      }
+      return found;
+    }
+    function createOneShotTrustedScriptValue(win, codeText) {
+      const tt = win?.trustedTypes;
+      if (!tt) {
+        return { allowed: true, value: String(codeText || ''), usedPolicy: false };
+      }
+      if (typeof tt.createPolicy === 'function') {
+        const policyName = `agy-sb-companion-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+        let policy = null;
+        try {
+          let consumed = false;
+          policy = tt.createPolicy(policyName, {
+            createScript(src) {
+              if (consumed) {
+                throw new TypeError('One-shot TrustedScript token revoked');
+              }
+              consumed = true;
+              return src;
+            },
+          });
+        } catch {
+          policy = null;
+        }
+        if (policy) {
+          try {
+            return { allowed: true, value: policy.createScript(String(codeText || '')), usedPolicy: true };
+          } catch {
+            return { allowed: false, value: null, usedPolicy: false };
+          }
+        }
+      }
+      if (tt.defaultPolicy && typeof tt.defaultPolicy.createScript === 'function') {
+        try {
+          return { allowed: true, value: tt.defaultPolicy.createScript(String(codeText || '')), usedPolicy: true };
+        } catch {
+          return { allowed: false, value: null, usedPolicy: false };
+        }
+      }
+      return { allowed: false, value: null, usedPolicy: false };
+    }
+    function createCompanionDriver({ window: win, document: doc, hostConfig, transport, scope, getNonce }) {
+      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, win);
+      const loadedUrls = new Set();
+      const injectedNodes = new Set();
+      function getAllowedOrigins() {
+        const origins = new Set();
+        for (const raw of [...resolvedHostConfig.staticCdnOrigins, ...resolvedHostConfig.companionScripts]) {
+          const clean = normalizeHttpsBaseUrl(raw, '');
+          if (!clean) continue;
+          try {
+            origins.add(new URL(clean).origin);
+          } catch {}
+        }
+        return origins;
+      }
+      function isAllowedScriptUrl(rawUrl) {
+        const clean = normalizeHttpsBaseUrl(rawUrl, '');
+        if (!clean) return false;
+        try {
+          const u = new URL(clean);
+          const allowedOrigins = getAllowedOrigins();
+          return allowedOrigins.has(u.origin);
+        } catch {
+          return false;
+        }
+      }
+      async function discoverCompanions({ timeoutMs = DEFAULT_DISCOVERY_TIMEOUT_MS } = {}) {
+        if (scope?.isDisposed?.()) return [];
+        const results = [];
+        for (const scriptUrl of resolvedHostConfig.companionScripts || []) {
+          if (isAllowedScriptUrl(scriptUrl)) {
+            results.push({ id: scriptUrl, kind: 'https-url', url: scriptUrl });
+          }
+        }
+        if (typeof transport?.callRpcJson === 'function') {
+          let timerId = null;
+          try {
+            const states = await Promise.race([
+              transport.callRpcJson('GetCustomizationStates', {}),
+              new Promise((resolve) => {
+                timerId = scope
+                  ? scope.setTimeout(() => resolve(null), timeoutMs)
+                  : setTimeout(() => resolve(null), timeoutMs);
+              }),
+            ]);
+            const inlineManifest = typeof states?.companionManifestText === 'string' ? states.companionManifestText : '';
+            if (inlineManifest) {
+              for (const block of extractColumn0CompanionMarkers(inlineManifest)) {
+                results.push({ id: block.id, kind: 'marker-block', code: block.code });
+              }
+            }
+          } catch {} finally {
+            if (timerId !== null) {
+              if (scope) scope.clearTimeout(timerId);
+              else clearTimeout(timerId);
+            }
+          }
+        }
+        return results;
+      }
+      function evaluateInlineCompanion(codeText) {
+        if (!doc || scope?.isDisposed?.()) return false;
+        const ttRes = createOneShotTrustedScriptValue(win, codeText);
+        if (!ttRes.allowed) return false;
+        const parent = doc.head || doc.documentElement;
+        if (!parent || typeof doc.createElement !== 'function') return false;
+        const scriptEl = doc.createElement('script');
+        const nonce = typeof getNonce === 'function' ? getNonce() : readDocNonceFallback(doc);
+        if (nonce) {
+          scriptEl.nonce = nonce;
+          scriptEl.setAttribute?.('nonce', nonce);
+        }
+        scriptEl.text = ttRes.value;
+        parent.appendChild(scriptEl);
+        injectedNodes.add(scriptEl);
+        return true;
+      }
+      async function loadCompanions(opts = {}) {
+        if (scope?.isDisposed?.()) return { loaded: 0, skipped: 0 };
+        const entries = await discoverCompanions(opts);
+        let loaded = 0;
+        let skipped = 0;
+        const fetchFn = opts.fetch || (typeof win?.fetch === 'function' ? win.fetch.bind(win) : null);
+        for (const item of entries) {
+          if (scope?.isDisposed?.()) break;
+          if (item.kind === 'marker-block' && item.code) {
+            if (evaluateInlineCompanion(item.code)) loaded += 1;
+            else skipped += 1;
+            continue;
+          }
+          if (item.kind === 'https-url' && item.url && isAllowedScriptUrl(item.url) && !loadedUrls.has(item.url) && fetchFn) {
+            try {
+              const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+              const stopTimer =
+                ctrl && scope
+                  ? scope.setTimeout(() => {
+                      try { ctrl.abort(); } catch {}
+                    }, opts.timeoutMs || DEFAULT_DISCOVERY_TIMEOUT_MS)
+                  : null;
+              try {
+                const resp = await fetchFn(item.url, ctrl ? { signal: ctrl.signal } : undefined);
+                const finalUrl = resp?.url || item.url;
+                if (resp && resp.ok !== false && isAllowedScriptUrl(finalUrl)) {
+                  const txt = await resp.text();
+                  if (!scope?.isDisposed?.() && evaluateInlineCompanion(txt)) {
+                    loadedUrls.add(item.url);
+                    loaded += 1;
+                  } else {
+                    skipped += 1;
+                  }
+                } else {
+                  skipped += 1;
+                }
+              } finally {
+                if (stopTimer !== null && scope) scope.clearTimeout(stopTimer);
+              }
+            } catch {
+              skipped += 1;
+            }
+          }
+        }
+        return { loaded, skipped };
+      }
+      function dispose() {
+        for (const node of injectedNodes) {
+          try { node.remove?.(); } catch {}
+        }
+        injectedNodes.clear();
+        loadedUrls.clear();
+      }
+      scope?.add?.(dispose);
+      return {
+        discoverCompanions,
+        loadCompanions,
+        dispose,
+      };
+    }
+    module.exports = {
+      extractColumn0CompanionMarkers,
+      createOneShotTrustedScriptValue,
+      createCompanionDriver,
+    };
+  },
+  "./ui/dom-builder": function(module, exports, __require) {
+    const require = (spec) => __require("./ui", spec);
+    'use strict';
+    /**
+     * Pure DOM Element Builder — zero HTML strings, zero HTML property writes, zero TrustedHTML sinks.
+     * Compatible with browser DOM and lightweight Node unit-test DOM stubs.
+     */
+    function applyStyleProps(el, styleObj) {
+      if (!el || !el.style || !styleObj || typeof styleObj !== 'object') return;
+      for (const [prop, val] of Object.entries(styleObj)) {
+        if (val === undefined || val === null) continue;
+        try {
+          el.style[prop] = String(val);
+        } catch {}
+      }
+    }
+    function appendChildValue(doc, parent, child) {
+      if (child === null || child === undefined || child === false) return;
+      if (Array.isArray(child)) {
+        for (const nested of child) {
+          appendChildValue(doc, parent, nested);
+        }
+        return;
+      }
+      if (typeof child === 'object' && typeof child.nodeType === 'number') {
+        parent.appendChild(child);
+        return;
+      }
+      if (typeof child === 'object' && typeof parent.appendChild === 'function' && child.tagName) {
+        parent.appendChild(child);
+        return;
+      }
+      const textStr = String(child);
+      if (typeof doc.createTextNode === 'function') {
+        parent.appendChild(doc.createTextNode(textStr));
+      } else {
+        const span = doc.createElement('span');
+        span.textContent = textStr;
+        parent.appendChild(span);
+      }
+    }
+    const DANGEROUS_TAGS = new Set([
+      'script',
+      'style',
+      'iframe',
+      'object',
+      'embed',
+      'link',
+      'meta',
+      'base',
+      'form',
+      'svg',
+      'math',
+    ]);
+    function isSafeAttribute(attrKey, attrVal) {
+      const k = String(attrKey || '').trim().toLowerCase();
+      if (!k || k.startsWith('on') || k === 'srcdoc' || k === 'formaction') return false;
+      if (k === 'href' || k === 'src' || k === 'xlink:href' || k === 'action') {
+        const normalized = String(attrVal ?? '').replace(/[\u0000-\u0020]+/g, '').toLowerCase();
+        if (/^(?:javascript|vbscript|data:text\/html)/i.test(normalized)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function h(doc, tag, props = null, ...children) {
+      if (!doc || typeof doc.createElement !== 'function') {
+        throw new TypeError('h() requires a Document with createElement()');
+      }
+      const cleanTag = String(tag || '').trim().toLowerCase();
+      if (!cleanTag || DANGEROUS_TAGS.has(cleanTag)) {
+        throw new TypeError(`Disallowed UI element tag "${String(tag)}"`);
+      }
+      const el = doc.createElement(cleanTag);
+      if (props && typeof props === 'object') {
+        for (const [key, val] of Object.entries(props)) {
+          if (val === undefined || val === null) continue;
+          if (key === 'className') {
+            el.className = String(val);
+          } else if (key === 'textContent') {
+            el.textContent = String(val);
+          } else if (key === 'style') {
+            if (typeof val === 'object') {
+              applyStyleProps(el, val);
+            }
+          } else if (key === 'attrs' && typeof val === 'object') {
+            for (const [attrKey, attrVal] of Object.entries(val)) {
+              if (attrVal === undefined || attrVal === null) continue;
+              if (!isSafeAttribute(attrKey, attrVal)) {
+                throw new TypeError(`Disallowed UI attribute "${attrKey}"`);
+              }
+              if (typeof el.setAttribute === 'function') {
+                el.setAttribute(attrKey, String(attrVal));
+              }
+            }
+          } else if (key === 'dataset' && typeof val === 'object') {
+            for (const [dsKey, dsVal] of Object.entries(val)) {
+              if (dsVal === undefined || dsVal === null) continue;
+              const attrName = `data-${dsKey.replace(/([A-Z])/g, '-$1').toLowerCase()}`;
+              if (typeof el.setAttribute === 'function') {
+                el.setAttribute(attrName, String(dsVal));
+              }
+              if (el.dataset) {
+                el.dataset[dsKey] = String(dsVal);
+              }
+            }
+          } else if (key === 'on' && typeof val === 'object') {
+            for (const [evt, handler] of Object.entries(val)) {
+              if (typeof handler === 'function' && typeof el.addEventListener === 'function') {
+                el.addEventListener(evt, handler);
+              }
+            }
+          } else if (key.startsWith('on') && typeof val === 'function') {
+            el[key] = val;
+          } else if (key === 'value' || key === 'type' || key === 'id' || key === 'title' || key === 'placeholder') {
+            el[key] = String(val);
+            if (typeof el.setAttribute === 'function' && (key === 'id' || key === 'title' || key === 'type' || key === 'placeholder')) {
+              el.setAttribute(key, String(val));
+            }
+          } else if (key === 'role' || key.startsWith('aria-') || key.startsWith('data-') || key === 'translate' || key === 'colspan' || key === 'inputmode' || key === 'pattern') {
+            if (typeof el.setAttribute === 'function') {
+              el.setAttribute(key, String(val));
+            }
+          } else if (isSafeAttribute(key, val)) {
+            el[key] = val;
+          } else {
+            throw new TypeError(`Disallowed UI prop "${key}"`);
+          }
+        }
+      }
+      for (const child of children) {
+        appendChildValue(doc, el, child);
+      }
+      return el;
+    }
+    function setText(el, value) {
+      if (!el) return;
+      const next = String(value ?? '');
+      if (el.textContent !== next) {
+        el.textContent = next;
+      }
+    }
+    function clearChildren(el) {
+      if (!el) return;
+      if (typeof el.replaceChildren === 'function') {
+        try {
+          el.replaceChildren();
+          return;
+        } catch {}
+      }
+      while (el.firstChild && typeof el.removeChild === 'function') {
+        el.removeChild(el.firstChild);
+      }
+      if ('textContent' in el && (!el.childNodes || el.childNodes.length === 0)) {
+        el.textContent = '';
+      }
+    }
+    module.exports = {
+      h,
+      setText,
+      clearChildren,
+    };
+  },
+  "./ui/style-manager": function(module, exports, __require) {
+    const require = (spec) => __require("./ui", spec);
+    'use strict';
+    /**
+     * Pure CSP Nonce-Aware Style Sheet Injector & Scoped Cleanup.
+     * Zero sibling dependencies, zero hardcoded host DOM selectors.
+     */
     const STYLE_CSS = `
     .agy-ctx-statusbar {
       display: flex;
@@ -1983,7 +4803,7 @@
       padding: 6px 0;
       display: flex;
       flex-direction: column;
-      min-width: 215px;
+      min-width: 225px;
       text-align: left;
     }
     .agy-ctx-menu-hdr {
@@ -1994,12 +4814,19 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
     .agy-ctx-custom-row {
       display: flex;
       align-items: center;
       gap: 4px;
-      padding: 6px 10px;
+      padding: 6px 10px 3px 10px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .agy-ctx-custom-hint {
+      padding: 0 10px 6px 10px;
+      font-size: 9.5px;
+      color: rgba(148, 163, 184, 0.78);
       border-bottom: 1px solid rgba(128, 128, 128, 0.2);
       background: rgba(255, 255, 255, 0.02);
     }
@@ -2056,6 +4883,12 @@
     .agy-ctx-menu-item.active {
       font-weight: bold;
       color: #5dade2;
+    }
+    .agy-ctx-menu-default {
+      margin-top: 2px;
+      border-top: 1px solid rgba(128, 128, 128, 0.2);
+      font-size: 10px;
+      color: #93c5fd;
     }
     .agy-ctx-menu-hint {
       font-size: 9.5px;
@@ -2261,39 +5094,56 @@
       }
     }
 `.replace(/\s+/g, ' ').trim();
-    function buildDynamicCwWarnCss(underDefaultCwSet) {
-      const selectors = ['[data-testid="model-selector-trigger"][data-agy-cw-warn="0"] div:has(> .text-warning)'];
-      for (const cw of underDefaultCwSet) {
-        selectors.push(`[data-testid="model-selector-trigger"][data-context-window="${cw}"] div:has(> .text-warning)`);
+    function buildDynamicCwWarnCss(underDefaultCwSet, documentHost) {
+      if (documentHost && typeof documentHost.buildWarningSuppressionCss === 'function') {
+        return documentHost.buildWarningSuppressionCss(underDefaultCwSet);
       }
-      return `\n    ${selectors.join(',\n    ')} {\n      display: none !important;\n    }\n`;
+      return '';
     }
-    function ensureStyleElement(document, underDefaultCwSet) {
-      if (!document) return;
-      const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet);
-      const docs = [document];
+    function getCspNonce(doc) {
+      if (!doc) return '';
       try {
-        const iframe = document.querySelector?.('ga-remote-control iframe');
-        if (iframe && !iframe.__agyCrossOriginInaccessible) {
-          const iframeDoc = iframe.contentDocument;
-          if (iframeDoc && iframeDoc !== document) docs.push(iframeDoc);
-        }
-      } catch {
+        const curNonce = doc.currentScript && (doc.currentScript.nonce || doc.currentScript.getAttribute?.('nonce'));
+        if (curNonce) return String(curNonce);
+      } catch {}
+      const selectors = ['style[nonce]', 'script[nonce]', 'link[nonce]'];
+      for (const sel of selectors) {
         try {
-          const iframe = document.querySelector?.('ga-remote-control iframe');
-          if (iframe) iframe.__agyCrossOriginInaccessible = true;
+          const node = doc.querySelector?.(sel);
+          const val = node && (node.nonce || node.getAttribute?.('nonce'));
+          if (val) return String(val);
         } catch {}
       }
-      const fallbackNonce = getScriptNonce(typeof document !== 'undefined' ? document : null);
+      try {
+        const nodes = doc.querySelectorAll?.('style, script, link') || [];
+        for (const node of nodes) {
+          const val = node && (node.nonce || node.getAttribute?.('nonce'));
+          if (val) return String(val);
+        }
+      } catch {}
+      return '';
+    }
+    function resolveDocs(rootDoc, documentHost) {
+      if (documentHost && typeof documentHost.getAccessibleDocs === 'function') {
+        const list = documentHost.getAccessibleDocs(rootDoc);
+        if (Array.isArray(list) && list.length > 0) return list;
+      }
+      return rootDoc ? [rootDoc] : [];
+    }
+    function ensureStyleElement(document, underDefaultCwSet, documentHost) {
+      if (!document) return;
+      const fullCss = STYLE_CSS + buildDynamicCwWarnCss(underDefaultCwSet, documentHost);
+      const docs = resolveDocs(document, documentHost);
+      const fallbackNonce = getCspNonce(document);
       for (const d of docs) {
         const parent = d.head || d.documentElement;
         if (!parent) continue;
-        let docNonce = getScriptNonce(d);
+        let docNonce = getCspNonce(d);
         if (!docNonce) {
           try {
             const pw = d.defaultView && d.defaultView.parent;
             if (pw && pw !== d.defaultView && pw.document) {
-              docNonce = getScriptNonce(pw.document);
+              docNonce = getCspNonce(pw.document);
             }
           } catch {}
         }
@@ -2316,2401 +5166,59 @@
         }
       }
     }
-    const SAFE_HTML_TAGS = new Set([
-      'div', 'span', 'strong', 'button', 'input', 'table', 'thead', 'tbody',
-      'tr', 'th', 'td', 'code', 'br', 'small', 'b', 'i', 'p', 'section', 'header', 'label', 'ul', 'li',
-    ]);
-    const VOID_HTML_TAGS = new Set(['br', 'input', 'hr', 'img']);
-    function decodeHtmlEntities(str) {
-      return String(str ?? '')
-        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-        .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&');
-    }
-    function applyInlineStyleString(el, cssText) {
-      if (!el || !el.style || !cssText) return;
-      try {
-        el.style.cssText = cssText;
-      } catch {}
-      const decls = String(cssText).split(';');
-      for (const decl of decls) {
-        const colon = decl.indexOf(':');
-        if (colon <= 0) continue;
-        const rawProp = decl.slice(0, colon).trim();
-        const rawVal = decl.slice(colon + 1).trim();
-        if (!rawProp || !rawVal) continue;
-        const camelProp = rawProp.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-        try { el.style[camelProp] = rawVal; } catch {}
-      }
-    }
-    function renderHtmlViaSafeDomBuilder(doc, rootEl, rawHtml) {
-      if (!doc || typeof doc.createElement !== 'function' || !rootEl) return;
-      if ('textContent' in rootEl) {
-        rootEl.textContent = '';
-      } else {
-        while (rootEl.firstChild && typeof rootEl.removeChild === 'function') {
-          rootEl.removeChild(rootEl.firstChild);
-        }
-      }
-      const html = String(rawHtml ?? '');
-      if (!html) return;
-      const appendText = (parent, txt) => {
-        if (!txt) return;
-        const decoded = decodeHtmlEntities(txt);
-        if (typeof doc.createTextNode === 'function') {
-          parent.appendChild(doc.createTextNode(decoded));
-        } else {
-          const span = doc.createElement('span');
-          span.textContent = decoded;
-          parent.appendChild(span);
-        }
-      };
-      const stack = [rootEl];
-      const tokenRe = /<!--[\s\S]*?-->|<\/([a-zA-Z0-9-]+)\s*>|<([a-zA-Z0-9-]+)((?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g;
-      let lastIdx = 0;
-      let skippedDisallowedTag = null;
-      let m;
-      while ((m = tokenRe.exec(html)) !== null) {
-        const textBefore = html.slice(lastIdx, m.index);
-        if (!skippedDisallowedTag && textBefore) {
-          appendText(stack[stack.length - 1], textBefore);
-        }
-        lastIdx = tokenRe.lastIndex;
-        const closingTag = m[1] ? m[1].toLowerCase() : null;
-        const openingTag = m[2] ? m[2].toLowerCase() : null;
-        const attrChunk = m[3] || '';
-        const selfClosing = Boolean(m[4]);
-        if (skippedDisallowedTag) {
-          if (closingTag === skippedDisallowedTag) {
-            skippedDisallowedTag = null;
-          }
-          continue;
-        }
-        if (closingTag) {
-          if (SAFE_HTML_TAGS.has(closingTag) && stack.length > 1) {
-            stack.pop();
-          }
-          continue;
-        }
-        if (!openingTag) continue;
-        if (!SAFE_HTML_TAGS.has(openingTag)) {
-          if (!selfClosing && !VOID_HTML_TAGS.has(openingTag)) {
-            skippedDisallowedTag = openingTag;
-          }
-          continue;
-        }
-        const el = doc.createElement(openingTag);
-        if (attrChunk) {
-          const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
-          let am;
-          while ((am = attrRe.exec(attrChunk)) !== null) {
-            const attrName = am[1];
-            const lowerAttr = attrName.toLowerCase();
-            if (lowerAttr.startsWith('on') || lowerAttr === 'srcdoc') continue;
-            const rawVal = am[2] ?? am[3] ?? am[4] ?? '';
-            const val = decodeHtmlEntities(rawVal);
-            if ((lowerAttr === 'href' || lowerAttr === 'src' || lowerAttr === 'action') && /^\s*javascript:/i.test(val)) {
-              continue;
-            }
-            if (typeof el.setAttribute === 'function') {
-              el.setAttribute(attrName, val);
-            }
-            if (lowerAttr === 'class') el.className = val;
-            else if (lowerAttr === 'id') el.id = val;
-            else if (lowerAttr === 'title') el.title = val;
-            else if (lowerAttr === 'type') el.type = val;
-            else if (lowerAttr === 'value') el.value = val;
-            else if (lowerAttr === 'placeholder') el.placeholder = val;
-            else if (lowerAttr === 'style') applyInlineStyleString(el, val);
-          }
-        }
-        stack[stack.length - 1].appendChild(el);
-        if (!selfClosing && !VOID_HTML_TAGS.has(openingTag)) {
-          stack.push(el);
-        }
-      }
-      if (!skippedDisallowedTag && lastIdx < html.length) {
-        appendText(stack[stack.length - 1], html.slice(lastIdx));
-      }
-    }
-    function createTrustedHtmlSetter(_window, document) {
-      return (el, html) => {
-        if (document && typeof document.createElement === 'function') {
-          renderHtmlViaSafeDomBuilder(document, el, html);
-        } else if (el && typeof el === 'object') {
-          el.textContent = decodeHtmlEntities(String(html ?? '').replace(/<[^>]*>/g, ''));
-        }
-      };
-    }
-    function fmtK(n) {
-      const num = Number(n);
-      if (!num || isNaN(num)) return '0';
-      if (num >= 1000000) return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
-      if (num >= 1000) return Math.round(num / 1000) + 'k';
-      return String(num);
-    }
-    function fmtNum(n) {
-      if (n === null || n === undefined) return '0';
-      const num = Number(n);
-      if (isNaN(num)) return '0';
-      return num.toLocaleString('en-US');
-    }
-    function escHtml(s) {
-      return String(s ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-    function fmtResetTime(iso) {
-      if (!iso) return '';
-      try {
-        let d;
-        if (typeof iso === 'object' && iso.seconds !== undefined) {
-          d = new Date(Number(iso.seconds) * 1000);
-        } else {
-          d = new Date(iso);
-        }
-        if (isNaN(d.getTime())) return '';
-        const hh = String(d.getHours()).padStart(2, '0');
-        const mm = String(d.getMinutes()).padStart(2, '0');
-        return `→${hh}:${mm}`;
-      } catch {
-        return '';
+    function removeStyleElements(document, documentHost) {
+      for (const d of resolveDocs(document, documentHost)) {
+        try {
+          const styleEl = d.getElementById?.('agy-ctx-statusbar-style');
+          styleEl?.remove?.();
+        } catch {}
       }
     }
     module.exports = {
       STYLE_CSS,
       buildDynamicCwWarnCss,
+      getCspNonce,
       ensureStyleElement,
-      createTrustedHtmlSetter,
-      fmtK,
-      fmtNum,
-      escHtml,
-      fmtResetTime,
+      removeStyleElements,
     };
   },
-  "./rpc-client": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
-    'use strict';
-    const { fmtResetTime } = require('./dom-styles');
-    const { resolveHostAdapterConfig } = require('./host-adapter-config');
-    const MAX_CACHE_ENTRIES = 60;
-    const MAX_CASCADE_LEN_ENTRIES = 200;
-    const STATS_CACHE_KEY = 'agy-stats-cache-v1';
-    function getChatModelFromMeta(m) {
-      if (!m) return null;
-      if (m.chatModel) return m.chatModel;
-      if (m.metadata && m.metadata.case === 'chatModel' && m.metadata.value) return m.metadata.value;
-      if (m.metadata && m.metadata.value && (m.metadata.value.chatStartMetadata || m.metadata.value.usage)) return m.metadata.value;
-      return null;
-    }
-    function getBucketRemainingFraction(b) {
-      if (!b) return null;
-      if (typeof b.remainingFraction === 'number') return b.remainingFraction;
-      if (b.remaining && b.remaining.case === 'remainingFraction' && typeof b.remaining.value === 'number') {
-        return b.remaining.value;
-      }
-      return null;
-    }
-    function extractStatsFromMetas(metas) {
-      let used = 0, max = 256000, cacheRead = 0, inputTok = 0, lastMetaStepIndex = -1;
-      let foundCtx = false, foundUsage = false;
-      for (let i = metas.length - 1; i >= 0; i--) {
-        const m = metas[i];
-        const cm = getChatModelFromMeta(m);
-        if (!cm) continue;
-        if (!foundCtx && cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata) {
-          const cwm = cm.chatStartMetadata.contextWindowMetadata;
-          if (cwm.estimatedTokensUsed !== undefined && cwm.estimatedTokensUsed !== null) {
-            used = Number(cwm.estimatedTokensUsed);
-            max = Number(cwm.maxContextTokens || 256000);
-            if (Array.isArray(m.stepIndices) && m.stepIndices.length > 0) {
-              lastMetaStepIndex = Number(m.stepIndices[m.stepIndices.length - 1]);
-            } else if (cm.chatStartMetadata.startStepIndex !== undefined && cm.chatStartMetadata.startStepIndex !== null) {
-              lastMetaStepIndex = Number(cm.chatStartMetadata.startStepIndex);
-            }
-            foundCtx = true;
-          }
-        }
-        if (!foundUsage && cm.usage && (cm.usage.inputTokens || cm.usage.cacheReadTokens)) {
-          cacheRead = Number(cm.usage.cacheReadTokens || 0);
-          inputTok = Number(cm.usage.inputTokens || 0);
-          foundUsage = true;
-        }
-        if (foundCtx && foundUsage) break;
-      }
-      const totalPrompt = cacheRead + inputTok;
-      const cachePct = totalPrompt > 0 ? Math.round((cacheRead / totalPrompt) * 100) : 0;
-      return { used, trajectoryMax: max, cacheRead, inputTok, cachePct, lastMetaStepIndex, foundCtx, foundUsage };
-    }
-    function createRpcClient({ window, fetchFn, localStorage, getAgentStateProviderForInputBox, getRemoteRpcServiceForElement, hostConfig }) {
-      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
-      const stateCache = new Map();
-      const inFlightStats = new Map();
-      const knownGenLenMap = new Map();
-      function setBoundedGenLen(cascadeId, len) {
-        if (!cascadeId || !(len > 0)) return;
-        if (knownGenLenMap.has(cascadeId)) knownGenLenMap.delete(cascadeId);
-        knownGenLenMap.set(cascadeId, len);
-        while (knownGenLenMap.size > MAX_CASCADE_LEN_ENTRIES) {
-          const oldest = knownGenLenMap.keys().next().value;
-          if (oldest === undefined) break;
-          knownGenLenMap.delete(oldest);
-        }
-        if (window && typeof window === 'object') {
-          window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
-          if (Object.prototype.hasOwnProperty.call(window.__agyRcGenLenByCascade, cascadeId)) {
-            delete window.__agyRcGenLenByCascade[cascadeId];
-          }
-          window.__agyRcGenLenByCascade[cascadeId] = len;
-          const keys = Object.keys(window.__agyRcGenLenByCascade);
-          if (keys.length > MAX_CASCADE_LEN_ENTRIES) {
-            for (let i = 0; i < keys.length - MAX_CASCADE_LEN_ENTRIES; i++) {
-              delete window.__agyRcGenLenByCascade[keys[i]];
-            }
-          }
-        }
-      }
-      let inFlightQuota = null;
-      let quotaData = null;
-      let lastQuotaFetch = 0;
-      function canUseLocalHttp(csrf) {
-        const win = window || (typeof globalThis !== 'undefined' ? globalThis.window : null);
-        if (win?.__APP_CONFIG__?.isRemoteControl) return false;
-        return Boolean(csrf && typeof fetchFn === 'function');
-      }
-      try {
-        const rawCache = localStorage?.getItem(STATS_CACHE_KEY);
-        if (rawCache) {
-          const entries = JSON.parse(rawCache);
-          if (Array.isArray(entries)) {
-            for (const [k, v] of entries) {
-              stateCache.set(k, v);
-              if (v && typeof v.knownGenLen === 'number' && v.knownGenLen > 0) {
-                knownGenLenMap.set(k, v.knownGenLen);
-              }
-            }
-          }
-        }
-      } catch {}
-      let cacheFlushTimer = null;
-      function flushStatsCacheToStorage() {
-        cacheFlushTimer = null;
-        try {
-          localStorage?.setItem(STATS_CACHE_KEY, JSON.stringify(Array.from(stateCache.entries())));
-        } catch {}
-      }
-      function setBoundedCache(cascadeId, data) {
-        if (stateCache.has(cascadeId)) stateCache.delete(cascadeId);
-        stateCache.set(cascadeId, data);
-        if (stateCache.size > MAX_CACHE_ENTRIES) {
-          const oldestKey = stateCache.keys().next().value;
-          if (oldestKey !== undefined) stateCache.delete(oldestKey);
-        }
-        const setTimer = window?.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
-        if (setTimer && stateCache.size > 1) {
-          if (!cacheFlushTimer) {
-            cacheFlushTimer = setTimer(flushStatsCacheToStorage, 250);
-            if (cacheFlushTimer && typeof cacheFlushTimer.unref === 'function') cacheFlushTimer.unref();
-          }
-        } else {
-          flushStatsCacheToStorage();
-        }
-      }
-      function parseQuotaResponse(j) {
-        if (!j) return null;
-        const groups = (j.response && j.response.groups) || j.groups || [];
-        const geminiGroup = groups.find((g) => (g.displayName || g.groupName || '').includes('Gemini')) || groups[0];
-        if (geminiGroup && geminiGroup.buckets) {
-          const b5h = geminiGroup.buckets.find((b) => b.window === '5h');
-          const b7d = geminiGroup.buckets.find((b) => b.window === 'weekly');
-          const frac5h = getBucketRemainingFraction(b5h);
-          const frac7d = getBucketRemainingFraction(b7d);
-          return {
-            pct5h: frac5h !== null ? Math.round(frac5h * 100) : null,
-            rst5h: b5h ? fmtResetTime(b5h.resetTime) : '',
-            pct7d: frac7d !== null ? Math.round(frac7d * 100) : null,
-          };
-        }
-        return null;
-      }
-      function fetchQuota(csrf, el) {
-        const now = Date.now();
-        if (now - lastQuotaFetch < 15000 && quotaData) return Promise.resolve(quotaData);
-        if (inFlightQuota) return inFlightQuota;
-        lastQuotaFetch = now;
-        inFlightQuota = (async () => {
-          try {
-            let j = null;
-            if (canUseLocalHttp(csrf)) {
-              try {
-                const r = await fetchFn(resolvedHostConfig.buildRpcPath('RetrieveUserQuotaSummary'), {
-                  method: 'POST',
-                  headers: resolvedHostConfig.buildRpcHeaders(csrf),
-                  body: '{}',
-                });
-                if (r && r.ok !== false) {
-                  j = await r.json();
-                }
-              } catch {}
-            }
-            if (!j && typeof getRemoteRpcServiceForElement === 'function') {
-              const svc = getRemoteRpcServiceForElement(el);
-              if (svc && typeof svc.retrieveUserQuotaSummary === 'function') {
-                j = await svc.retrieveUserQuotaSummary({});
-              }
-            }
-            const parsedQuota = parseQuotaResponse(j);
-            if (parsedQuota) quotaData = parsedQuota;
-          } catch {}
-          inFlightQuota = null;
-          return quotaData;
-        })();
-        return inFlightQuota;
-      }
-      async function fetchTailMetasBounded({ cascadeId, totalGenLen, totalStepsLen, cachedGenLen, tailSize = 3, callGenMeta }) {
-        let knownLen = totalGenLen > 0 ? totalGenLen : (knownGenLenMap.get(cascadeId) || cachedGenLen || -1);
-        if (knownLen > 0) {
-          const off = Math.max(0, knownLen - tailSize);
-          const metas = await callGenMeta(off);
-          if (metas.length > 0) {
-            const nextLen = off + metas.length;
-            setBoundedGenLen(cascadeId, nextLen);
-            return { metas, knownGenLen: nextLen };
-          }
-        }
-        const sc = totalStepsLen > 0 ? totalStepsLen : 40;
-        if (sc <= 60) {
-          const metas = await callGenMeta(0);
-          if (metas.length > 0) {
-            setBoundedGenLen(cascadeId, metas.length);
-          }
-          return { metas, knownGenLen: metas.length };
-        }
-        let cur = Math.ceil(sc * 0.42);
-        while (cur > 0) {
-          const metas = await callGenMeta(cur);
-          if (metas.length > 0) {
-            const nextLen = cur + metas.length;
-            setBoundedGenLen(cascadeId, nextLen);
-            return { metas, knownGenLen: nextLen };
-          }
-          const stepDown = Math.max(35, Math.floor(cur * 0.22));
-          cur = Math.max(0, cur - stepDown);
-        }
-        const metas0 = await callGenMeta(0);
-        if (metas0.length > 0) {
-          setBoundedGenLen(cascadeId, metas0.length);
-        }
-        return { metas: metas0, knownGenLen: metas0.length };
-      }
-      function applyRealtimeCompactionAndUsage(parsed, fullState) {
-        if (!fullState || typeof fullState !== 'object') return parsed;
-        const cwUsage = fullState.contextWindowUsage;
-        const compactedSteps = Array.isArray(fullState.compactedAtStepIndices)
-          ? fullState.compactedAtStepIndices
-          : fullState.compactionInfo?.compactedAtStepIndices;
-        const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
-          ? Number(compactedSteps[compactedSteps.length - 1])
-          : -1;
-        const base = parsed || {
-          used: 0,
-          trajectoryMax: 256000,
-          cacheRead: 0,
-          inputTok: 0,
-          cachePct: 0,
-          lastMetaStepIndex: -1,
-          foundCtx: false,
-          foundUsage: false,
-        };
-        if (cwUsage && typeof cwUsage === 'object') {
-          const uMax = Number(cwUsage.maxContextTokens || 0);
-          if (uMax > 0) {
-            base.trajectoryMax = uMax;
-          }
-          const uStep = Number(cwUsage.lastStepIndex ?? -1);
-          const uEst = Number(cwUsage.estimatedTokensUsed || 0);
-          const rawAfterCompact = cwUsage.estimatedAfterCompaction;
-          const afterCompact = typeof rawAfterCompact === 'boolean'
-            ? (rawAfterCompact ? uEst : 0)
-            : Number(rawAfterCompact || 0);
-          if (afterCompact > 0 && latestCompactedStep >= 0 && (base.lastMetaStepIndex < 0 || latestCompactedStep >= base.lastMetaStepIndex)) {
-            base.used = afterCompact;
-            base.foundCtx = true;
-          } else if (uEst > 0 && (!base.foundCtx || (uStep >= 0 && base.lastMetaStepIndex >= 0 && uStep > base.lastMetaStepIndex))) {
-            base.used = uEst;
-            base.foundCtx = true;
-          }
-        }
-        return base;
-      }
-      function isStateForCascade(fullState, cascadeId) {
-        if (!fullState || typeof fullState !== 'object' || !cascadeId) return false;
-        const stateCid =
-          fullState.conversationId ||
-          fullState.cascadeId ||
-          fullState.trajectorySlice?.conversationId ||
-          fullState.trajectorySlice?.cascadeId ||
-          null;
-        if (!stateCid) return false;
-        return stateCid === cascadeId;
-      }
-      function extractVersionMetrics(fullState, cascadeId, fallbackGenLen) {
-        const slice = fullState?.trajectorySlice;
-        const totalGenLen = slice?.totalGeneratorMetadataLength ?? -1;
-        const totalStepsLen = slice?.totalStepsLength ?? -1;
-        const compactedSteps = Array.isArray(fullState?.compactedAtStepIndices)
-          ? fullState.compactedAtStepIndices
-          : fullState?.compactionInfo?.compactedAtStepIndices;
-        const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
-          ? Number(compactedSteps[compactedSteps.length - 1])
-          : -1;
-        const rawCwAfter = fullState?.contextWindowUsage?.estimatedAfterCompaction;
-        const cwAfterCompact = typeof rawCwAfter === 'boolean'
-          ? (rawCwAfter ? Number(fullState?.contextWindowUsage?.estimatedTokensUsed || 0) : 0)
-          : Number(rawCwAfter || 0);
-        const hasLiveVersion = Boolean(fullState && (totalGenLen >= 0 || totalStepsLen >= 0));
-        const rcSteps =
-          cascadeId && window?.__agyRcStepCountByCascade && typeof window.__agyRcStepCountByCascade[cascadeId] === 'number'
-            ? window.__agyRcStepCountByCascade[cascadeId]
-            : -1;
-        const effGenLen = typeof fallbackGenLen === 'number' && fallbackGenLen > 0 ? fallbackGenLen : -1;
-        return {
-          totalGenLen,
-          totalStepsLen,
-          latestCompactedStep,
-          cwAfterCompact,
-          hasLiveVersion,
-          rcSteps,
-          versionKey: hasLiveVersion
-            ? `${totalGenLen}:${totalStepsLen}:${latestCompactedStep}:${cwAfterCompact}`
-            : `fallback:${rcSteps}:${effGenLen}`,
-        };
-      }
-      function fetchCascadeStats(cascadeId, csrf, inputBox) {
-        if (!cascadeId || cascadeId === 'remote-session') {
-          return Promise.resolve(null);
-        }
-        const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
-        const rawState = asp?.getState?.();
-        const fullState = isStateForCascade(rawState, cascadeId) ? rawState : null;
-        const cached = stateCache.get(cascadeId);
-        const baseKnownGenLen = knownGenLenMap.get(cascadeId) || cached?.knownGenLen || -1;
-        const { totalGenLen, totalStepsLen, hasLiveVersion, rcSteps, versionKey } = extractVersionMetrics(
-          fullState,
-          cascadeId,
-          baseKnownGenLen
-        );
-        const knownGenLen = totalGenLen > 0 ? totalGenLen : baseKnownGenLen;
-        const cacheTtlMs = hasLiveVersion ? 12000 : 3000;
-        if (cached && Date.now() - cached.ts < cacheTtlMs) {
-          if (hasLiveVersion) {
-            if (cached.versionKey === versionKey) {
-              return Promise.resolve(cached);
-            }
-          } else if (rcSteps < 0 || cached.rcSteps === undefined || cached.rcSteps === rcSteps) {
-            return Promise.resolve(cached);
-          }
-        }
-        if (inFlightStats.has(cascadeId)) {
-          return inFlightStats.get(cascadeId);
-        }
-        const promise = (async () => {
-          try {
-            let parsed = null;
-            let discoveredGenLen = knownGenLen;
-            if (canUseLocalHttp(csrf)) {
-              try {
-                const callLocal = async (offset) => {
-                  const r = await fetchFn(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
-                    method: 'POST',
-                    headers: resolvedHostConfig.buildRpcHeaders(csrf),
-                    body: JSON.stringify({ cascadeId, generatorMetadataOffset: offset }),
-                  });
-                  if (r && r.ok !== false) {
-                    const j = await r.json();
-                    return j?.generatorMetadata || [];
-                  }
-                  return [];
-                };
-                const res = await fetchTailMetasBounded({
-                  cascadeId,
-                  totalGenLen,
-                  totalStepsLen,
-                  cachedGenLen: cached?.knownGenLen,
-                  tailSize: 2,
-                  callGenMeta: callLocal,
-                });
-                if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
-                parsed = extractStatsFromMetas(res.metas);
-                if (!parsed.foundCtx && discoveredGenLen > 2) {
-                  const widerMetas = await callLocal(Math.max(0, discoveredGenLen - 15));
-                  parsed = extractStatsFromMetas(widerMetas);
-                }
-              } catch {}
-            }
-            if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && typeof getRemoteRpcServiceForElement === 'function') {
-              const svc = getRemoteRpcServiceForElement(inputBox);
-              if (svc && typeof svc.getCascadeTrajectoryGeneratorMetadata === 'function') {
-                const callRemote = async (offset) => {
-                  const j = await svc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: offset });
-                  return j?.generatorMetadata || [];
-                };
-                const res = await fetchTailMetasBounded({
-                  cascadeId,
-                  totalGenLen,
-                  totalStepsLen,
-                  cachedGenLen: cached?.knownGenLen,
-                  tailSize: 2,
-                  callGenMeta: callRemote,
-                });
-                if (res.knownGenLen > 0) discoveredGenLen = res.knownGenLen;
-                parsed = extractStatsFromMetas(res.metas);
-                if (!parsed.foundCtx && discoveredGenLen > 2) {
-                  const widerMetas = await callRemote(Math.max(0, discoveredGenLen - 15));
-                  parsed = extractStatsFromMetas(widerMetas);
-                }
-              }
-              if ((!parsed || (!parsed.foundCtx && !parsed.foundUsage)) && svc && typeof svc.getCascadeTrajectory === 'function' && !svc.isRemoteControlHost) {
-                const t = await svc.getCascadeTrajectory({ cascadeId });
-                const metas = t?.trajectory?.generatorMetadata || [];
-                if (metas.length > 0) discoveredGenLen = metas.length;
-                parsed = extractStatsFromMetas(metas);
-              }
-            }
-            const latestRaw = asp?.getState?.();
-            const latestState = isStateForCascade(latestRaw, cascadeId) ? latestRaw : fullState;
-            parsed = applyRealtimeCompactionAndUsage(parsed, latestState);
-            if (!parsed || (!parsed.foundCtx && !parsed.foundUsage && discoveredGenLen <= 0)) {
-              return cached || null;
-            }
-            if (discoveredGenLen > 0) {
-              setBoundedGenLen(cascadeId, discoveredGenLen);
-            }
-            const finalMetrics = extractVersionMetrics(latestState, cascadeId, discoveredGenLen);
-            const data = {
-              used: parsed.used,
-              trajectoryMax: parsed.trajectoryMax,
-              cacheRead: parsed.cacheRead,
-              inputTok: parsed.inputTok,
-              cachePct: parsed.cachePct,
-              lastMetaStepIndex: parsed.lastMetaStepIndex,
-              knownGenLen: discoveredGenLen > 0 ? discoveredGenLen : undefined,
-              rcSteps: finalMetrics.rcSteps,
-              versionKey: finalMetrics.versionKey,
-              ts: Date.now(),
-            };
-            setBoundedCache(cascadeId, data);
-            return data;
-          } catch {
-            return cached || null;
-          } finally {
-            inFlightStats.delete(cascadeId);
-          }
-        })();
-        inFlightStats.set(cascadeId, promise);
-        return promise;
-      }
-      function getImmediateStats(cascadeId, inputBox) {
-        const cached = cascadeId ? (stateCache.get(cascadeId) || null) : null;
-        const asp = getAgentStateProviderForInputBox ? getAgentStateProviderForInputBox(inputBox) : null;
-        const fullState = asp?.getState?.();
-        if (!isStateForCascade(fullState, cascadeId)) {
-          return cached;
-        }
-        const merged = applyRealtimeCompactionAndUsage(cached ? { ...cached, foundCtx: true } : null, fullState);
-        if (!merged || (!cached && !merged.foundCtx && !merged.foundUsage)) {
-          return cached;
-        }
-        return cached ? { ...cached, used: merged.used, trajectoryMax: merged.trajectoryMax } : merged;
-      }
-      return {
-        fetchQuota,
-        fetchCascadeStats,
-        fetchTailMetasBounded,
-        applyRealtimeCompactionAndUsage,
-        getImmediateStats,
-        getKnownGenLen: (cascadeId) => knownGenLenMap.get(cascadeId) || stateCache.get(cascadeId)?.knownGenLen || 0,
-        getCachedStats: (cascadeId) => stateCache.get(cascadeId) || null,
-        getLatestQuota: () => quotaData,
-        dispose() {
-          if (cacheFlushTimer) {
-            clearTimeout(cacheFlushTimer);
-            cacheFlushTimer = null;
-          }
-          try {
-            if (window) {
-              delete window.__agyRcGenLenByCascade;
-            }
-          } catch {}
-        },
-      };
-    }
-    module.exports = {
-      getChatModelFromMeta,
-      extractStatsFromMetas,
-      createRpcClient,
-    };
-  },
-  "./desktop-react-bridge": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
+  "./ui/adapter-registry": function(module, exports, __require) {
+    const require = (spec) => __require("./ui", spec);
     'use strict';
     /**
-     * Desktop Electron / React Fiber / Redux / Lexical Engine Adapter.
-     *
-     * Isolates all workbench React context traversal, Redux `modelSelection` state synchronization,
-     * poisoned `trajectorySync` sanitization, and Lexical editor `/compact` command dispatch
-     * away from Remote Control RPC & binary wire concerns.
+     * Pure StatusBar Adapter Registry & DOM Slot Coordinator.
+     * Uses WeakMap (zero DOM expandos) and pure dom-builder nodes (zero HTML strings).
      */
-    const { PRESET_CONTEXT_WINDOWS } = require('./context-window-policy');
-    const MAX_CASCADE_MAP_ENTRIES = 200;
-    const COMPACT_ARGS =
-      '현재 상황을 유지하고 이어서 작업할 수 있게 내부 컨텍스트(<CONTEXT_SUMMARY>)로만 요약해. 사용자의 요청 원문과 목표, 확정된 결정과 그 이유, 수정한 파일 경로와 핵심 변경, 실행한 검증과 결과(실패 메시지 포함), 진행 중인 작업과 남은 할 일, 사용자가 준 제약과 피드백은 빠짐없이 남기고, 끝난 탐색 과정과 긴 도구 출력은 결론만 남겨. 단, 채팅창 응답으로는 요약 내용을 다시 출력하거나 반복하지 말고 "컨텍스트 압축 완료." 한 줄만 출력하고 즉시 턴을 종료해.';
-    function setBoundedMapRecord(win, propName, key, val) {
-      if (!win || !key) return;
-      if (!win[propName] || typeof win[propName] !== 'object') {
-        win[propName] = {};
-      }
-      const mapObj = win[propName];
-      if (Object.prototype.hasOwnProperty.call(mapObj, key)) {
-        delete mapObj[key];
-      }
-      mapObj[key] = val;
-      const keys = Object.keys(mapObj);
-      if (keys.length > MAX_CASCADE_MAP_ENTRIES) {
-        for (let i = 0; i < keys.length - MAX_CASCADE_MAP_ENTRIES; i++) {
-          delete mapObj[keys[i]];
-        }
-      }
+    const { h, setText } = require('./dom-builder');
+    const nodeCleanupMap = new WeakMap();
+    const adapterCtxMap = new WeakMap();
+    function registerNodeCleanup(node, fn) {
+      if (!node || typeof fn !== 'function') return;
+      nodeCleanupMap.set(node, fn);
     }
-    function cleanupLegacyObjectPrototypeCwGetters(extraWin) {
-      const protos = [Object.prototype];
-      try {
-        if (extraWin?.Object?.prototype && extraWin.Object.prototype !== Object.prototype) {
-          protos.push(extraWin.Object.prototype);
-        }
-      } catch {}
-      for (const proto of protos) {
+    function runNodeCleanup(node) {
+      if (!node) return;
+      const fn = nodeCleanupMap.get(node);
+      if (typeof fn === 'function') {
+        nodeCleanupMap.delete(node);
         try {
-          for (const key of Object.getOwnPropertyNames(proto)) {
-            if (!/^\d+K$/.test(key)) continue;
-            const desc = Object.getOwnPropertyDescriptor(proto, key);
-            if (desc && desc.configurable && typeof desc.get === 'function' && String(desc.get).includes('512000')) {
-              delete proto[key];
-            }
-          }
+          fn();
         } catch {}
       }
     }
-    function registerCustomCwInPrototype(cw, underDefaultCwSet, onStyleUpdate, extraWin) {
-      cleanupLegacyObjectPrototypeCwGetters(extraWin);
-      if (!cw) return;
-      const kNum = parseInt(cw, 10);
-      if (!isNaN(kNum) && kNum > 0 && kNum <= 256 && underDefaultCwSet && !underDefaultCwSet.has(cw)) {
-        underDefaultCwSet.add(cw);
-        if (typeof onStyleUpdate === 'function') {
-          try { onStyleUpdate(); } catch {}
-        }
-      }
-    }
-    function extractModelValFromModelOrAlias(moa) {
-      if (!moa || typeof moa !== 'object') return undefined;
-      if (moa.model !== undefined) return moa.model;
-      if (moa.choice && (moa.choice.case === 'model' || moa.choice.case === 'alias') && moa.choice.value !== undefined) {
-        return moa.choice.value;
-      }
-      return undefined;
-    }
-    function resolveModelValueFromLabel(state, label) {
-      if (!label || typeof label !== 'string') return undefined;
-      const trimmed = label.trim();
-      if (!trimmed) return undefined;
-      const configs = state?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-      if (!Array.isArray(configs)) return undefined;
-      for (const cfg of configs) {
-        if (cfg && cfg.label === trimmed) {
-          const v = extractModelValFromModelOrAlias(cfg.modelOrAlias);
-          if (v !== undefined) return v;
-        }
-      }
-      return undefined;
-    }
-    function extractLabelFromSyncedKey(syncedKey) {
-      if (typeof syncedKey !== 'string' || !syncedKey) return undefined;
-      const parts = syncedKey.split(':');
-      if (parts.length >= 4) {
-        const label = parts.slice(2, parts.length - 1).join(':').trim();
-        if (label) return label;
-      }
-      if (parts.length === 3) {
-        const label = parts[1].trim();
-        if (label) return label;
-      }
-      return undefined;
-    }
-    function setTriggerCwAttribute(triggerEl, cwStr) {
-      if (!triggerEl || typeof triggerEl.setAttribute !== 'function') return;
-      const str = String(cwStr);
-      if (triggerEl.getAttribute('data-context-window') !== str) {
-        triggerEl.__agyInternalDomCw = str;
-        triggerEl.setAttribute('data-context-window', str);
-      }
-    }
-    function createDesktopReactBridge({
-      window,
-      document,
-      localStorage,
-      cwStore,
-      ensureFetchHook,
-      getAccessibleRemoteIframeWin,
-      getAccessibleRemoteIframeDoc,
-      getRemoteRpcServiceForElement,
-      cleanupCallbacks,
-    }) {
-      cleanupLegacyObjectPrototypeCwGetters();
-      try {
-        const raw = localStorage?.getItem('jetski.developer.customFlagOverrides');
-        const flags = raw ? JSON.parse(raw) : {};
-        let changed = false;
-        if (flags['context-window-selector'] !== true) {
-          flags['context-window-selector'] = true;
-          changed = true;
-        }
-        if (!flags['contextWindowSelector'] || flags['contextWindowSelector'].enabled !== true) {
-          flags['contextWindowSelector'] = { enabled: true };
-          changed = true;
-        }
-        if (changed) {
-          localStorage?.setItem('jetski.developer.customFlagOverrides', JSON.stringify(flags));
-        }
-      } catch {}
-      try {
-        if (window && !window.__agyLsClientDecoratorHooked) {
-          window.__agyLsClientDecoratorHooked = true;
-          const hadOwnDec = Object.prototype.hasOwnProperty.call(window, '__JETSKI_LS_CLIENT_DECORATOR__');
-          const prevDec = window.__JETSKI_LS_CLIENT_DECORATOR__;
-          const wrappedDec = function (client) {
-            const decorated = typeof prevDec === 'function' ? (prevDec(client) || client) : client;
-            if (decorated && typeof decorated === 'object') {
-              window.__agyCapturedLsClient = decorated;
-              if (
-                typeof decorated.subscribeToPlugins === 'function' &&
-                typeof decorated.getAllPlugins === 'function' &&
-                !decorated.__agyPluginsStreamPatched
-              ) {
-                decorated.__agyPluginsStreamPatched = true;
-                const origSubRaw = decorated.subscribeToPlugins;
-                const origSub = origSubRaw.bind(decorated);
-                decorated.subscribeToPlugins = function (req, opts) {
-                  const stream = origSub(req, opts);
-                  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return stream;
-                  return {
-                    [Symbol.asyncIterator]() {
-                      const it = stream[Symbol.asyncIterator]();
-                      let yieldedFirst = false;
-                      let pendingFirstNext = null;
-                      return {
-                        async next() {
-                          if (!yieldedFirst) {
-                            yieldedFirst = true;
-                            let timer;
-                            const firstPromise = it.next();
-                            firstPromise.catch(() => {});
-                            const raceRes = await Promise.race([
-                              firstPromise.then((r) => ({ from: 'stream', r })),
-                              new Promise((resolve) => {
-                                timer = setTimeout(() => resolve({ from: 'timeout' }), 600);
-                              }),
-                            ]);
-                            clearTimeout(timer);
-                            if (raceRes.from === 'stream') return raceRes.r;
-                            pendingFirstNext = firstPromise;
-                            try {
-                              const res = await decorated.getAllPlugins({ workspaceUris: [] });
-                              return { done: false, value: { plugins: res?.plugins || [] } };
-                            } catch {
-                              const p = pendingFirstNext;
-                              pendingFirstNext = null;
-                              return p;
-                            }
-                          }
-                          if (pendingFirstNext) {
-                            const p = pendingFirstNext;
-                            pendingFirstNext = null;
-                            return p;
-                          }
-                          return it.next();
-                        },
-                        return(v) {
-                          return typeof it.return === 'function' ? it.return(v) : Promise.resolve({ done: true, value: v });
-                        },
-                        throw(e) {
-                          return typeof it.throw === 'function' ? it.throw(e) : Promise.reject(e);
-                        },
-                      };
-                    },
-                  };
-                };
-                cleanupCallbacks.push(() => {
-                  try {
-                    decorated.subscribeToPlugins = origSubRaw;
-                    delete decorated.__agyPluginsStreamPatched;
-                  } catch {}
-                });
-              }
-            }
-            return decorated;
-          };
-          window.__JETSKI_LS_CLIENT_DECORATOR__ = wrappedDec;
-          cleanupCallbacks.push(() => {
-            try {
-              if (window.__JETSKI_LS_CLIENT_DECORATOR__ === wrappedDec) {
-                if (hadOwnDec) window.__JETSKI_LS_CLIENT_DECORATOR__ = prevDec;
-                else delete window.__JETSKI_LS_CLIENT_DECORATOR__;
-              }
-              delete window.__agyLsClientDecoratorHooked;
-            } catch {}
-          });
-        }
-      } catch {}
-      function resolveEffectiveView(view) {
-        if (view && view.classList?.contains?.('agy-rc-host-view')) {
-          const cdoc = getAccessibleRemoteIframeDoc();
-          if (cdoc) {
-            const cid = view.getAttribute('data-cascade-id');
-            if (cid && cid !== 'remote-session') {
-              const exact = cdoc.querySelector(`[data-testid="conversation-view"][data-cascade-id="${cid}"]`);
-              if (exact) return exact;
-            }
-            const anyView = cdoc.querySelector('[data-testid="conversation-view"]');
-            if (anyView) return anyView;
-          }
-        }
-        return view;
-      }
-      function resolveEffectiveInputBox(inputBox) {
-        if (inputBox && inputBox.classList?.contains?.('agy-rc-host-box')) {
-          const cdoc = getAccessibleRemoteIframeDoc();
-          if (cdoc) {
-            const innerBox = cdoc.querySelector('[data-testid="agent-input-box"]');
-            if (innerBox) return innerBox;
-          }
-        }
-        return inputBox;
-      }
-      const frozenModelCloneCache = typeof WeakMap === 'function' ? new WeakMap() : null;
-      const patchedStoreConfigsCache = typeof WeakMap === 'function' ? new WeakMap() : null;
-      function ensureModelContextWindowOptions(modelObj, extraCw, forceClone = false) {
-        if (!modelObj || typeof modelObj !== 'object') return modelObj;
-        const curArr = Array.isArray(modelObj.contextWindowOptions) ? modelObj.contextWindowOptions : [];
-        const existingNames = new Set(curArr.map((o) => o && o.name).filter(Boolean));
-        const wanted = [...PRESET_CONTEXT_WINDOWS];
-        if (extraCw && !wanted.includes(extraCw)) {
-          wanted.push(extraCw);
-        }
-        const toAdd = [];
-        for (const cw of wanted) {
-          if (!existingNames.has(cw)) {
-            const limit = cwStore ? cwStore.getLimit(cw) : 256000;
-            const hint = cwStore ? cwStore.getQuotaHint(cw) : cw;
-            toAdd.push({
-              name: cw,
-              description: hint,
-              expensive: limit > 256000,
-            });
-            existingNames.add(cw);
-          }
-        }
-        if (toAdd.length === 0 && Array.isArray(modelObj.contextWindowOptions)) {
-          return modelObj;
-        }
-        const nextArr = [...curArr, ...toAdd];
-        if (!forceClone) {
-          try {
-            if (Array.isArray(modelObj.contextWindowOptions) && Object.isExtensible(modelObj.contextWindowOptions)) {
-              modelObj.contextWindowOptions.push(...toAdd);
-              return modelObj;
-            }
-            if (Object.isExtensible(modelObj)) {
-              modelObj.contextWindowOptions = nextArr;
-              return modelObj;
-            }
-          } catch {}
-        }
-        const wantedKey = wanted.join('|');
-        if (frozenModelCloneCache) {
-          const byKey = frozenModelCloneCache.get(modelObj);
-          if (byKey && byKey.has(wantedKey)) {
-            return byKey.get(wantedKey);
-          }
-        }
-        try {
-          const proto = Object.getPrototypeOf(modelObj);
-          const clone =
-            proto && proto !== Object.prototype
-              ? Object.assign(Object.create(proto), modelObj, { contextWindowOptions: nextArr })
-              : { ...modelObj, contextWindowOptions: nextArr };
-          if (frozenModelCloneCache) {
-            let byKey = frozenModelCloneCache.get(modelObj);
-            if (!byKey) {
-              byKey = new Map();
-              frozenModelCloneCache.set(modelObj, byKey);
-            }
-            byKey.set(wantedKey, clone);
-          }
-          return clone;
-        } catch {
-          return modelObj;
-        }
-      }
-      function ensureContextWindowSelectorFlag(extraCw) {
-        ensureFetchHook(window);
-        const cwin = getAccessibleRemoteIframeWin();
-        if (cwin) ensureFetchHook(cwin);
-        if (!document) return;
-        const now = Date.now();
-        const effectiveExtraKey =
-          extraCw && !PRESET_CONTEXT_WINDOWS.includes(extraCw) ? String(extraCw) : '__presets__';
-        const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
-        for (const d of docs) {
-          const views = d.querySelectorAll('[data-testid="conversation-view"]');
-          for (const view of views) {
-            const cacheKey = effectiveExtraKey;
-            const currentCid = view.getAttribute?.('data-cascade-id') || '';
-            if (
-              view.__agyCwsPatchTs &&
-              now - view.__agyCwsPatchTs < 3000 &&
-              view.__agyCwsPatchExtraCw === cacheKey &&
-              view.__agyCwsPatchCid === currentCid
-            ) {
-              continue;
-            }
-            const triggerEl = view.querySelector?.('[data-testid="model-selector-trigger"]');
-            const startNodes = [triggerEl, view].filter(Boolean);
-            let patchedAny = false;
-            for (const node of startNodes) {
-              const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
-              let fiber = fk ? node[fk] : null;
-              while (fiber) {
-                const val = fiber.memoizedProps?.value;
-                if (val && typeof val === 'object') {
-                  if (typeof val.get === 'function') {
-                    patchedAny = true;
-                    if (!val.__cwsPatched) {
-                      try {
-                        const origGet = val.get;
-                        val.get = function (name) {
-                          if (name === 'contextWindowSelector') {
-                            return { enabled: true, feature: { enabled: true } };
-                          }
-                          return origGet.apply(this, arguments);
-                        };
-                        val.__cwsPatched = true;
-                        cleanupCallbacks.push(() => {
-                          try {
-                            val.get = origGet;
-                            delete val.__cwsPatched;
-                          } catch {}
-                        });
-                      } catch {}
-                    }
-                  }
-                  if ('corpHost' in val && 'cider' in val && 'contextWindow' in val && val.contextWindow === undefined) {
-                    try { val.contextWindow = {}; } catch {}
-                  }
-                  if (val.selectedModel && typeof val.selectedModel === 'object') {
-                    patchedAny = true;
-                    const nextSm = ensureModelContextWindowOptions(val.selectedModel, extraCw);
-                    if (nextSm !== val.selectedModel && Object.isExtensible(val)) {
-                      try { val.selectedModel = nextSm; } catch {}
-                    }
-                  }
-                  if (Array.isArray(val.modelOptions)) {
-                    patchedAny = true;
-                    if (Object.isExtensible(val.modelOptions)) {
-                      for (let i = 0; i < val.modelOptions.length; i++) {
-                        const nextOpt = ensureModelContextWindowOptions(val.modelOptions[i], extraCw);
-                        if (nextOpt !== val.modelOptions[i]) {
-                          try { val.modelOptions[i] = nextOpt; } catch {}
-                        }
-                      }
-                    } else if (Object.isExtensible(val)) {
-                      let changedOpt = false;
-                      const mapped = val.modelOptions.map((opt) => {
-                        const nextOpt = ensureModelContextWindowOptions(opt, extraCw);
-                        if (nextOpt !== opt) changedOpt = true;
-                        return nextOpt;
-                      });
-                      if (changedOpt) {
-                        try { val.modelOptions = mapped; } catch {}
-                      }
-                    }
-                  }
-                  if (val.store && typeof val.store.getState === 'function') {
-                    patchedAny = true;
-                    const st = val.store.getState();
-                    const clientConfigs = st?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-                    if (Array.isArray(clientConfigs)) {
-                      let storeRec = patchedStoreConfigsCache ? patchedStoreConfigsCache.get(val.store) : null;
-                      const alreadyHandledRef =
-                        storeRec &&
-                        storeRec.configsRefs.has(clientConfigs) &&
-                        storeRec.extraCwKeys.has(cacheKey);
-                      if (!alreadyHandledRef) {
-                        let needsReduxUpdate = false;
-                        const updatedConfigs = [];
-                        for (const cfg of clientConfigs) {
-                          const nextCfg = ensureModelContextWindowOptions(cfg, extraCw, true);
-                          updatedConfigs.push(nextCfg);
-                          if (nextCfg !== cfg) {
-                            needsReduxUpdate = true;
-                          }
-                        }
-                        if (!storeRec && patchedStoreConfigsCache) {
-                          storeRec = {
-                            configsRefs: new WeakSet(),
-                            extraCwKeys: new Set(),
-                          };
-                          patchedStoreConfigsCache.set(val.store, storeRec);
-                        }
-                        if (storeRec) {
-                          storeRec.configsRefs.add(clientConfigs);
-                          storeRec.configsRefs.add(updatedConfigs);
-                          storeRec.extraCwKeys.add(cacheKey);
-                        }
-                        if (needsReduxUpdate && typeof val.store.dispatch === 'function') {
-                          try {
-                            val.store.dispatch({
-                              type: 'userStatus/setUserStatus',
-                              payload: {
-                                ...st.userStatus,
-                                cascadeModelConfigData: {
-                                  ...st.userStatus.cascadeModelConfigData,
-                                  clientModelConfigs: updatedConfigs,
-                                },
-                              },
-                            });
-                            const afterConfigs = val.store.getState()?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-                            if (storeRec && Array.isArray(afterConfigs)) {
-                              storeRec.configsRefs.add(afterConfigs);
-                            }
-                          } catch {}
-                        }
-                      }
-                    }
-                  }
-                }
-                fiber = fiber.return;
-              }
-            }
-            if (patchedAny) {
-              view.__agyCwsPatchTs = now;
-              view.__agyCwsPatchExtraCw = cacheKey;
-              view.__agyCwsPatchCid = currentCid;
-            }
-          }
-        }
-      }
-      function ensureCustomizationsStoreLoaded() {
-        if (!document) return;
-        const now = Date.now();
-        const docs = [document, getAccessibleRemoteIframeDoc()].filter(Boolean);
-        for (const d of docs) {
-          const cachedStore = d.__agyCachedCustomizationsStore;
-          if (cachedStore && cachedStore.hasReceivedStreamSnapshot && cachedStore.streamingDisabled) {
-            continue;
-          }
-          const views = d.querySelectorAll?.('[data-testid="conversation-view"]') || [];
-          const rootEl = d.querySelector?.('#root, #app') || d.body?.firstElementChild;
-          const startNodes = [...views, rootEl].filter(Boolean);
-          for (const node of startNodes) {
-            const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$'));
-            const startFiber = fk ? node[fk] : null;
-            if (!startFiber) continue;
-            let up = startFiber;
-            let foundStore = null;
-            while (up) {
-              const val = up.memoizedProps?.value;
-              if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
-                foundStore = val;
-                break;
-              }
-              up = up.return;
-            }
-            if (!foundStore && node === rootEl) {
-              if (d.__agyLastCustomizationsDfsTs && now - d.__agyLastCustomizationsDfsTs < 10000) {
-                continue;
-              }
-              d.__agyLastCustomizationsDfsTs = now;
-              const stack = [startFiber];
-              const visited = new Set();
-              while (stack.length > 0 && visited.size < 2500) {
-                const f = stack.pop();
-                if (!f || visited.has(f)) continue;
-                visited.add(f);
-                const val = f.memoizedProps?.value;
-                if (val && typeof val === 'object' && val.state && typeof val.receiveStreamedPlugins === 'function' && typeof val.refresh === 'function') {
-                  foundStore = val;
-                  break;
-                }
-                if (f.sibling) stack.push(f.sibling);
-                if (f.child) stack.push(f.child);
-              }
-            }
-            if (foundStore) {
-              d.__agyCachedCustomizationsStore = foundStore;
-              try {
-                if (typeof foundStore.disableStreaming === 'function' && !foundStore.streamingDisabled) {
-                  foundStore.disableStreaming();
-                }
-                const st = typeof foundStore.state?.getState === 'function' ? foundStore.state.getState() : null;
-                if ((!foundStore.hasReceivedStreamSnapshot || st?.isLoadingPlugins) && !foundStore.__agyInitialRefreshTriggered) {
-                  foundStore.__agyInitialRefreshTriggered = true;
-                  Promise.resolve(foundStore.refresh()).catch(() => {
-                    foundStore.__agyInitialRefreshTriggered = false;
-                  });
-                }
-              } catch {}
-              break;
-            }
-          }
-        }
-      }
-      function getModelSelectorContextForView(view, extraCw) {
-        ensureContextWindowSelectorFlag(extraCw);
-        const effView = resolveEffectiveView(view);
-        if (!effView) return null;
-        const now = Date.now();
-        const currentCid = effView.getAttribute?.('data-cascade-id') || view?.getAttribute?.('data-cascade-id') || '';
-        const cachedCtx = effView.__agyMsCtxCache;
-        if (
-          cachedCtx &&
-          effView.__agyMsCtxCacheCid === currentCid &&
-          now - (effView.__agyMsCtxCacheTs || 0) < 400 &&
-          (!cachedCtx.triggerEl || cachedCtx.triggerEl.isConnected !== false) &&
-          (cachedCtx.msCtx || cachedCtx.reduxStore || cachedCtx.legacyCtx)
-        ) {
-          if (cachedCtx.msCtx?.selectedModel) {
-            ensureModelContextWindowOptions(cachedCtx.msCtx.selectedModel, extraCw);
-          }
-          return cachedCtx;
-        }
-        const triggerEl = effView.querySelector('[data-testid="model-selector-trigger"]');
-        const startEl = triggerEl || effView;
-        const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
-        let fiber = fk ? startEl[fk] : null;
-        let msCtx = null;
-        let setSelectedModelWithCw = null;
-        let reduxStore = null;
-        let legacyCtx = null;
-        while (fiber) {
-          const props = fiber.memoizedProps;
-          if (!setSelectedModelWithCw && typeof props?.setSelectedModel === 'function' && props.setSelectedModel.length >= 2) {
-            setSelectedModelWithCw = props.setSelectedModel;
-          }
-          const val = props?.value;
-          if (val && typeof val === 'object') {
-            if (!msCtx && typeof val.setSelectedModel === 'function' && ('selectedModel' in val)) {
-              msCtx = val;
-            }
-            if (!setSelectedModelWithCw && typeof val.setSelectedModel === 'function' && val.setSelectedModel.length >= 2) {
-              setSelectedModelWithCw = val.setSelectedModel;
-            }
-            if (!reduxStore && val.store && typeof val.store.dispatch === 'function' && typeof val.store.getState === 'function') {
-              reduxStore = val.store;
-            }
-            if (!legacyCtx && typeof val.setModelForConversation === 'function') {
-              legacyCtx = val;
-            }
-          }
-          fiber = fiber.return;
-        }
-        if (msCtx?.selectedModel) {
-          ensureModelContextWindowOptions(msCtx.selectedModel, extraCw);
-        }
-        const res = { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl };
-        if (msCtx || reduxStore || legacyCtx) {
-          effView.__agyMsCtxCache = res;
-          effView.__agyMsCtxCacheTs = now;
-          effView.__agyMsCtxCacheCid = currentCid;
-        }
-        return res;
-      }
-      function getCascadeContextForElement(el) {
-        const effEl = resolveEffectiveInputBox(resolveEffectiveView(el));
-        const candidates = [
-          effEl,
-          effEl?.closest?.('[data-testid="conversation-view"]'),
-          document?.querySelector?.('[data-testid="conversation-view"]'),
-        ].filter(Boolean);
-        for (const node of candidates) {
-          const fk = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
-          let curr = fk ? node[fk] : null;
-          while (curr) {
-            const val = curr.memoizedProps?.value;
-            if (val?.cascadeContext?.state?.agentStateProvider) {
-              return val.cascadeContext;
-            }
-            if (val?.state?.agentStateProvider && (val?.debug || val?.cascadeContext !== undefined || val?.state)) {
-              return val;
-            }
-            curr = curr.return;
-          }
-        }
-        return null;
-      }
-      function getSelectedModelKey(view, cascadeId, infoOpt) {
-        const info = infoOpt || getModelSelectorContextForView(view);
-        const state = info?.reduxStore ? info.reduxStore.getState() : null;
-        const byConvo = state?.modelSelection?.byConversation?.[cascadeId];
-        const sm = info?.msCtx?.selectedModel;
-        const raw =
-          byConvo?.model ??
-          (sm && typeof sm === 'object' ? (sm.value ?? sm.label) : sm) ??
-          state?.modelSelection?.default?.model ??
-          info?.legacyCtx?.getModelConfigForConversation?.(cascadeId)?.value ??
-          '';
-        return `${cascadeId || ''}:${String(raw ?? '')}`;
-      }
-      function sanitizePoisonedModelSelection(reduxStore) {
-        if (!reduxStore || typeof reduxStore.getState !== 'function' || typeof reduxStore.dispatch !== 'function') {
-          return;
-        }
-        try {
-          if (reduxStore.__agyPoisonSanitizedV25) return;
-          const st = reduxStore.getState();
-          const ms = st?.modelSelection;
-          if (!ms || typeof ms !== 'object') return;
-          const syncMap = ms.trajectorySync;
-          const byConvoMap = ms.byConversation;
-          if (!syncMap || typeof syncMap !== 'object') return;
-          const overrideDefaultModel = extractModelValFromModelOrAlias(
-            st?.userStatus?.cascadeModelConfigData?.defaultOverrideModelConfig?.modelOrAlias
-          );
-          let cleanConvoModel = undefined;
-          for (const cid of Object.keys(syncMap)) {
-            const entry = syncMap[cid];
-            const step = entry?.pick?.atStep;
-            if (step === undefined || step === -1) {
-              const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-              const mVal = resolveModelValueFromLabel(st, syncedLabel);
-              if (mVal !== undefined) {
-                cleanConvoModel = mVal;
-                if (syncedLabel && /\(medium\)/i.test(syncedLabel)) break;
-              }
-            }
-          }
-          const preferredModel = overrideDefaultModel ?? cleanConvoModel;
-          if (preferredModel === undefined) return;
-          const poisonedCids = [];
-          let recoveredTargetModel = undefined;
-          for (const cid of Object.keys(syncMap)) {
-            const entry = syncMap[cid];
-            const step = entry?.pick?.atStep;
-            const hasSyncedKey = typeof entry?.syncedKey === 'string' && entry.syncedKey.length > 0;
-            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-            const isV24Relocked =
-              hasSyncedKey &&
-              (step === 0 || (typeof step === 'number' && step > 0 && entry?.pick?.checkedTurnKey !== undefined));
-            const isPoisoned = step === 999999 || isV24Relocked;
-            if (isPoisoned) {
-              poisonedCids.push(cid);
-              const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
-              if (syncedModelVal !== undefined && recoveredTargetModel === undefined) {
-                recoveredTargetModel = syncedModelVal;
-              }
-            }
-          }
-          if (poisonedCids.length === 0 && ms.default?.model === preferredModel) {
-            reduxStore.__agyPoisonSanitizedV25 = true;
-            return;
-          }
-          reduxStore.__agyPoisonSanitizedV25 = true;
-          const currentDefaultModel = ms.default?.model;
-          const currentDefaultCustomLabel = ms.default?.customLabel;
-          const desiredDefaultCw = cwStore?.hasExplicitDefaultCw?.()
-            ? cwStore.getDefaultCw()
-            : (ms.default?.contextWindow || '256K');
-          const safeDefaultModel = preferredModel ?? recoveredTargetModel ?? currentDefaultModel;
-          for (const cid of poisonedCids) {
-            const entry = syncMap[cid];
-            const convo = byConvoMap?.[cid];
-            const syncedLabel = extractLabelFromSyncedKey(entry?.syncedKey);
-            const syncedModelVal = resolveModelValueFromLabel(st, syncedLabel);
-            const targetModel =
-              syncedLabel && !/\(low\)/i.test(syncedLabel) && syncedModelVal !== undefined
-                ? syncedModelVal
-                : (preferredModel ?? syncedModelVal ?? safeDefaultModel ?? convo?.model);
-            const targetCw = cwStore?.getSavedContextWindow?.(cid) || convo?.contextWindow || desiredDefaultCw;
-            if (targetModel !== undefined) {
-              reduxStore.dispatch({
-                type: 'modelSelection/modelPicked',
-                payload: {
-                  conversationId: cid,
-                  model: targetModel,
-                  customLabel: undefined,
-                  contextWindow: targetCw,
-                  pick: { atStep: -1, queuedMessageIds: [] },
-                },
-              });
-            }
-          }
-          if (safeDefaultModel !== undefined) {
-            reduxStore.dispatch({
-              type: 'modelSelection/modelPicked',
-              payload: {
-                conversationId: undefined,
-                model: safeDefaultModel,
-                customLabel: safeDefaultModel === currentDefaultModel ? currentDefaultCustomLabel : undefined,
-                contextWindow: desiredDefaultCw,
-              },
-            });
-          }
-        } catch {}
-      }
-      function applyContextWindowToEngine(view, cascadeId, rawTargetCw, force = false) {
-        const targetCw = cwStore.normalize(rawTargetCw);
-        if (!view || !cascadeId || !targetCw) return false;
-        const info = getModelSelectorContextForView(view, targetCw);
-        if (!info) return false;
-        const { msCtx, setSelectedModelWithCw, reduxStore, legacyCtx, triggerEl } = info;
-        if (reduxStore) {
-          sanitizePoisonedModelSelection(reduxStore);
-        }
-        if (triggerEl) {
-          const warnAttr = cwStore.getLimit(targetCw) > 256000 ? '1' : '0';
-          if (triggerEl.getAttribute('data-agy-cw-warn') !== warnAttr) {
-            triggerEl.setAttribute('data-agy-cw-warn', warnAttr);
-          }
-        }
-        const currentInDom = triggerEl ? cwStore.normalize(triggerEl.getAttribute('data-context-window')) : null;
-        const selectedModel = getSelectedModelKey(view, cascadeId, info);
-        const applyKey = (selectedModel || '') + ':' + String(targetCw);
-        window.__agyLastAppliedContextWindowByCascade = window.__agyLastAppliedContextWindowByCascade || {};
-        const lastAppliedForCascade = window.__agyLastAppliedContextWindowByCascade[cascadeId];
-        const initialState = reduxStore ? reduxStore.getState() : null;
-        const initialByConvo = initialState?.modelSelection?.byConversation?.[cascadeId];
-        const defaultReduxCw = cwStore.normalize(initialState?.modelSelection?.default?.contextWindow) || '256K';
-        const effectiveInitialReduxCw = cwStore.normalize(initialByConvo?.contextWindow) || defaultReduxCw;
-        const reduxAlreadyMatches = !reduxStore || effectiveInitialReduxCw === targetCw;
-        if ((currentInDom === targetCw || lastAppliedForCascade === applyKey || window.__agyLastAppliedContextWindow === applyKey) && reduxAlreadyMatches && !force) {
-          window.__agyLastAppliedContextWindow = applyKey;
-          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-          setTriggerCwAttribute(triggerEl, targetCw);
-          return true;
-        }
-        if (msCtx || reduxStore) {
-          const state = initialState;
-          const byConvo = initialByConvo;
-          const currentInRedux = reduxStore
-            ? effectiveInitialReduxCw
-            : (cwStore.normalize(msCtx?.contextWindow?.selected) || currentInDom || '256K');
-          const selectedModelObj = msCtx?.selectedModel;
-          if (selectedModelObj) {
-            ensureModelContextWindowOptions(selectedModelObj, targetCw);
-          }
-          let dispatched = false;
-          if (currentInRedux !== targetCw || force) {
-            const prevDefault = state?.modelSelection?.default;
-            const prevDefaultModel = prevDefault?.model;
-            const prevDefaultCustomLabel = prevDefault?.customLabel;
-            const prevDefaultCw = prevDefault?.contextWindow;
-            if (reduxStore) {
-              const syncEntry = state?.modelSelection?.trajectorySync?.[cascadeId];
-              const syncedModelVal =
-                syncEntry?.pick?.atStep === 999999
-                  ? resolveModelValueFromLabel(state, extractLabelFromSyncedKey(syncEntry?.syncedKey))
-                  : undefined;
-              const modelVal = syncedModelVal ?? byConvo?.model ?? selectedModelObj?.value ?? prevDefaultModel;
-              const isCustomModel = Boolean(selectedModelObj?.isCustom && selectedModelObj?.value === modelVal);
-              const customLabel = isCustomModel ? selectedModelObj?.label : undefined;
-              if (modelVal !== undefined) {
-                reduxStore.dispatch({
-                  type: 'modelSelection/modelPicked',
-                  payload: {
-                    conversationId: cascadeId,
-                    model: modelVal,
-                    customLabel,
-                    contextWindow: targetCw,
-                  },
-                });
-                dispatched = true;
-              }
-            } else if (msCtx?.contextWindow && typeof msCtx.contextWindow.select === 'function' && selectedModelObj) {
-              msCtx.contextWindow.select(selectedModelObj, targetCw);
-              dispatched = true;
-            } else if (typeof setSelectedModelWithCw === 'function' && selectedModelObj) {
-              setSelectedModelWithCw(selectedModelObj, targetCw);
-              dispatched = true;
-            } else if (typeof msCtx?.setSelectedModel === 'function' && selectedModelObj) {
-              msCtx.setSelectedModel(selectedModelObj, targetCw);
-              dispatched = true;
-            }
-            if (dispatched && reduxStore) {
-              const nextState = reduxStore.getState();
-              const defObj = nextState?.modelSelection?.default;
-              const desiredDefaultCw =
-                prevDefaultCw !== undefined
-                  ? prevDefaultCw
-                  : (cwStore.hasExplicitDefaultCw?.() ? cwStore.getDefaultCw() : '256K');
-              const desiredDefaultModel = prevDefaultModel !== undefined ? prevDefaultModel : defObj?.model;
-              const desiredDefaultCustomLabel =
-                prevDefaultModel !== undefined ? prevDefaultCustomLabel : defObj?.customLabel;
-              const defCwNormalized = cwStore.normalize(defObj?.contextWindow) || '256K';
-              const desiredCwNormalized = cwStore.normalize(desiredDefaultCw) || '256K';
-              if (
-                defObj &&
-                (defObj.model !== desiredDefaultModel ||
-                  defObj.customLabel !== desiredDefaultCustomLabel ||
-                  defCwNormalized !== desiredCwNormalized)
-              ) {
-                reduxStore.dispatch({
-                  type: 'modelSelection/modelPicked',
-                  payload: {
-                    conversationId: undefined,
-                    model: desiredDefaultModel,
-                    customLabel: desiredDefaultCustomLabel,
-                    contextWindow: desiredDefaultCw,
-                  },
-                });
-              }
-            }
-          }
-          if (dispatched || currentInRedux === targetCw) {
-            window.__agyLastAppliedContextWindow = applyKey;
-            setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-            setTriggerCwAttribute(triggerEl, targetCw);
-            return true;
-          }
-          return false;
-        }
-        if (legacyCtx) {
-          const modelCfg = legacyCtx.getModelConfigForConversation(cascadeId);
-          if (!modelCfg || modelCfg.value === undefined) return false;
-          const currentInEngine = legacyCtx.getContextWindowForConversation(cascadeId) || '256K';
-          if (currentInEngine !== targetCw || force) {
-            if (currentInEngine === targetCw && currentInDom !== targetCw) {
-              const tempCw = targetCw === '256K' ? '512K' : '256K';
-              legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, tempCw);
-            }
-            legacyCtx.setModelForConversation(cascadeId, modelCfg.value, true, modelCfg.label, targetCw);
-          }
-          window.__agyLastAppliedContextWindow = applyKey;
-          setBoundedMapRecord(window, '__agyLastAppliedContextWindowByCascade', cascadeId, applyKey);
-          setTriggerCwAttribute(triggerEl, targetCw);
-          return true;
-        }
-        return false;
-      }
-      async function runCompactForInputBox(inputBox) {
-        const effBox = resolveEffectiveInputBox(inputBox);
-        if (!effBox) return;
-        const editable = effBox.querySelector('[contenteditable="true"]');
-        if (!editable || !editable.__lexicalEditor) {
-          const svc = getRemoteRpcServiceForElement(effBox);
-          const cid =
-            window?.__agySniffedCascadeId ||
-            document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id') ||
-            effBox.closest?.('[data-cascade-id]')?.getAttribute?.('data-cascade-id');
-          if (svc && typeof svc.sendUserCascadeMessage === 'function' && cid && cid !== 'remote-session') {
-            try {
-              await svc.sendUserCascadeMessage({
-                cascadeId: cid,
-                items: [
-                  {
-                    item: {
-                      slashCommand: {
-                        info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
-                      },
-                    },
-                  },
-                  {
-                    text: ' ' + COMPACT_ARGS,
-                  },
-                ],
-              });
-            } catch {}
-          }
-          return;
-        }
-        const ed = editable.__lexicalEditor;
-        const PClass = ed._nodes.get('paragraph')?.klass;
-        const MClass = ed._nodes.get('contextScopeItemMention')?.klass;
-        const TClass = ed._nodes.get('text')?.klass;
-        if (!PClass || !MClass || !TClass) return;
-        ed.update(() => {
-          const root = ed.getEditorState()._nodeMap.get('root').getWritable();
-          root.clear();
-          const p = PClass.importJSON({
-            direction: null, format: '', indent: 0, type: 'paragraph', version: 1, textFormat: 0, textStyle: '',
-          });
-          const mention = MClass.importJSON({
-            trigger: '@',
-            value: 'contextScopeItemMention',
-            data: {
-              mentionText: 'compact',
-              data: JSON.stringify({
-                slashCommand: {
-                  info: { name: 'compact', type: 'SLASH_COMMAND_TYPE_SYSTEM', icon: 'collapse_all' },
-                },
-              }),
-            },
-            type: 'contextScopeItemMention',
-            version: 1,
-          });
-          const text = TClass.importJSON({
-            detail: 0, format: 0, mode: 'normal', style: '', text: ' ' + COMPACT_ARGS, type: 'text', version: 1,
-          });
-          p.append(mention, text);
-          root.append(p);
-        });
-        await new Promise((r) => setTimeout(r, 60));
-        const fiberKey = Object.keys(editable).find((k) => k.startsWith('__reactFiber$'));
-        let curr = fiberKey ? editable[fiberKey] : null;
-        while (curr && (!curr.memoizedProps || typeof curr.memoizedProps.handleEnter !== 'function')) {
-          curr = curr.return;
-        }
-        if (curr && curr.memoizedProps && typeof curr.memoizedProps.handleEnter === 'function') {
-          const Evt = typeof KeyboardEvent === 'function' ? KeyboardEvent : function (t, o) { Object.assign(this, o, { type: t }); };
-          await curr.memoizedProps.handleEnter(new Evt('keydown', { key: 'Enter' }), ed);
-        } else {
-          const sendBtn = effBox.querySelector('[data-testid="send-button"]');
-          if (sendBtn && !sendBtn.disabled) sendBtn.click();
-        }
-      }
-      return {
-        resolveEffectiveView,
-        resolveEffectiveInputBox,
-        ensureContextWindowSelectorFlag,
-        ensureCustomizationsStoreLoaded,
-        getModelSelectorContextForView,
-        getCascadeContextForElement,
-        getSelectedModelKey,
-        applyContextWindowToEngine,
-        runCompactForInputBox,
-      };
-    }
-    module.exports = {
-      MAX_CASCADE_MAP_ENTRIES,
-      COMPACT_ARGS,
-      setBoundedMapRecord,
-      cleanupLegacyObjectPrototypeCwGetters,
-      registerCustomCwInPrototype,
-      createDesktopReactBridge,
-    };
-  },
-  "./host-bridge": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
-    'use strict';
-    /**
-     * Host Bridge Coordinator Facade.
-     *
-     * Composes three strictly bounded subsystems:
-     * - `protobuf-checkpoint-codec`: pure Protobuf / Connect-RPC wire transformation
-     * - `remote-runtime`: WeakMap-isolated `RemoteControlComponent` runtime lease & companion manifest parser
-     * - `desktop-react-bridge`: Electron workbench React Fiber / Redux / Lexical engine adapter
-     */
-    const { resolveHostAdapterConfig } = require('./host-adapter-config');
-    const {
-      UUID_RE,
-      CONVO_RPC_RE,
-      createTextCodec,
-      buildSendMessageCheckpointSuffix: buildSuffixWithEncoder,
-      extractCascadeIdFromBody: extractCidWithCodec,
-      injectCheckpointPayload,
-    } = require('./protobuf-checkpoint-codec');
-    const {
-      parseAutoinjectCompanionManifest,
-      acquireRemoteRuntimeLease,
-    } = require('./remote-runtime');
-    const {
-      COMPACT_ARGS,
-      setBoundedMapRecord,
-      registerCustomCwInPrototype,
-      createDesktopReactBridge,
-    } = require('./desktop-react-bridge');
-    function createHostBridge({ window, document, localStorage, fetchFn, cwStore, hostConfig }) {
-      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
-      const codec = createTextCodec(window);
-      const cleanupCallbacks = [];
-      const pendingSniffTimers = new Set();
-      let lastRcTrajectoryPollTs = 0;
-      let rcTrajectoryPollInFlight = false;
-      let lastDesktopTrajectorySyncTs = 0;
-      let desktopTrajectorySyncInFlight = false;
-      function getAccessibleRemoteIframeWin() {
-        try {
-          const iframe = document?.querySelector?.('ga-remote-control iframe');
-          if (!iframe) return null;
-          const cwin = iframe.contentWindow;
-          if (!cwin) return null;
-          void cwin.document;
-          iframe.__agyCrossOriginInaccessible = false;
-          return cwin;
-        } catch {
-          try {
-            const iframe = document?.querySelector?.('ga-remote-control iframe');
-            if (iframe) iframe.__agyCrossOriginInaccessible = true;
-          } catch {}
-          return null;
-        }
-      }
-      function getAccessibleRemoteIframeDoc() {
-        try {
-          const iframe = document?.querySelector?.('ga-remote-control iframe');
-          if (!iframe) return null;
-          const cdoc = iframe.contentDocument || iframe.contentWindow?.document;
-          if (cdoc) iframe.__agyCrossOriginInaccessible = false;
-          return cdoc || null;
-        } catch {
-          try {
-            const iframe = document?.querySelector?.('ga-remote-control iframe');
-            if (iframe) iframe.__agyCrossOriginInaccessible = true;
-          } catch {}
-          return null;
-        }
-      }
-      function buildSendMessageCheckpointSuffix(maxTokenLimit, contextWindow) {
-        return buildSuffixWithEncoder(maxTokenLimit, contextWindow, codec.encodeTextToBytes);
-      }
-      function extractCascadeIdFromBody(body, ignoreUuid) {
-        return extractCidWithCodec(body, ignoreUuid, codec);
-      }
-      function resolveEffectiveCascadeId(body, rcInst) {
-        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-        const fromBody = extractCascadeIdFromBody(body, ignoreUuid);
-        if (fromBody) return fromBody;
-        if (window?.__agySniffedCascadeId && window.__agySniffedCascadeId !== 'remote-session') {
-          return window.__agySniffedCascadeId;
-        }
-        const activeView = document?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
-        const domCid = activeView?.getAttribute?.('data-cascade-id');
-        if (domCid && domCid !== 'remote-session') return domCid;
-        return null;
-      }
-      function injectCheckpointLimitIntoSendRequest(path, body, rcInst) {
-        if (typeof path !== 'string' || !/\/SendUserCascadeMessage$/i.test(path) || !body || !cwStore) {
-          return body;
-        }
-        try {
-          const cid = resolveEffectiveCascadeId(body, rcInst);
-          const cw = cwStore.getSavedContextWindow(cid);
-          const limit = cwStore.getLimit(cw);
-          if (!cw || !limit || limit <= 0) return body;
-          return injectCheckpointPayload({
-            path,
-            body,
-            contextWindow: cw,
-            maxTokenLimit: limit,
-            codec,
-          });
-        } catch {
-          return body;
-        }
-      }
-      function sniffCascadeIdFromRpc(path, body, rcInst) {
-        if (typeof path !== 'string' || !CONVO_RPC_RE.test(path)) return;
-        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-        const cid = extractCascadeIdFromBody(body, ignoreUuid);
-        if (cid) {
-          const changed = window.__agySniffedCascadeId !== cid;
-          window.__agySniffedCascadeId = cid;
-          window.__agySniffedCascadeTs = Date.now();
-          if (/\/(SendUserCascadeMessage|StartCascade|StreamCascadeReactiveUpdates|StreamAgentStateUpdates)$/i.test(path)) {
-            lastRcTrajectoryPollTs = 0;
-            if (/\/(SendUserCascadeMessage|StartCascade)$/i.test(path)) {
-              const prevSteps = window?.__agyRcStepCountByCascade?.[cid] || 0;
-              setBoundedMapRecord(window, '__agyRcStepCountByCascade', cid, prevSteps + 1);
-            }
-            const t = setTimeout(() => {
-              pendingSniffTimers.delete(t);
-              lastRcTrajectoryPollTs = 0;
-              if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(cid);
-            }, 1200);
-            pendingSniffTimers.add(t);
-          }
-          if (changed && typeof window.__agyOnCascadeSniffed === 'function') {
-            window.__agyOnCascadeSniffed(cid);
-          }
-        }
-      }
-      if (window) {
-        window.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
-        window.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
-      }
-      const runtimeLease = acquireRemoteRuntimeLease({
-        window,
-        document,
-        hostConfig: resolvedHostConfig,
-        hooks: {
-          onIframeMessage(ev, rcInst) {
-            if (ev && ev.data && typeof ev.data.path === 'string') {
-              const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-              const m = ev.data.path.match(UUID_RE);
-              if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
-                window.__agySniffedCascadeId = m[0];
-                window.__agySniffedCascadeTs = Date.now();
-                if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
-              }
-            }
-          },
-          transformRpcRequest(path, body, rcInst) {
-            const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
-            const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-            sniffFn(path, body, rcInst);
-            return injectFn(path, body, rcInst);
-          },
-          transformPortRequest(msg, rcInst) {
-            const sniffFn = window?.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
-            const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-            sniffFn(msg.path, msg.body, rcInst);
-            if (/\/SendUserCascadeMessage$/i.test(msg.path) && msg.body) {
-              return { ...msg, body: injectFn(msg.path, msg.body, rcInst) };
-            }
-            return msg;
-          },
-          onUrlChanged(nextPath, rcInst) {
-            if (typeof nextPath === 'string' && nextPath) {
-              const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-              const m = nextPath.match(UUID_RE);
-              if (m && m[0] && m[0] !== ignoreUuid && window.__agySniffedCascadeId !== m[0]) {
-                window.__agySniffedCascadeId = m[0];
-                window.__agySniffedCascadeTs = Date.now();
-                if (typeof window.__agyOnCascadeSniffed === 'function') window.__agyOnCascadeSniffed(m[0]);
-              }
-            }
-          },
-        },
-      });
-      cleanupCallbacks.push(() => runtimeLease.release());
-      function ensureFetchHook(targetWin) {
-        try {
-          const w = targetWin || window;
-          if (!w || typeof w.fetch !== 'function') return;
-          w.__agyInjectCheckpointLimit = injectCheckpointLimitIntoSendRequest;
-          w.__agySniffCascadeFromRpc = sniffCascadeIdFromRpc;
-          if (w.fetch.__agyCwHookV2) return;
-          const prevFetch = w.__agyOrigFetch || w.fetch;
-          const isLegacyV1Hook = Boolean(prevFetch.__agyCwHooked && !prevFetch.__agyCwHookV2);
-          if (!isLegacyV1Hook && !w.__agyOrigFetch) {
-            w.__agyOrigFetch = prevFetch;
-          }
-          const wrappedFetch = function (input, init) {
-            let nextInput = input;
-            let nextInit = init;
-            try {
-              const url = typeof input === 'string'
-                ? input
-                : (input && typeof input.url === 'string'
-                  ? input.url
-                  : (input && typeof input.href === 'string' ? input.href : ''));
-              const sniffFn = w.__agySniffCascadeFromRpc || sniffCascadeIdFromRpc;
-              const injectFn = w.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-              if (url && CONVO_RPC_RE.test(url)) {
-                if (nextInit && nextInit.body) {
-                  sniffFn(url, nextInit.body, null);
-                  if (/\/SendUserCascadeMessage$/i.test(url)) {
-                    nextInit = { ...nextInit, body: injectFn(url, nextInit.body, null) };
-                    if (isLegacyV1Hook && typeof URL === 'function') {
-                      try {
-                        nextInput = new URL(url, w.location?.href || 'http://127.0.0.1');
-                      } catch {}
-                    }
-                  }
-                } else if (input && typeof input === 'object' && typeof input.arrayBuffer === 'function' && typeof input.clone === 'function' && /\/SendUserCascadeMessage$/i.test(url)) {
-                  return input.clone().arrayBuffer().then((ab) => {
-                    const rawBytes = new Uint8Array(ab);
-                    sniffFn(url, rawBytes, null);
-                    const injectedBody = injectFn(url, rawBytes, null);
-                    const ReqCtor = w.Request || (typeof Request === 'function' ? Request : null);
-                    if (ReqCtor) {
-                      return prevFetch.call(this, new ReqCtor(input, { body: injectedBody }), nextInit);
-                    }
-                    return prevFetch.call(this, nextInput, { ...(nextInit || {}), body: injectedBody });
-                  }).catch(() => prevFetch.call(this, nextInput, nextInit));
-                }
-              }
-            } catch {}
-            return prevFetch.call(this, nextInput, nextInit);
-          };
-          wrappedFetch.__agyCwHooked = true;
-          wrappedFetch.__agyCwHookV2 = true;
-          w.fetch = wrappedFetch;
-          cleanupCallbacks.push(() => {
-            try {
-              if (w.fetch === wrappedFetch && w.__agyOrigFetch) {
-                w.fetch = w.__agyOrigFetch;
-              }
-              delete w.__agyOrigFetch;
-              delete w.__agyInjectCheckpointLimit;
-              delete w.__agySniffCascadeFromRpc;
-            } catch {}
-          });
-        } catch {}
-      }
-      function hookLsClient(lsClient) {
-        if (!lsClient || typeof lsClient !== 'object') return lsClient;
-        if (lsClient.__agyCwHookV2) return lsClient;
-        try {
-          lsClient.__agyCwHooked = true;
-          lsClient.__agyCwHookV2 = true;
-          let origSend = null;
-          let wrappedSend = null;
-          if (typeof lsClient.sendUserCascadeMessage === 'function') {
-            origSend = lsClient.__agyOrigSendUserCascadeMessage || lsClient.sendUserCascadeMessage;
-            lsClient.__agyOrigSendUserCascadeMessage = origSend;
-            wrappedSend = function (req, ...rest) {
-              const injectFn = window?.__agyInjectCheckpointLimit || injectCheckpointLimitIntoSendRequest;
-              const nextReq = injectFn(resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'), req, null);
-              return origSend.call(this, nextReq, ...rest);
-            };
-            lsClient.sendUserCascadeMessage = wrappedSend;
-          }
-          cleanupCallbacks.push(() => {
-            try {
-              if (wrappedSend && lsClient.sendUserCascadeMessage === wrappedSend) {
-                lsClient.sendUserCascadeMessage = origSend;
-              }
-              delete lsClient.__agyOrigSendUserCascadeMessage;
-              delete lsClient.__agyCwHooked;
-              delete lsClient.__agyCwHookV2;
-            } catch {}
-          });
-        } catch {}
-        return lsClient;
-      }
-      function getRemoteControlInstance(onCascadeChange) {
-        if (typeof onCascadeChange === 'function' && window) {
-          window.__agyOnCascadeSniffed = onCascadeChange;
-        }
-        return runtimeLease.resolveInstance();
-      }
-      function createRcServiceAdapter(rcInst) {
-        async function callJson(rpcPath, reqObj) {
-          if (!rcInst || typeof rcInst.proxyCommand !== 'function') return null;
-          const payloadObj = /\/SendUserCascadeMessage$/i.test(rpcPath)
-            ? injectCheckpointLimitIntoSendRequest(rpcPath, reqObj || {}, rcInst)
-            : (reqObj || {});
-          const bytes = codec.encodeTextToBytes(JSON.stringify(payloadObj));
-          const res = await rcInst.proxyCommand(rpcPath, bytes);
-          if (!res || !res.payload) return null;
-          const text = codec.decodeBytesToText(res.payload);
-          return text ? JSON.parse(text) : null;
-        }
-        return {
-          isRemoteControlHost: true,
-          rcInst,
-          callJson,
-          async retrieveUserQuotaSummary(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('RetrieveUserQuotaSummary'), req || {});
-          },
-          async getCascadeTrajectoryGeneratorMetadata(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), req || {});
-          },
-          async getCascadeTrajectory(req) {
-            const metaRes = await callJson(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
-              cascadeId: req?.cascadeId,
-              generatorMetadataOffset: req?.generatorMetadataOffset || 0,
-            });
-            if (metaRes && Array.isArray(metaRes.generatorMetadata)) {
-              return { trajectory: { generatorMetadata: metaRes.generatorMetadata } };
-            }
-            return await callJson(resolvedHostConfig.buildRpcPath('GetCascadeTrajectory'), req || {});
-          },
-          async getAllCascadeTrajectories() {
-            return await callJson(resolvedHostConfig.buildRpcPath('GetAllCascadeTrajectories'), {});
-          },
-          async updateConversationAnnotations(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('UpdateConversationAnnotations'), req || {});
-          },
-          async sendUserCascadeMessage(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('SendUserCascadeMessage'), req || {});
-          },
-          async getCustomizationStates(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('GetCustomizationStates'), req || {});
-          },
-          async getAllSkills(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('GetAllSkills'), req || {});
-          },
-          async getAllPlugins(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('GetAllPlugins'), req || {});
-          },
-          async readFile(req) {
-            return await callJson(resolvedHostConfig.buildRpcPath('ReadFile'), req || {});
-          },
-        };
-      }
-      let desktopBridge = null;
-      function getRemoteRpcServiceForElement(el) {
-        if (window?.__agyCapturedLsClient && (typeof window.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof window.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-          return hookLsClient(window.__agyCapturedLsClient);
-        }
-        const cwin = getAccessibleRemoteIframeWin();
-        if (cwin?.__agyCapturedLsClient && (typeof cwin.__agyCapturedLsClient.retrieveUserQuotaSummary === 'function' || typeof cwin.__agyCapturedLsClient.getCascadeTrajectory === 'function')) {
-          return hookLsClient(cwin.__agyCapturedLsClient);
-        }
-        const cdoc = getAccessibleRemoteIframeDoc();
-        const effBox = desktopBridge ? desktopBridge.resolveEffectiveInputBox(desktopBridge.resolveEffectiveView(el)) : el;
-        const candidates = [
-          effBox,
-          el,
-          document?.querySelector?.('[data-testid="conversation-view"]'),
-          cdoc?.querySelector?.('[data-testid="conversation-view"]'),
-        ].filter(Boolean);
-        for (const startEl of candidates) {
-          const fk = Object.keys(startEl).find((k) => k.startsWith('__reactFiber$'));
-          let curr = fk ? startEl[fk] : null;
-          while (curr) {
-            const val = curr.memoizedProps?.value;
-            if (val && typeof val === 'object') {
-              if (typeof val.retrieveUserQuotaSummary === 'function' || typeof val.getCascadeTrajectory === 'function' || typeof val.getAllCascadeTrajectories === 'function' || typeof val.updateConversationAnnotations === 'function' || typeof val.getCustomizationStates === 'function' || typeof val.readFile === 'function') {
-                return hookLsClient(val);
-              }
-              const lsClient = val.core?.projectManagementService?.lsClient || val.projectManagementService?.lsClient || val.lsClient;
-              if (lsClient && (typeof lsClient.retrieveUserQuotaSummary === 'function' || typeof lsClient.getCascadeTrajectory === 'function' || typeof lsClient.getAllCascadeTrajectories === 'function' || typeof lsClient.updateConversationAnnotations === 'function' || typeof lsClient.getCustomizationStates === 'function' || typeof lsClient.readFile === 'function')) {
-                return hookLsClient(lsClient);
-              }
-            }
-            curr = curr.return;
-          }
-        }
-        const rcInst = getRemoteControlInstance();
-        if (rcInst && typeof rcInst.proxyCommand === 'function') {
-          return createRcServiceAdapter(rcInst);
-        }
-        try {
-          const parentWin = window?.parent !== window ? window?.parent : null;
-          const pRc = parentWin?.__agyRemoteControlInstance;
-          if (pRc && !pRc.destroyed && typeof pRc.proxyCommand === 'function') {
-            return createRcServiceAdapter(pRc);
-          }
-        } catch {}
-        return null;
-      }
-      desktopBridge = createDesktopReactBridge({
-        window,
-        document,
-        localStorage,
-        cwStore,
-        ensureFetchHook,
-        getAccessibleRemoteIframeWin,
-        getAccessibleRemoteIframeDoc,
-        getRemoteRpcServiceForElement,
-        cleanupCallbacks,
-      });
-      async function fetchHostInstalledPluginInfo(csrf, viewOrEl) {
-        const svc = getRemoteRpcServiceForElement(viewOrEl);
-        const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
-        const canCallHttp = Boolean(effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function');
-        async function callRpc(methodName, rpcPath, reqObj) {
-          if (svc && typeof svc[methodName] === 'function') {
-            try {
-              let arg = reqObj || {};
-              if (!svc.isRemoteControlHost) {
-                if (methodName === 'getCustomizationStates') arg = [];
-                else if (methodName === 'getAllSkills') arg = [];
-                else if (methodName === 'readFile' && arg && typeof arg === 'object' && typeof arg.uri === 'string') arg = arg.uri;
-              }
-              const r = await svc[methodName](arg);
-              if (r !== undefined && r !== null) return r;
-            } catch {}
-          }
-          if (svc && typeof svc.callJson === 'function') {
-            try {
-              const r = await svc.callJson(rpcPath, reqObj || {});
-              if (r) return r;
-            } catch {}
-          }
-          if (canCallHttp) {
-            try {
-              const res = await fetchFn(rpcPath, {
-                method: 'POST',
-                headers: resolvedHostConfig.buildRpcHeaders(effCsrf),
-                body: JSON.stringify(reqObj || {}),
-              });
-              if (res && res.ok !== false) return await res.json();
-            } catch {}
-          }
-          return null;
-        }
-        const [statesRes, pluginsRes] = await Promise.all([
-          callRpc('getCustomizationStates', resolvedHostConfig.buildRpcPath('GetCustomizationStates'), {}),
-          callRpc('getAllPlugins', resolvedHostConfig.buildRpcPath('GetAllPlugins'), {}),
-        ]);
-        const candidatePaths = [];
-        const pluginNames = new Set();
-        const statesList = Array.isArray(statesRes) ? statesRes : (Array.isArray(statesRes?.states) ? statesRes.states : []);
-        for (const s of statesList) {
-          const p = s?.path || s?.uri || '';
-          if (p) {
-            candidatePaths.push(p);
-            if (String(p).includes('ko-thought-translator')) pluginNames.add('ko-thought-translator');
-            if (String(p).includes('antigravity-mcp-manager')) pluginNames.add('antigravity-mcp-manager');
-            if (String(p).includes('antigravity-statusbar')) pluginNames.add('antigravity-statusbar');
-          }
-        }
-        const pluginsList = Array.isArray(pluginsRes) ? pluginsRes : (Array.isArray(pluginsRes?.plugins) ? pluginsRes.plugins : []);
-        for (const p of pluginsList) {
-          if (p?.name) pluginNames.add(String(p.name));
-          if (p?.path) candidatePaths.push(p.path);
-        }
-        if (!candidatePaths.length) {
-          const skillsRes = await callRpc('getAllSkills', resolvedHostConfig.buildRpcPath('GetAllSkills'), {});
-          const skillsList = Array.isArray(skillsRes) ? skillsRes : (Array.isArray(skillsRes?.skills) ? skillsRes.skills : []);
-          for (const sk of skillsList) {
-            const p = sk?.path || sk?.uri || '';
-            if (p) {
-              candidatePaths.push(p);
-              if (String(p).includes('ko-thought-translator')) pluginNames.add('ko-thought-translator');
-            }
-          }
-        }
-        if (!candidatePaths.length) {
-          const rcSelectedDir = svc?.rcInst?.localUserInfo?.selectedGeminiDir || window?.__agyRemoteControlInstance?.localUserInfo?.selectedGeminiDir || '';
-          if (rcSelectedDir) candidatePaths.push(rcSelectedDir);
-        }
-        let geminiDir = null;
-        for (const rawPath of candidatePaths) {
-          let decoded = String(rawPath).trim();
-          try {
-            decoded = decodeURIComponent(decoded);
-          } catch {}
-          const isFileUri = /^file:\/\//i.test(decoded);
-          let norm = decoded.replace(/^file:\/\//i, '').replace(/\\/g, '/');
-          if (isFileUri && /^\/[A-Za-z]:\//.test(norm)) {
-            norm = norm.slice(1);
-          } else if (isFileUri && !norm.startsWith('/') && !/^[A-Za-z]:\//.test(norm)) {
-            norm = '/' + norm;
-          }
-          const normWithSlash = norm.endsWith('/') ? norm : norm + '/';
-          const idx = normWithSlash.indexOf('/.gemini/');
-          if (idx !== -1) {
-            geminiDir = normWithSlash.slice(0, idx + '/.gemini'.length);
-            break;
-          }
-        }
-        let hostBundleText = '';
-        let readAttemptedAndFailed = false;
-        if (geminiDir) {
-          const fsPath = `${geminiDir}/antigravity/statusbar_autoinject.js`;
-          const uriPrefix = geminiDir.startsWith('/') ? 'file://' : 'file:///';
-          const uri = `${uriPrefix}${fsPath}`;
-          const rf = await callRpc('readFile', resolvedHostConfig.buildRpcPath('ReadFile'), {
-            uri,
-            path: fsPath,
-            filePath: fsPath,
-            absolutePath: fsPath,
-          });
-          const rfRaw = rf?.content !== undefined ? rf.content : (rf?.contents !== undefined ? rf.contents : rf?.data);
-          if (rf instanceof Uint8Array || ArrayBuffer.isView(rf) || rf instanceof ArrayBuffer) {
-            hostBundleText = codec.decodeBytesToText(rf);
-          } else if (typeof rf === 'string' && rf.length > 0) {
-            hostBundleText = rf;
-          } else if (typeof rf?.text === 'string' && rf.text.length > 0) {
-            hostBundleText = rf.text;
-          } else if (rfRaw instanceof Uint8Array || ArrayBuffer.isView(rfRaw) || rfRaw instanceof ArrayBuffer) {
-            hostBundleText = codec.decodeBytesToText(rfRaw);
-          } else if (typeof rfRaw === 'string' && rfRaw.length > 0) {
-            hostBundleText = codec.decodeBase64ToUtf8(rfRaw);
-          }
-          if (!hostBundleText) {
-            readAttemptedAndFailed = true;
-          }
-        }
-        const manifest = parseAutoinjectCompanionManifest(hostBundleText, pluginNames);
-        const resolved = Boolean(hostBundleText) || (!readAttemptedAndFailed && pluginNames.size > 0);
-        const infoObj = {
-          resolved,
-          geminiDir,
-          geminiRoot: geminiDir,
-          ...manifest,
-          hostBundleText,
-        };
-        if (resolved && window) {
-          window.__agyHostInstalledPlugins = infoObj;
-        }
-        return infoObj;
-      }
-      async function pushSessionCwToServer(cascadeId, csrf, viewOrEl) {
-        if (!cwStore || typeof cwStore.encodeRemoteAnnotationProfile !== 'function') return false;
-        let targetIds = [];
-        if (cascadeId && cascadeId !== 'remote-session') {
-          targetIds = [cascadeId];
-        } else if (!cascadeId) {
-          const activeView = viewOrEl || document?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
-          const activeCid = activeView?.getAttribute?.('data-cascade-id') || window?.__agySniffedCascadeId;
-          if (activeCid && activeCid !== 'remote-session') {
-            targetIds = [activeCid];
-          }
-        }
-        if (!targetIds.length) return false;
-        for (const cid of targetIds) {
-          const profileStr = cwStore.encodeRemoteAnnotationProfile(cid);
-          if (!profileStr) continue;
-          const reqPayload = {
-            cascadeIds: [cid],
-            annotations: { activeProfile: profileStr },
-            mergeAnnotations: true,
-          };
-          const svc = getRemoteRpcServiceForElement(viewOrEl);
-          if (svc && typeof svc.updateConversationAnnotations === 'function') {
-            try {
-              await svc.updateConversationAnnotations(reqPayload);
-              continue;
-            } catch {}
-          }
-          const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
-          if (effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function') {
-            try {
-              await fetchFn(resolvedHostConfig.buildRpcPath('UpdateConversationAnnotations'), {
-                method: 'POST',
-                headers: resolvedHostConfig.buildRpcHeaders(effCsrf),
-                body: JSON.stringify(reqPayload),
-              });
-            } catch {}
-          }
-        }
-        return true;
-      }
-      function pullAndBackfillTrajectorySummaries(summaries, csrf, viewOrEl, onRemoteUpdated) {
-        if (!summaries || typeof summaries !== 'object' || typeof cwStore?.syncFromRemoteAnnotations !== 'function') {
-          return false;
-        }
-        const { changed, unsyncedLocalIds } = cwStore.syncFromRemoteAnnotations(summaries);
-        if (Array.isArray(unsyncedLocalIds) && unsyncedLocalIds.length > 0) {
-          for (const cid of unsyncedLocalIds) {
-            pushSessionCwToServer(cid, csrf, viewOrEl).catch?.(() => {});
-          }
-        }
-        if (changed && typeof onRemoteUpdated === 'function') {
-          try { onRemoteUpdated(); } catch {}
-        }
-        return changed;
-      }
-      function syncDesktopAnnotations(csrf, viewOrEl, onRemoteUpdated, force = false) {
-        const nativeView = document?.querySelector?.('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
-        if (!nativeView && document?.querySelector?.('ga-remote-control')) return;
-        const now = Date.now();
-        if (desktopTrajectorySyncInFlight || (!force && now - lastDesktopTrajectorySyncTs < 4000)) return;
-        const svc = getRemoteRpcServiceForElement(viewOrEl);
-        const effCsrf = csrf || window?.__APP_CONFIG__?.csrfToken;
-        const canCallSvc = svc && typeof svc.getAllCascadeTrajectories === 'function';
-        const canCallHttp = effCsrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function';
-        if (!canCallSvc && !canCallHttp) return;
-        lastDesktopTrajectorySyncTs = now;
-        desktopTrajectorySyncInFlight = true;
-        const p = canCallSvc
-          ? svc.getAllCascadeTrajectories({})
-          : fetchFn(resolvedHostConfig.buildRpcPath('GetAllCascadeTrajectories'), {
-              method: 'POST',
-              headers: resolvedHostConfig.buildRpcHeaders(effCsrf),
-              body: '{}',
-            }).then((r) => (r && r.ok !== false ? r.json() : null));
-        Promise.resolve(p)
-          .then((all) => {
-            const summaries = all?.trajectorySummaries;
-            if (summaries) {
-              pullAndBackfillTrajectorySummaries(summaries, effCsrf, viewOrEl, onRemoteUpdated);
-            }
-          })
-          .catch(() => {})
-          .finally(() => {
-            desktopTrajectorySyncInFlight = false;
-          });
-      }
-      function ensureRemoteHostView(onCascadeChange) {
-        if (!document) return null;
-        const nativeView = document.querySelector('[data-testid="conversation-view"]:not(.agy-rc-host-view)');
-        if (nativeView) return null;
-        const rcEl = document.querySelector('ga-remote-control');
-        if (!rcEl) return null;
-        const rcInst = getRemoteControlInstance(onCascadeChange);
-        const appContainer = rcEl.querySelector('.app-container') || rcEl;
-        let hostView = appContainer.querySelector('.agy-rc-host-view');
-        if (!hostView) {
-          hostView = document.createElement('div');
-          hostView.className = 'agy-rc-host-view';
-          hostView.setAttribute('data-testid', 'conversation-view');
-          const hostBox = document.createElement('div');
-          hostBox.className = 'agy-rc-host-box';
-          hostBox.setAttribute('data-testid', 'agent-input-box');
-          hostView.appendChild(hostBox);
-          appContainer.appendChild(hostView);
-        }
-        const ignoreUuid = typeof rcInst?.selectedInstanceUuid === 'function' ? rcInst.selectedInstanceUuid() : '';
-        const cdoc = getAccessibleRemoteIframeDoc();
-        const innerView = cdoc?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]');
-        const rawInnerCid = innerView?.getAttribute?.('data-cascade-id');
-        const innerCid = (rawInnerCid && UUID_RE.test(rawInnerCid) && rawInnerCid !== ignoreUuid) ? rawInnerCid : '';
-        const childPath = rcInst?.lastSyncedChildPath || window?.location?.search || '';
-        const pathMatch = String(childPath).match(UUID_RE);
-        const pathCid = (pathMatch && pathMatch[0] && pathMatch[0] !== ignoreUuid) ? pathMatch[0] : '';
-        let activeCid = '';
-        if (innerCid) {
-          activeCid = innerCid;
-          if (window.__agySniffedCascadeId !== innerCid) {
-            window.__agySniffedCascadeId = innerCid;
-            window.__agySniffedCascadeTs = Date.now();
-          }
-        } else if (pathCid && pathCid !== hostView.__agyLastChildPathCid) {
-          hostView.__agyLastChildPathCid = pathCid;
-          activeCid = pathCid;
-          window.__agySniffedCascadeId = pathCid;
-          window.__agySniffedCascadeTs = Date.now();
-        } else {
-          activeCid = window.__agySniffedCascadeId || pathCid || '';
-        }
-        const currentAttr = hostView.getAttribute('data-cascade-id');
-        const nextAttr = activeCid || currentAttr || 'remote-session';
-        if (currentAttr !== nextAttr) {
-          if (currentAttr === 'remote-session' && nextAttr !== 'remote-session') {
-            cwStore?.migrateSessionOverride?.('remote-session', nextAttr);
-          }
-          hostView.setAttribute('data-cascade-id', nextAttr);
-        }
-        const now = Date.now();
-        if (rcInst && !rcTrajectoryPollInFlight && (now - lastRcTrajectoryPollTs >= 2500 || nextAttr === 'remote-session')) {
-          lastRcTrajectoryPollTs = now;
-          rcTrajectoryPollInFlight = true;
-          createRcServiceAdapter(rcInst).getAllCascadeTrajectories().then((all) => {
-            const summaries = all?.trajectorySummaries || {};
-            const entries = Object.entries(summaries);
-            if (!entries.length) return;
-            const cwChanged = pullAndBackfillTrajectorySummaries(summaries, null, hostView);
-            for (const [id, sum] of entries) {
-              if (typeof sum?.stepCount === 'number') {
-                setBoundedMapRecord(window, '__agyRcStepCountByCascade', id, sum.stepCount);
-              }
-            }
-            entries.sort((a, b) => {
-              const vA = Date.parse(a[1]?.annotations?.lastUserViewTime || 0) || 0;
-              const vB = Date.parse(b[1]?.annotations?.lastUserViewTime || 0) || 0;
-              if (vA !== vB) return vB - vA;
-              const mA = Date.parse(a[1]?.lastModifiedTime || 0) || 0;
-              const mB = Date.parse(b[1]?.lastModifiedTime || 0) || 0;
-              return mB - mA;
-            });
-            const [latestId] = entries[0];
-            if (latestId) {
-              const prevId = hostView.getAttribute('data-cascade-id');
-              const hasValidActive = Boolean(
-                window.__agySniffedCascadeId &&
-                window.__agySniffedCascadeId !== 'remote-session' &&
-                summaries[window.__agySniffedCascadeId]
-              );
-              if (!hasValidActive && (!prevId || prevId === 'remote-session' || !summaries[prevId])) {
-                window.__agySniffedCascadeId = latestId;
-              }
-              const resolvedId = window.__agySniffedCascadeId || (prevId && prevId !== 'remote-session' ? prevId : latestId);
-              if (prevId === 'remote-session' && resolvedId && resolvedId !== 'remote-session') {
-                cwStore?.migrateSessionOverride?.('remote-session', resolvedId);
-              }
-              const nextSteps = window.__agyRcStepCountByCascade[resolvedId] ?? -1;
-              const prevObservedSteps = hostView.__agyObservedStepCount;
-              hostView.__agyObservedStepCount = nextSteps;
-              if (prevId !== resolvedId || prevObservedSteps !== nextSteps || cwChanged) {
-                hostView.setAttribute('data-cascade-id', resolvedId);
-                if (typeof onCascadeChange === 'function') onCascadeChange(resolvedId);
-              }
-            }
-          }).catch(() => {}).finally(() => {
-            rcTrajectoryPollInFlight = false;
-          });
-        }
-        return hostView;
-      }
-      function getAgentStateProviderForInputBox(inputBox) {
-        const cc = desktopBridge.getCascadeContextForElement(inputBox);
-        if (cc?.state?.agentStateProvider) return cc.state.agentStateProvider;
-        const cid = window?.__agySniffedCascadeId || document?.querySelector?.('.agy-rc-host-view')?.getAttribute?.('data-cascade-id');
-        const steps = cid && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cid] : undefined;
-        const knownGenLen = cid && window?.__agyRcGenLenByCascade ? window.__agyRcGenLenByCascade[cid] : undefined;
-        if ((typeof steps === 'number' && steps >= 0) || (typeof knownGenLen === 'number' && knownGenLen >= 0)) {
-          return {
-            getState: () => ({
-              conversationId: cid,
-              trajectorySlice: {
-                totalGeneratorMetadataLength: -1,
-                totalStepsLength: typeof steps === 'number' ? steps : -1,
-              },
-            }),
-          };
-        }
-        return null;
-      }
-      return {
-        ensureContextWindowSelectorFlag: desktopBridge.ensureContextWindowSelectorFlag,
-        ensureCustomizationsStoreLoaded: desktopBridge.ensureCustomizationsStoreLoaded,
-        ensureRemoteHostView,
-        getRemoteControlInstance,
-        getModelSelectorContextForView: desktopBridge.getModelSelectorContextForView,
-        getCascadeContextForElement: desktopBridge.getCascadeContextForElement,
-        getAgentStateProviderForInputBox,
-        getRemoteRpcServiceForElement,
-        getSelectedModelKey: desktopBridge.getSelectedModelKey,
-        applyContextWindowToEngine: desktopBridge.applyContextWindowToEngine,
-        runCompactForInputBox: desktopBridge.runCompactForInputBox,
-        pushSessionCwToServer,
-        pullAndBackfillTrajectorySummaries,
-        syncDesktopAnnotations,
-        fetchHostInstalledPluginInfo,
-        injectCheckpointLimitIntoSendRequest,
-        buildSendMessageCheckpointSuffix,
-        dispose() {
-          for (const t of pendingSniffTimers) {
-            clearTimeout(t);
-          }
-          pendingSniffTimers.clear();
-          while (cleanupCallbacks.length > 0) {
-            const fn = cleanupCallbacks.pop();
-            try { fn(); } catch {}
-          }
-          try {
-            if (window) {
-              delete window.__agyInjectCheckpointLimit;
-              delete window.__agySniffCascadeFromRpc;
-              delete window.__agyOnCascadeSniffed;
-              delete window.__agyProbingRcInstance;
-              delete window.__agyLastAppliedContextWindow;
-              delete window.__agyLastAppliedContextWindowByCascade;
-              delete window.__agySniffedCascadeId;
-              delete window.__agySniffedCascadeTs;
-              delete window.__agyRcStepCountByCascade;
-              delete window.__agyRcGenLenByCascade;
-              if (!window.agyMcpManager) {
-                delete window.__agyCapturedLsClient;
-              }
-            }
-            if (document) {
-              delete document.__agyCachedCustomizationsStore;
-              delete document.__agyLastCustomizationsDfsTs;
-            }
-          } catch {}
-        },
-      };
-    }
-    module.exports = {
-      COMPACT_ARGS,
-      registerCustomCwInPrototype,
-      createHostBridge,
-    };
-  },
-  "./adapter-registry": function(module, exports, __require) {
-    const require = (spec) => __require(".", spec);
-    'use strict';
+    const VALID_ADAPTER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+    const ALLOWED_ADAPTER_TAGS = new Set(['span', 'div', 'button']);
     function normalizeAdapter(adapter) {
       if (!adapter || typeof adapter !== 'object') {
         throw new TypeError('StatusBarAdapter must be an object');
       }
       const id = typeof adapter.id === 'string' ? adapter.id.trim() : '';
-      if (!id) {
-        throw new TypeError('StatusBarAdapter requires a non-empty string id');
+      if (!id || !VALID_ADAPTER_ID_RE.test(id)) {
+        throw new TypeError('StatusBarAdapter requires a valid [A-Za-z0-9_-]{1,64} id');
+      }
+      const rawTag = adapter.tagName === undefined ? 'span' : String(adapter.tagName).trim().toLowerCase();
+      if (!ALLOWED_ADAPTER_TAGS.has(rawTag)) {
+        throw new TypeError(`StatusBarAdapter "${id}" has disallowed tagName "${rawTag}"`);
       }
       const slot = adapter.slot === 'left' ? 'left' : 'right';
       const order = typeof adapter.order === 'number' && !isNaN(adapter.order) ? adapter.order : 100;
@@ -4722,12 +5230,13 @@
       return {
         ...adapter,
         id,
+        tagName: rawTag,
         slot,
         order,
         builtin: Boolean(adapter.builtin),
       };
     }
-    function createAdapterRegistry({ window, document, setHtml, onUpdate }) {
+    function createAdapterRegistry({ window, document, onUpdate }) {
       const adapterRegistry = new Map();
       if (window) {
         if (!window.__agyCustomStatusBarAdapters || !(window.__agyCustomStatusBarAdapters instanceof Map)) {
@@ -4739,11 +5248,10 @@
         if (!container || typeof container.querySelectorAll !== 'function') return;
         const menus = container.querySelectorAll('.agy-ctx-menu');
         for (const m of menus) {
-          if (typeof m.__agyCleanup === 'function') {
-            try { m.__agyCleanup(); } catch {}
-          } else {
-            try { m.remove(); } catch {}
-          }
+          runNodeCleanup(m);
+          try {
+            m.remove();
+          } catch {}
         }
       }
       function removeAdapterDomElements(id) {
@@ -4753,7 +5261,10 @@
           const nodes = bar.querySelectorAll(`[data-agy-adapter-id="${id}"]`);
           for (const node of nodes) {
             cleanupChildMenus(node);
-            try { node.remove(); } catch {}
+            runNodeCleanup(node);
+            try {
+              node.remove();
+            } catch {}
           }
         }
       }
@@ -4766,16 +5277,18 @@
         }
         list.sort((a, b) => {
           if (a.slot !== b.slot) return a.slot === 'left' ? -1 : 1;
-          return (a.order - b.order) || a.id.localeCompare(b.id);
+          return a.order - b.order || a.id.localeCompare(b.id);
         });
         return list;
       }
-      function registerStatusBarAdapter(rawAdapter) {
+      function registerAdapter(rawAdapter) {
         const adapter = normalizeAdapter(rawAdapter);
         if (adapterRegistry.has(adapter.id)) {
           const prev = adapterRegistry.get(adapter.id);
           if (prev && typeof prev.unmount === 'function') {
-            try { prev.unmount(); } catch {}
+            try {
+              prev.unmount();
+            } catch {}
           }
           removeAdapterDomElements(adapter.id);
         }
@@ -4784,16 +5297,18 @@
           customStore.set(adapter.id, adapter);
         }
         if (typeof onUpdate === 'function') onUpdate();
-        return () => unregisterStatusBarAdapter(adapter.id);
+        return () => unregisterAdapter(adapter.id);
       }
-      function unregisterStatusBarAdapter(id) {
+      function unregisterAdapter(id) {
         const key = typeof id === 'string' ? id.trim() : '';
         if (!key || !adapterRegistry.has(key)) return false;
         const adapter = adapterRegistry.get(key);
         adapterRegistry.delete(key);
         customStore.delete(key);
         if (adapter && typeof adapter.unmount === 'function') {
-          try { adapter.unmount(); } catch {}
+          try {
+            adapter.unmount();
+          } catch {}
         }
         removeAdapterDomElements(key);
         if (typeof onUpdate === 'function') onUpdate();
@@ -4812,16 +5327,21 @@
         }
       }
       function ensureBarStructure(barEl) {
-        let leftEl = barEl.querySelector('.agy-ctx-left');
-        let rightEl = barEl.querySelector('.agy-ctx-right');
+        let leftEl = barEl.querySelector?.('.agy-ctx-left') || null;
+        let rightEl = barEl.querySelector?.('.agy-ctx-right') || null;
         if (!leftEl || !rightEl) {
           cleanupChildMenus(barEl);
-          setHtml(barEl, `
-        <div class="agy-ctx-left"></div>
-        <div class="agy-ctx-right"></div>
-      `);
-          leftEl = barEl.querySelector('.agy-ctx-left');
-          rightEl = barEl.querySelector('.agy-ctx-right');
+          leftEl = h(document, 'div', { className: 'agy-ctx-left' });
+          rightEl = h(document, 'div', { className: 'agy-ctx-right' });
+          if (typeof barEl.replaceChildren === 'function') {
+            barEl.replaceChildren(leftEl, rightEl);
+          } else {
+            while (barEl.firstChild && typeof barEl.removeChild === 'function') {
+              barEl.removeChild(barEl.firstChild);
+            }
+            barEl.appendChild(leftEl);
+            barEl.appendChild(rightEl);
+          }
         }
         return { leftEl, rightEl };
       }
@@ -4835,7 +5355,10 @@
             const nodeId = node.getAttribute('data-agy-adapter-id');
             if (nodeId && !activeIds.has(nodeId)) {
               cleanupChildMenus(node);
-              try { node.remove(); } catch {}
+              runNodeCleanup(node);
+              try {
+                node.remove();
+              } catch {}
             }
           }
         }
@@ -4844,43 +5367,44 @@
           let itemEl = slotEl.querySelector ? slotEl.querySelector(`[data-agy-adapter-id="${adapter.id}"]`) : null;
           if (typeof adapter.render === 'function') {
             if (!itemEl) {
-              itemEl = document.createElement(adapter.tagName || 'span');
-              itemEl.setAttribute('data-agy-adapter-id', adapter.id);
-              if (adapter.className) itemEl.className = adapter.className;
+              itemEl = h(document, adapter.tagName || 'span', {
+                className: adapter.className || undefined,
+                'data-agy-adapter-id': adapter.id,
+              });
               slotEl.appendChild(itemEl);
             }
             adapter.render(itemEl, ctx);
           } else {
             if (!itemEl) {
-              itemEl = document.createElement('button');
-              itemEl.type = 'button';
-              itemEl.setAttribute('data-agy-adapter-id', adapter.id);
-              itemEl.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const latestCtx = itemEl.__agyAdapterCtx || ctx;
-                if (typeof adapter.onClick === 'function') {
-                  adapter.onClick(latestCtx, e);
-                }
-              };
+              itemEl = h(document, 'button', {
+                type: 'button',
+                'data-agy-adapter-id': adapter.id,
+                onclick(e) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const latestCtx = adapterCtxMap.get(itemEl) || ctx;
+                  if (typeof adapter.onClick === 'function') {
+                    adapter.onClick(latestCtx, e);
+                  }
+                },
+              });
               slotEl.appendChild(itemEl);
             }
-            itemEl.__agyAdapterCtx = ctx;
-            const resolvedClass = typeof adapter.className === 'function'
-              ? adapter.className(ctx)
-              : (adapter.className || 'agy-ctx-btn');
-            const finalClass = resolvedClass.includes('agy-ctx-btn') ? resolvedClass : `agy-ctx-btn ${resolvedClass}`.trim();
+            adapterCtxMap.set(itemEl, ctx);
+            const resolvedClass =
+              typeof adapter.className === 'function' ? adapter.className(ctx) : adapter.className || 'agy-ctx-btn';
+            const finalClass = resolvedClass.includes('agy-ctx-btn')
+              ? resolvedClass
+              : `agy-ctx-btn ${resolvedClass}`.trim();
             if (itemEl.className !== finalClass) {
               itemEl.className = finalClass;
             }
             const resolvedLabel = typeof adapter.label === 'function' ? adapter.label(ctx) : String(adapter.label ?? '');
-            if (itemEl.textContent !== resolvedLabel) {
-              itemEl.textContent = resolvedLabel;
-            }
+            setText(itemEl, resolvedLabel);
             const resolvedTitle = typeof adapter.title === 'function' ? adapter.title(ctx) : String(adapter.title ?? '');
             if (resolvedTitle) {
-              if (itemEl.getAttribute('title') !== resolvedTitle) {
-                itemEl.setAttribute('title', resolvedTitle);
+              if (itemEl.getAttribute?.('title') !== resolvedTitle) {
+                itemEl.setAttribute?.('title', resolvedTitle);
                 itemEl.title = resolvedTitle;
               }
             } else if (itemEl.getAttribute?.('title') !== null || itemEl.title) {
@@ -4890,7 +5414,7 @@
           }
           if (itemEl) orderedEls.push(itemEl);
         }
-        if (orderedEls.length > 1 && Array.isArray(slotEl.children)) {
+        if (orderedEls.length > 1 && slotEl.children) {
           let outOfOrder = false;
           for (let i = 0; i < orderedEls.length; i++) {
             if (slotEl.children[i] !== orderedEls[i]) {
@@ -4899,21 +5423,19 @@
             }
           }
           if (outOfOrder) {
-            for (const el of orderedEls) {
-              slotEl.appendChild(el);
-            }
-          }
-        } else if (orderedEls.length > 1 && typeof slotEl.insertBefore === 'function' && slotEl.children) {
-          let outOfOrder = false;
-          for (let i = 0; i < orderedEls.length; i++) {
-            if (slotEl.children[i] !== orderedEls[i]) {
-              outOfOrder = true;
-              break;
-            }
-          }
-          if (outOfOrder) {
-            for (const el of orderedEls) {
-              slotEl.appendChild(el);
+            if (typeof slotEl.insertBefore === 'function') {
+              let anchor = slotEl.firstChild || null;
+              for (const el of orderedEls) {
+                if (el !== anchor) {
+                  slotEl.insertBefore(el, anchor);
+                } else {
+                  anchor = el.nextSibling || null;
+                }
+              }
+            } else {
+              for (const el of orderedEls) {
+                slotEl.appendChild(el);
+              }
             }
           }
         }
@@ -4926,106 +5448,155 @@
           builtin: Boolean(a.builtin),
         }));
       }
+      function clearAllMenus(targetDoc = document) {
+        cleanupChildMenus(targetDoc || document);
+      }
       return {
-        registerAdapter: registerStatusBarAdapter,
-        unregisterAdapter: unregisterStatusBarAdapter,
+        registerAdapter,
+        unregisterAdapter,
         registerBuiltinAdapters,
         getAdapters,
         getSortedAdapters,
         ensureBarStructure,
         renderSlotAdapters,
+        clearAllMenus,
+        registerNodeCleanup,
+        runNodeCleanup,
       };
     }
     module.exports = {
       normalizeAdapter,
       createAdapterRegistry,
+      registerNodeCleanup,
+      runNodeCleanup,
     };
   },
-  "./adapters/core-metrics": function(module, exports, __require) {
-    const require = (spec) => __require("./adapters", spec);
+  "./ui/views/compact-button": function(module, exports, __require) {
+    const require = (spec) => __require("./ui/views", spec);
     'use strict';
-    const { PRESET_CONTEXT_WINDOWS } = require('../context-window-policy');
-    const { fmtK, escHtml } = require('../dom-styles');
+    /**
+     * Compact Action Button Builtin Adapter.
+     * Uses pure UI localization (`i18n`) without direct driver imports.
+     */
+    const { DEFAULT_LOCALE, createTranslator } = require('../../domain/i18n');
+    function createCompactButtonAdapter({ runCompactForInputBox, translator }) {
+      const tr = translator || createTranslator(DEFAULT_LOCALE);
+      return {
+        id: 'compact',
+        slot: 'right',
+        order: 10,
+        builtin: true,
+        className: 'agy-ctx-btn agy-ctx-btn-compact',
+        label: () => tr.t('compact.label'),
+        title: () => tr.t('compact.title'),
+        onClick({ inputBox }) {
+          runCompactForInputBox(inputBox);
+        },
+      };
+    }
+    module.exports = {
+      createCompactButtonAdapter,
+    };
+  },
+  "./ui/views/metrics-view": function(module, exports, __require) {
+    const require = (spec) => __require("./ui/views", spec);
+    'use strict';
+    /**
+     * Core Metrics & Context Window Selector View (`core-metrics` builtin adapter).
+     * Pure DOM node composition via `dom-builder` (zero HTML strings) + `WeakMap` state + `i18n` translator.
+     */
+    const { PRESET_CONTEXT_WINDOWS } = require('../../domain/context-window-policy');
+    const { fmtK } = require('../../domain/metrics-calculator');
+    const { DEFAULT_LOCALE, createTranslator } = require('../../domain/i18n');
+    const { h, setText, clearChildren } = require('../dom-builder');
+    const { registerNodeCleanup, runNodeCleanup } = require('../adapter-registry');
+    const containerStateMap = new WeakMap();
+    function getContainerState(containerEl) {
+      let state = containerStateMap.get(containerEl);
+      if (!state) {
+        state = {
+          lastCascadeId: '',
+          pendingCrossSessionNoTransition: false,
+          lastSignature: '',
+          lastQuotaKey: '',
+          refs: null,
+        };
+        containerStateMap.set(containerEl, state);
+      }
+      return state;
+    }
     function createCoreMetricsAdapter({
       document,
-      setHtml,
+      documentHost,
       cwStore,
+      translator,
       getConversationContextWindow,
       setConversationContextWindow,
       cycleConversationContextWindow,
+      saveDefaultContextWindow,
       updateAll,
     }) {
+      const tr = translator || createTranslator(DEFAULT_LOCALE);
+      function closeExistingMenu(menu) {
+        if (!menu) return;
+        runNodeCleanup(menu);
+        try {
+          menu.remove();
+        } catch {}
+      }
       function showContextMenu(barEl, view, cascadeId, limitBtn) {
-        const existing = barEl.querySelector('.agy-ctx-menu');
+        const existing = barEl.querySelector?.('.agy-ctx-menu');
         if (existing) {
-          if (typeof existing.__agyCleanup === 'function') {
-            existing.__agyCleanup();
-          } else {
-            existing.remove();
-          }
+          closeExistingMenu(existing);
           return;
         }
         if (document && typeof document.querySelectorAll === 'function') {
           const openMenus = document.querySelectorAll('.agy-ctx-menu');
           for (const m of openMenus) {
             if (m.parentNode === barEl) continue;
-            if (typeof m.__agyCleanup === 'function') {
-              try { m.__agyCleanup(); } catch {}
-            } else {
-              try { m.remove(); } catch {}
-            }
+            closeExistingMenu(m);
           }
         }
         const resolveCurrentCascadeId = () => view?.getAttribute?.('data-cascade-id') || cascadeId;
         const currentCw = getConversationContextWindow(view, resolveCurrentCascadeId());
         const currentKNum = parseInt(currentCw, 10) || 512;
-        const menu = document.createElement('div');
-        menu.className = 'agy-ctx-menu';
-        menu.setAttribute?.('data-agy-no-translate', 'true');
-        menu.setAttribute?.('translate', 'no');
-        if (typeof menu.addEventListener === 'function') {
-          for (const evtName of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click', 'dblclick', 'keydown', 'keyup', 'keypress', 'contextmenu']) {
-            menu.addEventListener(evtName, (ev) => ev.stopPropagation());
-          }
-        }
         const activeHdrCid = resolveCurrentCascadeId();
-        const sessionLabel = activeHdrCid && activeHdrCid !== 'remote-session' ? activeHdrCid.slice(0, 8) : '현재 세션';
-        const hdr = document.createElement('div');
-        hdr.className = 'agy-ctx-menu-hdr';
-        setHtml(hdr, `
-      <span>세션 컨텍스트 한도</span>
-      <span style="opacity:0.75">${escHtml(sessionLabel)}</span>
-    `);
-        menu.appendChild(hdr);
-        const customRow = document.createElement('div');
-        customRow.className = 'agy-ctx-custom-row';
-        setHtml(customRow, `
-      <input type="text" inputmode="numeric" pattern="[0-9]*" class="agy-ctx-custom-input" value="${escHtml(currentKNum)}" placeholder="32~980" title="32 ~ 980 사이 숫자 입력 (예: 400 입력 시 400K 적용)" />
-      <span class="agy-ctx-custom-unit">K</span>
-      <button type="button" class="agy-ctx-custom-apply">적용</button>
-    `);
-        menu.appendChild(customRow);
+        const sessionLabel =
+          activeHdrCid && activeHdrCid !== 'remote-session' ? activeHdrCid.slice(0, 8) : tr.t('metrics.currentSession');
+        const winObj = document?.defaultView || null;
+        const nativeSetTimeout = winObj && typeof winObj.setTimeout === 'function' ? winObj.setTimeout.bind(winObj) : setTimeout;
+        const nativeClearTimeout =
+          winObj && typeof winObj.clearTimeout === 'function' ? winObj.clearTimeout.bind(winObj) : clearTimeout;
         let iframeDoc = null;
         try {
-          iframeDoc = document?.querySelector?.('ga-remote-control iframe')?.contentDocument || null;
+          iframeDoc = documentHost?.getIframeDocument?.() || null;
         } catch {}
-        const winObj = document?.defaultView || null;
         let attachTimer = null;
+        let menu = null;
+        const outsideHandler = (e) => {
+          if (!menu) return;
+          if (!menu.contains || (!menu.contains(e.target) && e.target !== limitBtn)) {
+            closeMenu();
+          }
+        };
         const closeMenu = () => {
           if (attachTimer !== null) {
-            clearTimeout(attachTimer);
+            nativeClearTimeout(attachTimer);
             attachTimer = null;
           }
-          menu.remove();
+          if (menu) {
+            menu.remove();
+          }
           for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
             document?.removeEventListener?.(evt, outsideHandler, true);
-            try { iframeDoc?.removeEventListener?.(evt, outsideHandler, true); } catch {}
+            try {
+              iframeDoc?.removeEventListener?.(evt, outsideHandler, true);
+            } catch {}
           }
-          try { winObj?.removeEventListener?.('blur', closeMenu); } catch {}
+          try {
+            winObj?.removeEventListener?.('blur', closeMenu);
+          } catch {}
         };
-        menu.__agyCleanup = closeMenu;
-        const inputEl = customRow.querySelector('.agy-ctx-custom-input');
-        const applyBtn = customRow.querySelector('.agy-ctx-custom-apply');
         const applyCustomInput = () => {
           if (!inputEl) return;
           const norm = cwStore.normalize(inputEl.value);
@@ -5037,15 +5608,15 @@
           closeMenu();
           updateAll();
         };
-        if (applyBtn) {
-          applyBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            applyCustomInput();
-          };
-        }
-        if (inputEl) {
-          inputEl.onkeydown = (e) => {
+        const inputEl = h(document, 'input', {
+          type: 'text',
+          inputmode: 'numeric',
+          pattern: '[0-9kKmM.]*',
+          className: 'agy-ctx-custom-input',
+          value: String(currentKNum),
+          placeholder: tr.t('menu.customPlaceholder'),
+          title: tr.t('menu.customHint'),
+          onkeydown(e) {
             e.stopPropagation();
             if (e.key === 'Enter') {
               e.preventDefault();
@@ -5054,50 +5625,173 @@
               e.preventDefault();
               closeMenu();
             }
-          };
-        }
+          },
+        });
+        const applyBtn = h(
+          document,
+          'button',
+          {
+            type: 'button',
+            className: 'agy-ctx-custom-apply',
+            onclick(e) {
+              e.preventDefault();
+              e.stopPropagation();
+              applyCustomInput();
+            },
+          },
+          tr.t('menu.apply')
+        );
         const optionsList = [...PRESET_CONTEXT_WINDOWS];
         if (currentCw && !optionsList.includes(currentCw)) {
           optionsList.unshift(currentCw);
         }
-        for (const cw of optionsList) {
-          const item = document.createElement('div');
-          item.className = 'agy-ctx-menu-item' + (cw === currentCw ? ' active' : '');
-          item.setAttribute('data-cw-option', cw);
-          setHtml(item, `
-        <span>${cw === currentCw ? '✓ ' : '  '}${escHtml(cw)}</span>
-        <span class="agy-ctx-menu-hint">${escHtml(cwStore.getQuotaHint(cw))}</span>
-      `);
-          item.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setConversationContextWindow(view, resolveCurrentCascadeId(), cw);
-            closeMenu();
-            updateAll();
-          };
-          menu.appendChild(item);
-        }
-        const outsideHandler = (e) => {
-          if (!menu.contains || (!menu.contains(e.target) && e.target !== limitBtn)) {
-            closeMenu();
+        const optionNodes = optionsList.map((cw) =>
+          h(
+            document,
+            'div',
+            {
+              className: `agy-ctx-menu-item${cw === currentCw ? ' active' : ''}`,
+              'data-cw-option': cw,
+              onclick(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                setConversationContextWindow(view, resolveCurrentCascadeId(), cw);
+                closeMenu();
+                updateAll();
+              },
+            },
+            h(document, 'span', null, `${cw === currentCw ? '✓ ' : '  '}${cw}`),
+            h(document, 'span', { className: 'agy-ctx-menu-hint' }, cwStore.getQuotaHint(cw))
+          )
+        );
+        const defaultCw = typeof cwStore.getDefaultCw === 'function' ? cwStore.getDefaultCw() : '512K';
+        const saveDefaultNode =
+          typeof saveDefaultContextWindow === 'function' && currentCw !== defaultCw
+            ? h(
+                document,
+                'div',
+                {
+                  className: 'agy-ctx-menu-item agy-ctx-menu-default',
+                  'data-cw-save-default': currentCw,
+                  onclick(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    saveDefaultContextWindow(currentCw);
+                    closeMenu();
+                    updateAll();
+                  },
+                },
+                h(document, 'span', null, tr.t('menu.saveAsDefault', { cw: currentCw, defCw: defaultCw }))
+              )
+            : null;
+        menu = h(
+          document,
+          'div',
+          {
+            className: 'agy-ctx-menu',
+            'data-agy-no-translate': 'true',
+            translate: 'no',
+          },
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-menu-hdr' },
+            h(document, 'span', null, tr.t('menu.headerLeft')),
+            h(document, 'span', { style: { opacity: '0.75' } }, sessionLabel)
+          ),
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-custom-row' },
+            inputEl,
+            h(document, 'span', { className: 'agy-ctx-custom-unit' }, 'K'),
+            applyBtn
+          ),
+          h(document, 'div', { className: 'agy-ctx-custom-hint' }, tr.t('menu.customHint')),
+          ...optionNodes,
+          saveDefaultNode
+        );
+        if (typeof menu.addEventListener === 'function') {
+          for (const evtName of [
+            'mousedown',
+            'mouseup',
+            'pointerdown',
+            'pointerup',
+            'touchstart',
+            'touchend',
+            'click',
+            'dblclick',
+            'keydown',
+            'keyup',
+            'keypress',
+            'contextmenu',
+          ]) {
+            menu.addEventListener(evtName, (ev) => ev.stopPropagation());
           }
-        };
-        attachTimer = setTimeout(() => {
+        }
+        registerNodeCleanup(menu, closeMenu);
+        attachTimer = nativeSetTimeout(() => {
           attachTimer = null;
           if (!menu.isConnected && menu.parentNode !== barEl) return;
           for (const evt of ['mousedown', 'pointerdown', 'touchstart']) {
             document?.addEventListener?.(evt, outsideHandler, true);
-            try { iframeDoc?.addEventListener?.(evt, outsideHandler, true); } catch {}
+            try {
+              iframeDoc?.addEventListener?.(evt, outsideHandler, true);
+            } catch {}
           }
-          try { winObj?.addEventListener?.('blur', closeMenu); } catch {}
-          const isCoarseOrNarrow = typeof document?.defaultView?.matchMedia === 'function'
-            && document.defaultView.matchMedia('(max-width: 640px), (pointer: coarse)').matches;
-          if (!isCoarseOrNarrow && inputEl && inputEl.isConnected && typeof inputEl.focus === 'function') {
+          try {
+            winObj?.addEventListener?.('blur', closeMenu);
+          } catch {}
+          const isCoarseOrNarrow =
+            typeof winObj?.matchMedia === 'function' && winObj.matchMedia('(max-width: 640px), (pointer: coarse)').matches;
+          if (!isCoarseOrNarrow && inputEl.isConnected && typeof inputEl.focus === 'function') {
             inputEl.focus();
             if (typeof inputEl.select === 'function') inputEl.select();
           }
         }, 10);
         barEl.appendChild(menu);
+      }
+      function renderQuotaSlot(quotaSlotEl, quota, localeKey) {
+        clearChildren(quotaSlotEl);
+        if (!quota) return;
+        const parts = [];
+        if (quota.pct5h !== null && quota.pct5h !== undefined) {
+          parts.push(
+            h(
+              document,
+              'span',
+              null,
+              '5h ',
+              h(document, 'strong', { className: 'agy-ctx-quota' }, `${quota.pct5h}%`),
+              h(document, 'span', { className: 'agy-ctx-quota-left' }, ` ${tr.t('metrics.leftLabel')}`),
+              quota.rst5h ? ` ${quota.rst5h}` : null
+            )
+          );
+        }
+        if (quota.pct7d !== null && quota.pct7d !== undefined) {
+          parts.push(
+            h(
+              document,
+              'span',
+              null,
+              '7d ',
+              h(document, 'strong', { className: 'agy-ctx-quota' }, `${quota.pct7d}%`),
+              h(document, 'span', { className: 'agy-ctx-quota-left' }, ` ${tr.t('metrics.leftLabel')}`)
+            )
+          );
+        }
+        if (!parts.length) return;
+        const groupChildren = [];
+        parts.forEach((part, idx) => {
+          if (idx > 0) {
+            groupChildren.push(h(document, 'span', { className: 'agy-ctx-sep' }, ' · '));
+          }
+          groupChildren.push(part);
+        });
+        quotaSlotEl.appendChild(h(document, 'span', { className: 'agy-ctx-sep agy-ctx-sep-pipe' }, '|'));
+        quotaSlotEl.appendChild(
+          h(document, 'span', { className: 'agy-ctx-group agy-ctx-group-quota', 'data-locale': localeKey }, ...groupChildren)
+        );
       }
       return {
         id: 'core-metrics',
@@ -5110,6 +5804,8 @@
           const { barEl, view, cascadeId, stats, quota } = ctx;
           containerEl.setAttribute?.('data-agy-no-translate', 'true');
           containerEl.setAttribute?.('translate', 'no');
+          const state = getContainerState(containerEl);
+          const localeKey = tr.getLocale();
           const currentCw = ctx.currentCw || getConversationContextWindow(view, cascadeId);
           const maxLimit = cwStore.getLimit(currentCw);
           const used = stats ? stats.used : 0;
@@ -5118,26 +5814,19 @@
           const cachePct = stats ? stats.cachePct : 0;
           const colorClass = pct >= 85 ? 'agy-ctx-crit' : pct >= 65 ? 'agy-ctx-warn' : 'agy-ctx-ok';
           const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
-          const limitModClass = maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : (maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '');
-          const titleSessionLabel = cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : '현재';
-          const limitTitle = `이 세션(${titleSessionLabel})의 컨텍스트 한도: ${currentCw} (${cwStore.getQuotaHint(currentCw)})\n클릭 시 직접 입력 / 프리셋 선택 메뉴 열기 (세션별 독립 적용)\nShift+클릭 시 256K → 512K → 900K 빠른 순환`;
-          let quotaHtml = '';
-          if (quota) {
-            const qParts = [];
-            if (quota.pct5h !== null && quota.pct5h !== undefined) {
-              qParts.push(`5h <strong class="agy-ctx-quota">${escHtml(quota.pct5h)}%</strong><span class="agy-ctx-quota-left"> left</span>${quota.rst5h ? ' ' + escHtml(quota.rst5h) : ''}`);
-            }
-            if (quota.pct7d !== null && quota.pct7d !== undefined) {
-              qParts.push(`7d <strong class="agy-ctx-quota">${escHtml(quota.pct7d)}%</strong><span class="agy-ctx-quota-left"> left</span>`);
-            }
-            if (qParts.length) {
-              quotaHtml = `<span class="agy-ctx-sep agy-ctx-sep-pipe">|</span><span class="agy-ctx-group agy-ctx-group-quota">${qParts.join(' <span class="agy-ctx-sep">·</span> ')}</span>`;
-            }
-          }
-          const sessionChanged = Boolean(containerEl.__lastCascadeId && containerEl.__lastCascadeId !== cascadeId);
-          containerEl.__lastCascadeId = cascadeId;
+          const limitModClass =
+            maxLimit >= 750000 ? 'agy-ctx-btn-limit-900' : maxLimit > 256000 ? 'agy-ctx-btn-limit-512' : '';
+          const titleSessionLabel =
+            cascadeId && cascadeId !== 'remote-session' ? cascadeId.slice(0, 8) : tr.t('metrics.currentSession');
+          const limitTitle = tr.t('metrics.limitTitle', {
+            session: titleSessionLabel,
+            cw: currentCw,
+            hint: cwStore.getQuotaHint(currentCw),
+          });
+          const sessionChanged = Boolean(state.lastCascadeId && state.lastCascadeId !== cascadeId);
+          state.lastCascadeId = cascadeId;
           if (ctx.deferUncachedMetrics) {
-            const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
+            const existingLimitBtn = state.refs?.limitBtn || containerEl.querySelector?.('.agy-ctx-btn-limit');
             if (existingLimitBtn) {
               const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
               if (existingLimitBtn.className !== nextLimitClass) existingLimitBtn.className = nextLimitClass;
@@ -5145,90 +5834,124 @@
                 existingLimitBtn.setAttribute?.('title', limitTitle);
                 existingLimitBtn.title = limitTitle;
               }
-              const nextLimitText = `[ ${currentCw.toLowerCase()} ▾ ]`;
-              if (existingLimitBtn.textContent !== nextLimitText) existingLimitBtn.textContent = nextLimitText;
-              containerEl.__pendingCrossSessionNoTransition = true;
-              containerEl.__lastHtml = null;
+              setText(existingLimitBtn, `[ ${currentCw.toLowerCase()} ▾ ]`);
+              state.pendingCrossSessionNoTransition = true;
+              state.lastSignature = '';
               return;
             }
-            if (containerEl.__lastHtml) {
-              containerEl.__pendingCrossSessionNoTransition = true;
-              containerEl.__lastHtml = null;
+            if (state.lastSignature) {
+              state.pendingCrossSessionNoTransition = true;
+              state.lastSignature = '';
               return;
             }
           }
-          const suppressBarTransition = sessionChanged || Boolean(containerEl.__pendingCrossSessionNoTransition);
-          containerEl.__pendingCrossSessionNoTransition = false;
-          const html = `
-        <span class="agy-ctx-group agy-ctx-group-ctx" data-agy-no-translate="true" translate="no">
-          <span class="agy-ctx-bar-wrap"><span class="agy-ctx-bar-fill" style="width:${pct}%;background:${barColor}${suppressBarTransition ? ';transition:none' : ''}"></span></span>
-          <span>ctx <strong class="agy-ctx-pct-val ${colorClass}">${pct}%</strong> <span class="agy-ctx-used-val">${usedStr}</span>/<button type="button" class="agy-ctx-btn agy-ctx-btn-limit ${limitModClass}" title="${escHtml(limitTitle)}">[ ${escHtml(currentCw.toLowerCase())} ▾ ]</button></span>
-          <span class="agy-ctx-sep">·</span>
-          <span>cache <strong class="agy-ctx-cache">${cachePct}%</strong></span>
-        </span>
-        <span class="agy-ctx-quota-slot" data-agy-no-translate="true" translate="no">${quotaHtml}</span>
-      `;
-          if (containerEl.__lastHtml !== html || suppressBarTransition) {
-            containerEl.__lastHtml = html;
-            const barFill = containerEl.querySelector?.('.agy-ctx-bar-fill');
-            const pctValEl = containerEl.querySelector?.('.agy-ctx-pct-val');
-            const usedValEl = containerEl.querySelector?.('.agy-ctx-used-val');
-            const existingLimitBtn = containerEl.querySelector?.('.agy-ctx-btn-limit');
-            const cacheEl = containerEl.querySelector?.('.agy-ctx-cache');
-            const quotaSlotEl = containerEl.querySelector?.('.agy-ctx-quota-slot');
-            if (barFill && pctValEl && usedValEl && existingLimitBtn && cacheEl && quotaSlotEl) {
-              if (barFill.style) {
-                barFill.style.transition = suppressBarTransition ? 'none' : '';
-                barFill.style.width = `${pct}%`;
-                barFill.style.background = barColor;
-              }
-              const nextPctClass = `agy-ctx-pct-val ${colorClass}`;
-              if (pctValEl.className !== nextPctClass) pctValEl.className = nextPctClass;
-              const nextPctText = `${pct}%`;
-              if (pctValEl.textContent !== nextPctText) pctValEl.textContent = nextPctText;
-              if (usedValEl.textContent !== usedStr) usedValEl.textContent = usedStr;
-              const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
-              if (existingLimitBtn.className !== nextLimitClass) existingLimitBtn.className = nextLimitClass;
-              if (existingLimitBtn.getAttribute?.('title') !== limitTitle) {
-                existingLimitBtn.setAttribute?.('title', limitTitle);
-                existingLimitBtn.title = limitTitle;
-              }
-              const nextLimitText = `[ ${currentCw.toLowerCase()} ▾ ]`;
-              if (existingLimitBtn.textContent !== nextLimitText) existingLimitBtn.textContent = nextLimitText;
-              const nextCacheText = `${cachePct}%`;
-              if (cacheEl.textContent !== nextCacheText) cacheEl.textContent = nextCacheText;
-              if (containerEl.__lastQuotaHtml !== quotaHtml) {
-                containerEl.__lastQuotaHtml = quotaHtml;
-                setHtml(quotaSlotEl, quotaHtml);
-              }
-              return;
-            }
-            containerEl.__lastQuotaHtml = quotaHtml;
-            setHtml(containerEl, html);
-            const mountedFill = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-bar-fill') : null;
-            if (mountedFill && mountedFill.style && suppressBarTransition) {
-              mountedFill.style.transition = 'none';
-            }
-            const limitBtn = containerEl.querySelector ? containerEl.querySelector('.agy-ctx-btn-limit') : null;
-            if (limitBtn) {
-              limitBtn.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const activeCid = view?.getAttribute?.('data-cascade-id') || cascadeId;
-                if (e.shiftKey) {
-                  cycleConversationContextWindow(view, activeCid);
-                  updateAll();
-                } else {
+          const suppressBarTransition = sessionChanged || state.pendingCrossSessionNoTransition;
+          state.pendingCrossSessionNoTransition = false;
+          const quotaKey = quota ? `${localeKey}|${quota.pct5h ?? ''}|${quota.rst5h ?? ''}|${quota.pct7d ?? ''}` : '';
+          const signature = `${localeKey}|${pct}|${usedStr}|${currentCw}|${cachePct}|${limitTitle}|${quotaKey}`;
+          if (state.lastSignature === signature && !suppressBarTransition && state.refs) {
+            return;
+          }
+          state.lastSignature = signature;
+          if (!state.refs) {
+            const barFill = h(document, 'span', {
+              className: 'agy-ctx-bar-fill',
+              style: {
+                width: `${pct}%`,
+                background: barColor,
+                ...(suppressBarTransition ? { transition: 'none' } : {}),
+              },
+            });
+            const pctValEl = h(document, 'strong', { className: `agy-ctx-pct-val ${colorClass}` }, `${pct}%`);
+            const usedValEl = h(document, 'span', { className: 'agy-ctx-used-val' }, usedStr);
+            const limitBtn = h(
+              document,
+              'button',
+              {
+                type: 'button',
+                className: `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim(),
+                title: limitTitle,
+                onclick(e) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const activeCid = view?.getAttribute?.('data-cascade-id') || state.lastCascadeId;
+                  if (e.shiftKey) {
+                    cycleConversationContextWindow(view, activeCid);
+                    updateAll();
+                  } else {
+                    showContextMenu(barEl, view, activeCid, limitBtn);
+                  }
+                },
+                oncontextmenu(e) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const activeCid = view?.getAttribute?.('data-cascade-id') || state.lastCascadeId;
                   showContextMenu(barEl, view, activeCid, limitBtn);
-                }
-              };
-              limitBtn.oncontextmenu = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const activeCid = view?.getAttribute?.('data-cascade-id') || cascadeId;
-                showContextMenu(barEl, view, activeCid, limitBtn);
-              };
-            }
+                },
+              },
+              `[ ${currentCw.toLowerCase()} ▾ ]`
+            );
+            const ctxLabelEl = h(document, 'span', null, `${tr.t('metrics.ctxLabel')} `);
+            const cacheLabelEl = h(document, 'span', null, `${tr.t('metrics.cacheLabel')} `);
+            const cacheEl = h(document, 'strong', { className: 'agy-ctx-cache' }, `${cachePct}%`);
+            const quotaSlotEl = h(document, 'span', {
+              className: 'agy-ctx-quota-slot',
+              'data-agy-no-translate': 'true',
+              translate: 'no',
+            });
+            const groupCtx = h(
+              document,
+              'span',
+              {
+                className: 'agy-ctx-group agy-ctx-group-ctx',
+                'data-agy-no-translate': 'true',
+                translate: 'no',
+              },
+              h(document, 'span', { className: 'agy-ctx-bar-wrap' }, barFill),
+              h(document, 'span', null, ctxLabelEl, pctValEl, ' ', usedValEl, '/', limitBtn),
+              h(document, 'span', { className: 'agy-ctx-sep' }, '·'),
+              h(document, 'span', null, cacheLabelEl, cacheEl)
+            );
+            clearChildren(containerEl);
+            containerEl.appendChild(groupCtx);
+            containerEl.appendChild(quotaSlotEl);
+            state.refs = {
+              barFill,
+              pctValEl,
+              usedValEl,
+              limitBtn,
+              ctxLabelEl,
+              cacheLabelEl,
+              cacheEl,
+              quotaSlotEl,
+            };
+            state.lastQuotaKey = quotaKey;
+            renderQuotaSlot(quotaSlotEl, quota, localeKey);
+            return;
+          }
+          const { barFill, pctValEl, usedValEl, limitBtn, ctxLabelEl, cacheLabelEl, cacheEl, quotaSlotEl } = state.refs;
+          if (barFill.style) {
+            barFill.style.transition = suppressBarTransition ? 'none' : '';
+            barFill.style.width = `${pct}%`;
+            barFill.style.background = barColor;
+          }
+          const nextPctClass = `agy-ctx-pct-val ${colorClass}`;
+          if (pctValEl.className !== nextPctClass) pctValEl.className = nextPctClass;
+          setText(pctValEl, `${pct}%`);
+          setText(usedValEl, usedStr);
+          const nextLimitClass = `agy-ctx-btn agy-ctx-btn-limit ${limitModClass}`.trim();
+          if (limitBtn.className !== nextLimitClass) limitBtn.className = nextLimitClass;
+          if (limitBtn.getAttribute?.('title') !== limitTitle) {
+            limitBtn.setAttribute?.('title', limitTitle);
+            limitBtn.title = limitTitle;
+          }
+          setText(limitBtn, `[ ${currentCw.toLowerCase()} ▾ ]`);
+          setText(ctxLabelEl, `${tr.t('metrics.ctxLabel')} `);
+          setText(cacheLabelEl, `${tr.t('metrics.cacheLabel')} `);
+          setText(cacheEl, `${cachePct}%`);
+          if (state.lastQuotaKey !== quotaKey) {
+            state.lastQuotaKey = quotaKey;
+            renderQuotaSlot(quotaSlotEl, quota, localeKey);
           }
         },
       };
@@ -5237,355 +5960,408 @@
       createCoreMetricsAdapter,
     };
   },
-  "./adapters/compact-button": function(module, exports, __require) {
-    const require = (spec) => __require("./adapters", spec);
+  "./ui/views/context-modal": function(module, exports, __require) {
+    const require = (spec) => __require("./ui/views", spec);
     'use strict';
-    function createCompactButtonAdapter({ runCompactForInputBox }) {
-      return {
-        id: 'compact',
-        slot: 'right',
-        order: 10,
-        builtin: true,
-        className: 'agy-ctx-btn agy-ctx-btn-compact',
-        label: '[ compact ]',
-        title: '지정된 요약 프롬프트로 시스템 /compact 즉시 실행',
-        onClick({ inputBox }) {
-          runCompactForInputBox(inputBox);
-        },
-      };
-    }
-    module.exports = {
-      createCompactButtonAdapter,
-    };
-  },
-  "./adapters/context-button": function(module, exports, __require) {
-    const require = (spec) => __require("./adapters", spec);
-    'use strict';
-    const { fmtNum, escHtml } = require('../dom-styles');
-    const { getChatModelFromMeta, extractStatsFromMetas } = require('../rpc-client');
-    const { resolveHostAdapterConfig } = require('../host-adapter-config');
-    function createContextButtonAdapter({
-      window,
-      document,
-      fetchFn,
-      setHtml,
-      cwStore,
-      hostBridge,
-      hostConfig,
-    }) {
-      const resolvedHostConfig = resolveHostAdapterConfig(hostConfig, window);
+    /**
+     * Context & Trajectory Debug Modal View (`context` builtin adapter).
+     * Pure DOM composition via `dom-builder` (zero HTML strings) + `WeakMap` cleanup + `i18n` translator.
+     */
+    const { fmtNum, getChatModelFromMeta } = require('../../domain/metrics-calculator');
+    const { DEFAULT_LOCALE, createTranslator } = require('../../domain/i18n');
+    const { h, clearChildren } = require('../dom-builder');
+    const { registerNodeCleanup, runNodeCleanup } = require('../adapter-registry');
+    function createContextModalAdapter({ document, documentHost, window, translator, loadDebugTelemetry, toggleInlineStats }) {
+      const tr = translator || createTranslator(DEFAULT_LOCALE);
+      function closeExistingModal() {
+        const existing = document?.getElementById?.('agy-ctx-debug-modal');
+        if (!existing) return false;
+        runNodeCleanup(existing);
+        try {
+          existing.remove();
+        } catch {}
+        return true;
+      }
+      function renderTelemetryBody(bodyEl, payload) {
+        const {
+          currentCw,
+          maxLimit,
+          parsed,
+          metas,
+          totalGenLen,
+          totalStepsLen,
+          trajectoryId,
+          cascadeId,
+          latestCwm,
+          latestSections,
+          latestModel,
+        } = payload;
+        const used = parsed.used || 0;
+        const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
+        const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
+        const cardGrid = h(
+          document,
+          'div',
+          { className: 'agy-ctx-card-grid' },
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-card' },
+            h(document, 'div', { className: 'agy-ctx-card-lbl' }, tr.t('modal.cardCtx', { cw: currentCw })),
+            h(
+              document,
+              'div',
+              { className: 'agy-ctx-card-val', style: { color: barColor } },
+              `${pct}% (${fmtNum(used)} / ${fmtNum(maxLimit)})`
+            ),
+            h(
+              document,
+              'div',
+              {
+                style: {
+                  marginTop: '5px',
+                  height: '5px',
+                  background: 'rgba(255,255,255,0.1)',
+                  borderRadius: '3px',
+                  overflow: 'hidden',
+                },
+              },
+              h(document, 'div', { style: { width: `${pct}%`, height: '100%', background: barColor } })
+            )
+          ),
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-card' },
+            h(document, 'div', { className: 'agy-ctx-card-lbl' }, tr.t('modal.cardCache')),
+            h(document, 'div', { className: 'agy-ctx-card-val agy-ctx-cache' }, `${parsed.cachePct}%`),
+            h(
+              document,
+              'div',
+              { style: { fontSize: '10px', color: '#94a3b8', marginTop: '2px' } },
+              tr.t('modal.cardCacheSub', { cache: fmtNum(parsed.cacheRead), input: fmtNum(parsed.inputTok) })
+            )
+          ),
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-card' },
+            h(document, 'div', { className: 'agy-ctx-card-lbl' }, tr.t('modal.cardTraj')),
+            h(
+              document,
+              'div',
+              { className: 'agy-ctx-card-val' },
+              tr.t('modal.cardTrajVal', { steps: fmtNum(totalStepsLen), turns: fmtNum(totalGenLen) })
+            ),
+            h(
+              document,
+              'div',
+              { style: { fontSize: '10px', color: '#94a3b8', marginTop: '2px' } },
+              tr.t('modal.cardTrajSub', { max: fmtNum(parsed.trajectoryMax), model: latestModel || '-' })
+            )
+          )
+        );
+        const groups = latestCwm?.tokenBreakdown?.groups || [];
+        let breakdownBlock = null;
+        if (groups.length > 0) {
+          const groupRows = groups.map((g) => {
+            const gTok = Number(g.numTokens || 0);
+            const gPct = used > 0 ? ((gTok / used) * 100).toFixed(1) : '0.0';
+            return h(
+              document,
+              'tr',
+              null,
+              h(document, 'td', null, String(g.name || g.type || g.source || 'Section')),
+              h(document, 'td', { className: 'num' }, fmtNum(gTok)),
+              h(document, 'td', { className: 'num' }, `${gPct}%`)
+            );
+          });
+          breakdownBlock = h(
+            document,
+            'div',
+            null,
+            h(
+              document,
+              'div',
+              { className: 'agy-ctx-sec-title' },
+              h(document, 'span', null, tr.t('modal.breakdownTitle')),
+              h(
+                document,
+                'span',
+                null,
+                tr.t('modal.breakdownTotal', { total: fmtNum(latestCwm?.tokenBreakdown?.totalTokens || used) })
+              )
+            ),
+            h(
+              document,
+              'table',
+              { className: 'agy-ctx-tbl' },
+              h(
+                document,
+                'thead',
+                null,
+                h(
+                  document,
+                  'tr',
+                  null,
+                  h(document, 'th', null, tr.t('modal.colGroupSource')),
+                  h(document, 'th', { className: 'num' }, tr.t('modal.colTokens')),
+                  h(document, 'th', { className: 'num' }, tr.t('modal.colShare'))
+                )
+              ),
+              h(document, 'tbody', null, ...groupRows)
+            )
+          );
+        } else if (latestSections.length > 0) {
+          const sectionRows = latestSections.map((s, idx) => {
+            const textLen = (s.content || s.templatedContent || '').length;
+            return h(
+              document,
+              'tr',
+              null,
+              h(document, 'td', null, `#${idx + 1} ${String(s.title || s.tokenType || 'PromptSection')}`),
+              h(document, 'td', null, String(s.tokenSource || s.metadata?.sourceType || '-')),
+              h(document, 'td', { className: 'num' }, tr.t('modal.charsUnit', { count: fmtNum(textLen) }))
+            );
+          });
+          breakdownBlock = h(
+            document,
+            'div',
+            null,
+            h(
+              document,
+              'div',
+              { className: 'agy-ctx-sec-title' },
+              h(document, 'span', null, tr.t('modal.sectionsTitle', { count: latestSections.length }))
+            ),
+            h(
+              document,
+              'table',
+              { className: 'agy-ctx-tbl' },
+              h(
+                document,
+                'thead',
+                null,
+                h(
+                  document,
+                  'tr',
+                  null,
+                  h(document, 'th', null, tr.t('modal.colSectionTitle')),
+                  h(document, 'th', null, tr.t('modal.colSource')),
+                  h(document, 'th', { className: 'num' }, tr.t('modal.colSize'))
+                )
+              ),
+              h(document, 'tbody', null, ...sectionRows)
+            )
+          );
+        }
+        const turnRows = [];
+        const fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
+        for (let i = metas.length - 1; i >= 0 && turnRows.length < 12; i--) {
+          const m = metas[i];
+          const cm = getChatModelFromMeta(m);
+          if (!cm) continue;
+          const u = cm.usage || {};
+          const cwm = cm.chatStartMetadata?.contextWindowMetadata;
+          const stepIdx = cm.chatStartMetadata?.startStepIndex ?? m.stepIndices?.[0] ?? fetchOffset + i;
+          const inTok = Number(u.inputTokens || 0);
+          const crTok = Number(u.cacheReadTokens || 0);
+          const outTok = Number(u.outputTokens || u.responseOutputTokens || 0);
+          const thkTok = Number(u.thinkingOutputTokens || 0);
+          const totP = inTok + crTok;
+          const cPct = totP > 0 ? `${Math.round((crTok / totP) * 100)}%` : '-';
+          turnRows.push(
+            h(
+              document,
+              'tr',
+              null,
+              h(document, 'td', null, `#${String(stepIdx)}`),
+              h(document, 'td', null, String(cm.modelDisplayName || cm.responseModel || cm.model || '-')),
+              h(document, 'td', { className: 'num' }, cwm?.estimatedTokensUsed ? fmtNum(cwm.estimatedTokensUsed) : '-'),
+              h(document, 'td', { className: 'num' }, `${fmtNum(crTok)} (${cPct})`),
+              h(document, 'td', { className: 'num' }, fmtNum(inTok)),
+              h(
+                document,
+                'td',
+                { className: 'num' },
+                fmtNum(outTok),
+                thkTok ? h(document, 'span', { style: { opacity: '0.65' } }, ` ${tr.t('modal.thkSuffix', { count: fmtNum(thkTok) })}`) : null
+              )
+            )
+          );
+        }
+        const turnsBlock = h(
+          document,
+          'div',
+          null,
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-sec-title' },
+            h(document, 'span', null, tr.t('modal.turnsTitle', { shown: turnRows.length, total: totalGenLen || metas.length })),
+            h(
+              document,
+              'span',
+              { style: { fontWeight: '400', opacity: '0.7' } },
+              tr.t('modal.trajectoryId', { id: trajectoryId || cascadeId || 'unknown' })
+            )
+          ),
+          h(
+            document,
+            'table',
+            { className: 'agy-ctx-tbl' },
+            h(
+              document,
+              'thead',
+              null,
+              h(
+                document,
+                'tr',
+                null,
+                h(document, 'th', null, tr.t('modal.colStep')),
+                h(document, 'th', null, tr.t('modal.colModel')),
+                h(document, 'th', { className: 'num' }, tr.t('modal.colEstCtx')),
+                h(document, 'th', { className: 'num' }, tr.t('modal.colCacheRead')),
+                h(document, 'th', { className: 'num' }, tr.t('modal.colFreshInput')),
+                h(document, 'th', { className: 'num' }, tr.t('modal.colOutputThink'))
+              )
+            ),
+            h(
+              document,
+              'tbody',
+              null,
+              ...(turnRows.length
+                ? turnRows
+                : [
+                    h(
+                      document,
+                      'tr',
+                      null,
+                      h(document, 'td', { colspan: '6', style: { opacity: '0.6' } }, tr.t('modal.noTurns'))
+                    ),
+                  ])
+            )
+          )
+        );
+        clearChildren(bodyEl);
+        bodyEl.appendChild(cardGrid);
+        if (breakdownBlock) bodyEl.appendChild(breakdownBlock);
+        bodyEl.appendChild(turnsBlock);
+      }
       async function openOrToggleDebugModal(view, inputBox) {
-        const existingModal = document.getElementById('agy-ctx-debug-modal');
-        if (existingModal) {
-          if (typeof existingModal.__agyCleanup === 'function') {
-            existingModal.__agyCleanup();
-          } else {
-            existingModal.remove();
-          }
+        if (closeExistingModal()) {
           return;
         }
-        if (!view) {
-          view = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
+        if ((!view || !inputBox) && documentHost && typeof documentHost.findFallbackSessionTarget === 'function') {
+          const fb = documentHost.findFallbackSessionTarget();
+          if (!view) view = fb?.view || null;
+          if (!inputBox) inputBox = fb?.inputBox || null;
         }
-        if (!inputBox && view) {
-          inputBox = view.querySelector('[data-testid="agent-input-box"]');
-        }
-        let cascadeId = view ? view.getAttribute('data-cascade-id') : '';
-        if (!cascadeId || cascadeId === 'remote-session') {
-          try {
-            const innerCid = document?.querySelector?.('ga-remote-control iframe')?.contentDocument?.querySelector?.('[data-testid="conversation-view"][data-cascade-id]')?.getAttribute?.('data-cascade-id');
-            if (innerCid && innerCid !== 'remote-session') cascadeId = innerCid;
-          } catch {}
-          if ((!cascadeId || cascadeId === 'remote-session') && window?.__agySniffedCascadeId) {
-            cascadeId = window.__agySniffedCascadeId;
-          }
-        }
-        const csrf = window.__APP_CONFIG__ && window.__APP_CONFIG__.csrfToken;
-        const currentCw = cwStore.getSavedContextWindow(cascadeId);
-        const maxLimit = cwStore.getLimit(currentCw);
-        const cc = hostBridge.getCascadeContextForElement(inputBox || view);
-        const asp = cc?.state?.agentStateProvider || (hostBridge.getAgentStateProviderForInputBox ? hostBridge.getAgentStateProviderForInputBox(inputBox || view) : null);
-        const slice = asp?.getState?.()?.trajectorySlice;
-        const rcGenLen = cascadeId && window?.__agyRcGenLenByCascade ? window.__agyRcGenLenByCascade[cascadeId] : undefined;
-        const rcStepLen = cascadeId && window?.__agyRcStepCountByCascade ? window.__agyRcStepCountByCascade[cascadeId] : undefined;
-        let totalGenLen = (typeof slice?.totalGeneratorMetadataLength === 'number' && slice.totalGeneratorMetadataLength > 0)
-          ? slice.totalGeneratorMetadataLength
-          : (typeof rcGenLen === 'number' && rcGenLen > 0 ? rcGenLen : 0);
-        const totalStepsLen = (typeof slice?.totalStepsLength === 'number' && slice.totalStepsLength > 0)
-          ? slice.totalStepsLength
-          : (typeof rcStepLen === 'number' && rcStepLen > 0 ? rcStepLen : 0);
-        const trajectoryId = slice?.trajectoryId || '';
-        const backdrop = document.createElement('div');
-        backdrop.id = 'agy-ctx-debug-modal';
-        backdrop.className = 'agy-ctx-modal-backdrop';
-        backdrop.setAttribute?.('data-agy-no-translate', 'true');
-        backdrop.setAttribute?.('translate', 'no');
-        setHtml(backdrop, `
-      <div class="agy-ctx-modal" role="dialog" aria-label="Trajectory & Context Debug View">
-        <div class="agy-ctx-modal-hdr">
-          <span>Trajectory &amp; Context Debug View <span style="opacity:0.6;font-weight:400;font-size:11px">(${escHtml(cascadeId || 'unknown')})</span></span>
-          <div class="agy-ctx-modal-hdr-actions">
-            <button type="button" class="agy-ctx-btn" id="agy-ctx-toggle-inline-debug" title="채팅창 상단 내장 Trajectory Stats 표시 토글">[ inline stats ]</button>
-            <button type="button" class="agy-ctx-btn" id="agy-ctx-modal-close" title="닫기 (ESC)">[ × ]</button>
-          </div>
-        </div>
-        <div class="agy-ctx-modal-body" id="agy-ctx-modal-body">
-          <div style="opacity:0.75">컨텍스트 메타데이터를 불러오는 중…</div>
-        </div>
-      </div>
-    `);
-        const closeModal = () => {
-          backdrop.remove();
-          window?.removeEventListener?.('keydown', onKeyDown);
-        };
-        backdrop.__agyCleanup = closeModal;
+        const rawCid = view?.getAttribute?.('data-cascade-id') || '';
+        const bodyEl = h(
+          document,
+          'div',
+          { id: 'agy-ctx-modal-body', className: 'agy-ctx-modal-body' },
+          h(document, 'div', { style: { opacity: '0.75' } }, tr.t('modal.loading'))
+        );
+        let backdrop = null;
         const onKeyDown = (e) => {
           if (e.key === 'Escape') closeModal();
         };
-        window.addEventListener('keydown', onKeyDown);
-        backdrop.onclick = (e) => {
-          if (e.target === backdrop) closeModal();
+        const closeModal = () => {
+          try {
+            backdrop?.remove?.();
+          } catch {}
+          try {
+            window?.removeEventListener?.('keydown', onKeyDown);
+          } catch {}
         };
-        document.body.appendChild(backdrop);
-        const closeBtn = backdrop.querySelector('#agy-ctx-modal-close');
-        if (closeBtn) closeBtn.onclick = closeModal;
-        const inlineBtn = backdrop.querySelector('#agy-ctx-toggle-inline-debug');
-        if (inlineBtn) {
-          inlineBtn.onclick = () => {
-            const curCc = hostBridge.getCascadeContextForElement(inputBox || view);
-            if (curCc?.debug && typeof curCc.debug.setDebugMode === 'function') {
-              curCc.debug.setDebugMode(!curCc.debug.debugMode);
-            }
-          };
-        }
-        const bodyEl = backdrop.querySelector('#agy-ctx-modal-body');
-        const remoteSvc = hostBridge.getRemoteRpcServiceForElement ? hostBridge.getRemoteRpcServiceForElement(inputBox || view) : null;
-        if (!cascadeId || (!csrf && !remoteSvc)) {
-          if (bodyEl) {
-            setHtml(bodyEl, `<div class="agy-ctx-crit">세션 정보(cascadeId 또는 RPC 연결)를 찾을 수 없습니다.</div>`);
-          }
-          return;
-        }
+        const inlineBtn = h(
+          document,
+          'button',
+          {
+            type: 'button',
+            id: 'agy-ctx-toggle-inline-debug',
+            className: 'agy-ctx-btn',
+            title: tr.t('modal.inlineStatsTitle'),
+            onclick() {
+              if (typeof toggleInlineStats === 'function') {
+                toggleInlineStats(view, inputBox);
+              }
+            },
+          },
+          tr.t('modal.inlineStats')
+        );
+        const closeBtn = h(
+          document,
+          'button',
+          {
+            type: 'button',
+            id: 'agy-ctx-modal-close',
+            className: 'agy-ctx-btn',
+            title: tr.t('modal.closeTitle'),
+            onclick: closeModal,
+          },
+          tr.t('modal.close')
+        );
+        const titleCid = rawCid || 'unknown';
+        const modalEl = h(
+          document,
+          'div',
+          {
+            className: 'agy-ctx-modal',
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': tr.t('modal.title'),
+          },
+          h(
+            document,
+            'div',
+            { className: 'agy-ctx-modal-hdr' },
+            h(
+              document,
+              'span',
+              null,
+              `${tr.t('modal.title')} `,
+              h(document, 'span', { style: { opacity: '0.6', fontWeight: '400', fontSize: '11px' } }, `(${titleCid})`)
+            ),
+            h(document, 'div', { className: 'agy-ctx-modal-hdr-actions' }, inlineBtn, closeBtn)
+          ),
+          bodyEl
+        );
+        backdrop = h(
+          document,
+          'div',
+          {
+            id: 'agy-ctx-debug-modal',
+            className: 'agy-ctx-modal-backdrop',
+            'data-agy-no-translate': 'true',
+            translate: 'no',
+            onclick(e) {
+              if (e.target === backdrop) closeModal();
+            },
+          },
+          modalEl
+        );
+        registerNodeCleanup(backdrop, closeModal);
+        window?.addEventListener?.('keydown', onKeyDown);
+        document.body?.appendChild?.(backdrop);
         try {
-          let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
-          let metas = [];
-          if (csrf && !window?.__APP_CONFIG__?.isRemoteControl && typeof fetchFn === 'function') {
-            try {
-              const r = await fetchFn(resolvedHostConfig.buildRpcPath('GetCascadeTrajectoryGeneratorMetadata'), {
-                method: 'POST',
-                headers: resolvedHostConfig.buildRpcHeaders(csrf),
-                body: JSON.stringify({ cascadeId, generatorMetadataOffset: fetchOffset }),
-              });
-              if (r && r.ok !== false) {
-                const j = await r.json();
-                metas = j.generatorMetadata || [];
-              }
-            } catch {}
+          const payload = await loadDebugTelemetry(view, inputBox, rawCid);
+          if (!backdrop.isConnected && document.getElementById?.('agy-ctx-debug-modal') !== backdrop) {
+            return;
           }
-          if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectoryGeneratorMetadata === 'function') {
-            if (totalGenLen <= 0 && totalStepsLen > 60) {
-              let cur = Math.ceil(totalStepsLen * 0.52);
-              while (cur > 0) {
-                const probe = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: cur });
-                const pm = probe?.generatorMetadata || [];
-                if (pm.length > 0) {
-                  totalGenLen = cur + pm.length;
-                  break;
-                }
-                cur = Math.max(0, cur - 35);
-              }
-            }
-            fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
-            const j = await remoteSvc.getCascadeTrajectoryGeneratorMetadata({ cascadeId, generatorMetadataOffset: fetchOffset });
-            const allMetas = j?.generatorMetadata || [];
-            if (allMetas.length > 0) {
-              totalGenLen = fetchOffset + allMetas.length;
-              if (window && cascadeId) {
-                window.__agyRcGenLenByCascade = window.__agyRcGenLenByCascade || {};
-                if (Object.prototype.hasOwnProperty.call(window.__agyRcGenLenByCascade, cascadeId)) {
-                  delete window.__agyRcGenLenByCascade[cascadeId];
-                }
-                window.__agyRcGenLenByCascade[cascadeId] = totalGenLen;
-                const keys = Object.keys(window.__agyRcGenLenByCascade);
-                if (keys.length > 200) {
-                  for (let k = 0; k < keys.length - 200; k++) {
-                    delete window.__agyRcGenLenByCascade[keys[k]];
-                  }
-                }
-              }
-            }
-            metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
+          if (!payload || payload.unavailable) {
+            clearChildren(bodyEl);
+            bodyEl.appendChild(h(document, 'div', { className: 'agy-ctx-crit' }, tr.t('modal.noSession')));
+            return;
           }
-          if (!metas.length && remoteSvc && typeof remoteSvc.getCascadeTrajectory === 'function' && !remoteSvc.isRemoteControlHost) {
-            const t = await remoteSvc.getCascadeTrajectory({ cascadeId });
-            const allMetas = t?.trajectory?.generatorMetadata || [];
-            metas = allMetas.length > 20 ? allMetas.slice(-20) : allMetas;
-          }
-          let parsed = extractStatsFromMetas(metas);
-          const fullState = asp?.getState?.();
-          if (fullState && typeof fullState === 'object') {
-            const cwUsage = fullState.contextWindowUsage;
-            const compactedSteps = Array.isArray(fullState.compactedAtStepIndices)
-              ? fullState.compactedAtStepIndices
-              : fullState.compactionInfo?.compactedAtStepIndices;
-            const latestCompactedStep = Array.isArray(compactedSteps) && compactedSteps.length > 0
-              ? Number(compactedSteps[compactedSteps.length - 1])
-              : -1;
-            if (cwUsage && typeof cwUsage === 'object') {
-              const uMax = Number(cwUsage.maxContextTokens || 0);
-              if (uMax > 0) {
-                parsed.trajectoryMax = uMax;
-              }
-              const uStep = Number(cwUsage.lastStepIndex ?? -1);
-              const uEst = Number(cwUsage.estimatedTokensUsed || 0);
-              const rawAfterCompact = cwUsage.estimatedAfterCompaction;
-              const afterCompact = typeof rawAfterCompact === 'boolean'
-                ? (rawAfterCompact ? uEst : 0)
-                : Number(rawAfterCompact || 0);
-              if (afterCompact > 0 && latestCompactedStep >= 0 && (parsed.lastMetaStepIndex < 0 || latestCompactedStep >= parsed.lastMetaStepIndex)) {
-                parsed.used = afterCompact;
-                parsed.foundCtx = true;
-              } else if (uEst > 0 && (!parsed.foundCtx || (uStep >= 0 && parsed.lastMetaStepIndex >= 0 && uStep > parsed.lastMetaStepIndex))) {
-                parsed.used = uEst;
-                parsed.foundCtx = true;
-              }
-            }
-          }
-          let latestCwm = null;
-          let latestSections = [];
-          let latestModel = '';
-          for (let i = metas.length - 1; i >= 0; i--) {
-            const cm = getChatModelFromMeta(metas[i]);
-            if (!cm) continue;
-            if (!latestModel && (cm.modelDisplayName || cm.responseModel || cm.model)) {
-              latestModel = cm.modelDisplayName || cm.responseModel || cm.model;
-            }
-            if (!latestCwm && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed !== undefined && cm.chatStartMetadata?.contextWindowMetadata?.estimatedTokensUsed !== null) {
-              latestCwm = cm.chatStartMetadata.contextWindowMetadata;
-            }
-            if (!latestSections.length && Array.isArray(cm.promptSections) && cm.promptSections.length > 0) {
-              latestSections = cm.promptSections;
-            }
-          }
-          const used = parsed.used || 0;
-          const pct = maxLimit > 0 ? Math.min(100, Math.round((used / maxLimit) * 100)) : 0;
-          const barColor = pct >= 85 ? '#ec7063' : pct >= 65 ? '#f5b041' : '#58d68d';
-          const groups = latestCwm?.tokenBreakdown?.groups || [];
-          let breakdownHtml = '';
-          if (groups.length > 0) {
-            const rows = groups.map((g) => {
-              const gTok = Number(g.numTokens || 0);
-              const gPct = used > 0 ? ((gTok / used) * 100).toFixed(1) : '0.0';
-              return `<tr>
-            <td>${escHtml(g.name || g.type || g.source || 'Section')}</td>
-            <td class="num">${fmtNum(gTok)}</td>
-            <td class="num">${gPct}%</td>
-          </tr>`;
-            }).join('');
-            breakdownHtml = `
-          <div>
-            <div class="agy-ctx-sec-title"><span>Context Window Token Breakdown</span><span>Total: ${fmtNum(latestCwm?.tokenBreakdown?.totalTokens || used)}</span></div>
-            <table class="agy-ctx-tbl">
-              <thead><tr><th>Group / Source</th><th class="num">Tokens</th><th class="num">Share</th></tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        `;
-          } else if (latestSections.length > 0) {
-            const rows = latestSections.map((s, idx) => {
-              const textLen = (s.content || s.templatedContent || '').length;
-              return `<tr>
-            <td>#${idx + 1} ${escHtml(s.title || s.tokenType || 'PromptSection')}</td>
-            <td>${escHtml(s.tokenSource || s.metadata?.sourceType || '-')}</td>
-            <td class="num">${fmtNum(textLen)} chars</td>
-          </tr>`;
-            }).join('');
-            breakdownHtml = `
-          <div>
-            <div class="agy-ctx-sec-title"><span>Prompt Sections (${latestSections.length})</span></div>
-            <table class="agy-ctx-tbl">
-              <thead><tr><th>Section Title</th><th>Source</th><th class="num">Size</th></tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        `;
-          }
-          const recentTurns = [];
-          for (let i = metas.length - 1; i >= 0 && recentTurns.length < 12; i--) {
-            const m = metas[i];
-            const cm = getChatModelFromMeta(m);
-            if (!cm) continue;
-            const u = cm.usage || {};
-            const cwm = cm.chatStartMetadata?.contextWindowMetadata;
-            const stepIdx = cm.chatStartMetadata?.startStepIndex ?? m.stepIndices?.[0] ?? (fetchOffset + i);
-            const inTok = Number(u.inputTokens || 0);
-            const crTok = Number(u.cacheReadTokens || 0);
-            const outTok = Number(u.outputTokens || u.responseOutputTokens || 0);
-            const thkTok = Number(u.thinkingOutputTokens || 0);
-            const totP = inTok + crTok;
-            const cPct = totP > 0 ? Math.round((crTok / totP) * 100) + '%' : '-';
-            recentTurns.push(`
-          <tr>
-            <td>#${escHtml(stepIdx)}</td>
-            <td>${escHtml(cm.modelDisplayName || cm.responseModel || cm.model || '-')}</td>
-            <td class="num">${cwm?.estimatedTokensUsed ? fmtNum(cwm.estimatedTokensUsed) : '-'}</td>
-            <td class="num">${fmtNum(crTok)} (${cPct})</td>
-            <td class="num">${fmtNum(inTok)}</td>
-            <td class="num">${fmtNum(outTok)}${thkTok ? ` <span style="opacity:0.65">(+${fmtNum(thkTok)} thk)</span>` : ''}</td>
-          </tr>
-        `);
-          }
-          const info = hostBridge.getModelSelectorContextForView(view);
-          const reduxSessionCw = info?.reduxStore?.getState?.()?.modelSelection?.byConversation?.[cascadeId]?.contextWindow || currentCw;
-          if (bodyEl) {
-            setHtml(bodyEl, `
-          <div class="agy-ctx-card-grid">
-            <div class="agy-ctx-card">
-              <div class="agy-ctx-card-lbl">Context Used / Session Limit (${escHtml(reduxSessionCw)})</div>
-              <div class="agy-ctx-card-val" style="color:${barColor}">${pct}% (${fmtNum(used)} / ${fmtNum(maxLimit)})</div>
-              <div style="margin-top:5px;height:5px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden">
-                <div style="width:${pct}%;height:100%;background:${barColor}"></div>
-              </div>
-            </div>
-            <div class="agy-ctx-card">
-              <div class="agy-ctx-card-lbl">Prompt Cache Hit Rate</div>
-              <div class="agy-ctx-card-val agy-ctx-cache">${parsed.cachePct}%</div>
-              <div style="font-size:10px;color:#94a3b8;margin-top:2px">Cache: ${fmtNum(parsed.cacheRead)} · Fresh Input: ${fmtNum(parsed.inputTok)}</div>
-            </div>
-            <div class="agy-ctx-card">
-              <div class="agy-ctx-card-lbl">Trajectory Metadata</div>
-              <div class="agy-ctx-card-val">${fmtNum(totalStepsLen)} steps · ${fmtNum(totalGenLen)} turns</div>
-              <div style="font-size:10px;color:#94a3b8;margin-top:2px">Last Turn Max: ${fmtNum(parsed.trajectoryMax)} · Model: ${escHtml(latestModel || '-')}</div>
-            </div>
-          </div>
-          ${breakdownHtml}
-          <div>
-            <div class="agy-ctx-sec-title">
-              <span>Recent Generator Turns (Latest ${recentTurns.length} of ${totalGenLen || metas.length})</span>
-              <span style="font-weight:400;opacity:0.7">Trajectory ID: ${escHtml(trajectoryId || cascadeId)}</span>
-            </div>
-            <table class="agy-ctx-tbl">
-              <thead>
-                <tr>
-                  <th>Step</th>
-                  <th>Model</th>
-                  <th class="num">Est. Ctx</th>
-                  <th class="num">Cache Read</th>
-                  <th class="num">Fresh Input</th>
-                  <th class="num">Output (+Think)</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${recentTurns.length ? recentTurns.join('') : '<tr><td colspan="6" style="opacity:0.6">생성된 턴 메타데이터가 아직 없습니다.</td></tr>'}
-              </tbody>
-            </table>
-          </div>
-        `);
-          }
+          renderTelemetryBody(bodyEl, payload);
         } catch (err) {
-          if (bodyEl) {
-            setHtml(bodyEl, `<div class="agy-ctx-crit">메타데이터 조회 실패: ${escHtml(err?.message || err)}</div>`);
-          }
+          clearChildren(bodyEl);
+          bodyEl.appendChild(
+            h(document, 'div', { className: 'agy-ctx-crit' }, tr.t('modal.fetchFailed', { error: err?.message || String(err) }))
+          );
         }
       }
       return {
@@ -5594,527 +6370,718 @@
         order: 20,
         builtin: true,
         className: 'agy-ctx-btn agy-ctx-btn-context',
-        label: '[ context ]',
-        title: '상세 컨텍스트 디버그 창 열기/닫기',
+        label: () => tr.t('context.label'),
+        title: () => tr.t('context.title'),
         onClick({ view, inputBox }) {
           openOrToggleDebugModal(view, inputBox);
         },
         openOrToggleDebugModal,
+        closeExistingModal,
       };
     }
     module.exports = {
-      createContextButtonAdapter,
+      createContextModalAdapter,
+    };
+  },
+  "./app/disposable": function(module, exports, __require) {
+    const require = (spec) => __require("./app", spec);
+    'use strict';
+    /**
+     * Deterministic Resource & Timer Lifecycle Scope.
+     * Always binds native timer functions to `win` to avoid `Illegal invocation` on headless/DOM windows.
+     */
+    function createDisposableScope(win) {
+      let disposed = false;
+      const cleanups = [];
+      const intervals = new Set();
+      const timeouts = new Set();
+      const bindTimer = (name, fallback) => {
+        try {
+          if (win && typeof win[name] === 'function') {
+            return win[name].bind(win);
+          }
+        } catch {}
+        return fallback;
+      };
+      const nativeSetTimeout = bindTimer('setTimeout', typeof setTimeout === 'function' ? setTimeout : null);
+      const nativeClearTimeout = bindTimer('clearTimeout', typeof clearTimeout === 'function' ? clearTimeout : null);
+      const nativeSetInterval = bindTimer('setInterval', typeof setInterval === 'function' ? setInterval : null);
+      const nativeClearInterval = bindTimer('clearInterval', typeof clearInterval === 'function' ? clearInterval : null);
+      function add(fn) {
+        if (typeof fn !== 'function') return () => {};
+        if (disposed) {
+          try {
+            fn();
+          } catch {}
+          return () => {};
+        }
+        cleanups.push(fn);
+        return () => {
+          const idx = cleanups.indexOf(fn);
+          if (idx >= 0) cleanups.splice(idx, 1);
+        };
+      }
+      function trackTimeout(fn, ms) {
+        if (disposed || !nativeSetTimeout) return null;
+        let id = null;
+        id = nativeSetTimeout(() => {
+          if (id !== null) timeouts.delete(id);
+          if (!disposed && typeof fn === 'function') fn();
+        }, ms);
+        timeouts.add(id);
+        return id;
+      }
+      function clearTrackedTimeout(id) {
+        if (id === null || id === undefined) return;
+        timeouts.delete(id);
+        try {
+          nativeClearTimeout?.(id);
+        } catch {}
+      }
+      function trackInterval(fn, ms) {
+        if (disposed || !nativeSetInterval) return null;
+        const id = nativeSetInterval(() => {
+          if (!disposed && typeof fn === 'function') fn();
+        }, ms);
+        intervals.add(id);
+        return id;
+      }
+      function clearTrackedInterval(id) {
+        if (id === null || id === undefined) return;
+        intervals.delete(id);
+        try {
+          nativeClearInterval?.(id);
+        } catch {}
+      }
+      function listen(target, eventName, handler, options) {
+        if (disposed || !target || typeof target.addEventListener !== 'function' || typeof handler !== 'function') {
+          return () => {};
+        }
+        target.addEventListener(eventName, handler, options);
+        return add(() => {
+          try {
+            target.removeEventListener?.(eventName, handler, options);
+          } catch {}
+        });
+      }
+      function dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const id of timeouts) {
+          try {
+            nativeClearTimeout?.(id);
+          } catch {}
+        }
+        timeouts.clear();
+        for (const id of intervals) {
+          try {
+            nativeClearInterval?.(id);
+          } catch {}
+        }
+        intervals.clear();
+        for (let i = cleanups.length - 1; i >= 0; i--) {
+          try {
+            cleanups[i]();
+          } catch {}
+        }
+        cleanups.length = 0;
+      }
+      return {
+        isDisposed: () => disposed,
+        add,
+        setTimeout: trackTimeout,
+        clearTimeout: clearTrackedTimeout,
+        setInterval: trackInterval,
+        clearInterval: clearTrackedInterval,
+        listen,
+        dispose,
+      };
+    }
+    module.exports = {
+      createDisposableScope,
+    };
+  },
+  "./app/state-coordinator": function(module, exports, __require) {
+    const require = (spec) => __require("./app", spec);
+    'use strict';
+    /**
+     * Pure Application State Coordinator.
+     * Connects Domain + Ports + UI without touching any Driver implementation directly.
+     */
+    const {
+      validateTransportPort,
+      validateStoragePort,
+      validateEnginePort,
+    } = require('../ports/contracts');
+    const { CONTEXT_WINDOWS } = require('../domain/context-window-policy');
+    const { extractStatsFromMetas, applyRealtimeCompactionAndUsage, getChatModelFromMeta } = require('../domain/metrics-calculator');
+    function createStateCoordinator({
+      document,
+      documentHost,
+      transport,
+      storage,
+      engine,
+      cwStore,
+      translator,
+      adapterRegistry,
+      underDefaultCwSet,
+      ensureStyles,
+      removeStyles,
+      scope,
+      csrfProvider,
+      getRcGenLen,
+      getRcStepLen,
+    }) {
+      validateTransportPort(transport);
+      validateStoragePort(storage);
+      validateEnginePort(engine);
+      let updateScheduled = false;
+      let scheduledTimer = null;
+      let lastViewCount = 0;
+      let quotaRefreshing = false;
+      const statsPendingRefresh = new Set();
+      function getCsrf() {
+        return typeof csrfProvider === 'function' ? csrfProvider() : '';
+      }
+      function getConversationContextWindow(view, cascadeId) {
+        return cwStore.getSavedContextWindow(cascadeId);
+      }
+      function setConversationContextWindow(view, cascadeId, cw, opts = {}) {
+        const norm = cwStore.normalize(cw);
+        if (!norm) return null;
+        if (cascadeId && cascadeId !== 'remote-session') {
+          cwStore.saveContextWindowSetting(cascadeId, norm);
+        } else {
+          cwStore.saveContextWindowSetting(null, norm);
+        }
+        const maxLimit = cwStore.getLimit(norm);
+        const shouldWarn = maxLimit <= 256000;
+        if (shouldWarn && underDefaultCwSet) {
+          underDefaultCwSet.add(norm);
+          ensureStyles?.();
+        }
+        if (opts.applyEngine !== false) {
+          try {
+            engine.applyContextLimit(view, cascadeId, norm);
+          } catch {}
+        }
+        return norm;
+      }
+      function cycleConversationContextWindow(view, cascadeId) {
+        const current = getConversationContextWindow(view, cascadeId);
+        const idx = CONTEXT_WINDOWS.indexOf(current);
+        const next = idx >= 0 ? CONTEXT_WINDOWS[(idx + 1) % CONTEXT_WINDOWS.length] : CONTEXT_WINDOWS[0];
+        return setConversationContextWindow(view, cascadeId, next);
+      }
+      function saveDefaultContextWindow(cw) {
+        const norm = cwStore.saveContextWindowSetting(null, cw);
+        if (norm && underDefaultCwSet && cwStore.getLimit(norm) <= 256000) {
+          underDefaultCwSet.add(norm);
+          ensureStyles?.();
+        }
+        return norm;
+      }
+      function getTargetDocs() {
+        if (documentHost && typeof documentHost.getAccessibleDocs === 'function') {
+          const docs = documentHost.getAccessibleDocs(document);
+          if (Array.isArray(docs) && docs.length > 0) return docs;
+        }
+        return document ? [document] : [];
+      }
+      function removeOrphanHostViews(activeHostViews) {
+        for (const targetDoc of getTargetDocs()) {
+          if (!targetDoc || typeof targetDoc.querySelectorAll !== 'function') continue;
+          const hostViews = targetDoc.querySelectorAll('.agy-rc-host-view');
+          for (const hv of hostViews) {
+            if (!activeHostViews.has(hv)) {
+              try {
+                hv.remove();
+              } catch {}
+            }
+          }
+        }
+      }
+      function renderSessionBar(session) {
+        const cascadeId = session?.sessionId || session?.cascadeId || '';
+        const view = session?.viewEl || session?.view || null;
+        const inputBox = session?.inputEl || session?.inputBox || null;
+        const isRemoteHost = Boolean(session?.isRemoteShell || session?.isRemoteHost);
+        const hostBox = session?.hostBox || (isRemoteHost ? inputBox : null);
+        const isRemotePlaceholder = !cascadeId || cascadeId === 'remote-session';
+        const asp = !isRemotePlaceholder && typeof engine.getAgentStateProviderForInputBox === 'function'
+          ? engine.getAgentStateProviderForInputBox(inputBox || view, cascadeId)
+          : null;
+        const rawState = session?.rawState || asp?.getState?.() || null;
+        const cachedStats = isRemotePlaceholder ? null : transport.getCachedStats(cascadeId);
+        const immediateStats = isRemotePlaceholder ? null : transport.getImmediateStats(cascadeId, rawState);
+        const currentCw = getConversationContextWindow(view, isRemotePlaceholder ? '' : cascadeId);
+        try {
+          engine.applyContextLimit(view, isRemotePlaceholder ? '' : cascadeId, currentCw);
+        } catch {}
+        const activeStats = immediateStats || cachedStats || null;
+        const deferUncachedMetrics = Boolean(!isRemotePlaceholder && !activeStats && lastViewCount > 0);
+        if (!isRemotePlaceholder && !statsPendingRefresh.has(cascadeId)) {
+          const csrf = getCsrf();
+          statsPendingRefresh.add(cascadeId);
+          transport
+            .getStats({
+              cascadeId,
+              rawState,
+              el: inputBox || view,
+              csrf,
+              totalGenLen: typeof getRcGenLen === 'function' ? getRcGenLen(cascadeId) : 0,
+              totalStepsLen: typeof getRcStepLen === 'function' ? getRcStepLen(cascadeId) : -1,
+            })
+            .then((nextStats) => {
+              statsPendingRefresh.delete(cascadeId);
+              if (nextStats && nextStats !== activeStats) {
+                scheduleUpdate();
+              }
+            })
+            .catch(() => {
+              statsPendingRefresh.delete(cascadeId);
+            });
+        }
+        const barTarget = isRemoteHost && hostBox ? hostBox : inputBox;
+        if (!barTarget) return;
+        let barEl = barTarget.querySelector?.('.agy-ctx-statusbar') || null;
+        if (!barEl) {
+          barEl = document.createElement('div');
+          barEl.className = 'agy-ctx-statusbar';
+          barEl.setAttribute?.('data-agy-no-translate', 'true');
+          barEl.setAttribute?.('translate', 'no');
+          barTarget.appendChild(barEl);
+        }
+        const { leftEl, rightEl } = adapterRegistry.ensureBarStructure(barEl);
+        const renderCtx = {
+          barEl,
+          view,
+          inputBox: inputBox || view,
+          cascadeId: isRemotePlaceholder ? '' : cascadeId,
+          currentCw,
+          stats: activeStats,
+          quota: transport.getLatestQuota(),
+          deferUncachedMetrics,
+        };
+        adapterRegistry.renderSlotAdapters(leftEl, 'left', renderCtx);
+        adapterRegistry.renderSlotAdapters(rightEl, 'right', renderCtx);
+      }
+      function updateAll() {
+        if (scope?.isDisposed?.()) return;
+        ensureStyles?.();
+        const sessions = engine.getActiveSessions(() => scheduleUpdate(40)) || [];
+        const activeHostViews = new Set();
+        for (const s of sessions) {
+          const isRemoteHost = Boolean(s?.isRemoteShell || s?.isRemoteHost);
+          const view = s?.viewEl || s?.view || null;
+          if (isRemoteHost && view) {
+            activeHostViews.add(view);
+          }
+          renderSessionBar(s);
+        }
+        removeOrphanHostViews(activeHostViews);
+        lastViewCount = sessions.length;
+        const csrf = getCsrf();
+        if (!quotaRefreshing && (csrf || sessions.some((s) => s.isRemoteShell || s.isRemoteHost || s.isRemoteIframe))) {
+          quotaRefreshing = true;
+          const sampleEl = sessions[0]?.inputEl || sessions[0]?.inputBox || sessions[0]?.viewEl || sessions[0]?.view || null;
+          transport
+            .getQuota({ el: sampleEl, csrf })
+            .then(() => {
+              quotaRefreshing = false;
+            })
+            .catch(() => {
+              quotaRefreshing = false;
+            });
+        }
+      }
+      function scheduleUpdate(delayMs = 50) {
+        if (scope?.isDisposed?.()) return;
+        if (updateScheduled) return;
+        updateScheduled = true;
+        scheduledTimer = scope.setTimeout(() => {
+          updateScheduled = false;
+          scheduledTimer = null;
+          updateAll();
+        }, delayMs);
+      }
+      async function loadDebugTelemetry(view, inputBox, rawCid) {
+        const snap = engine.getDebugSnapshot(view, inputBox, rawCid);
+        const csrf = getCsrf();
+        const cascadeId = snap?.cascadeId || rawCid || '';
+        if (!cascadeId || (!csrf && !snap?.hasRemoteSvc)) {
+          return { unavailable: true };
+        }
+        const currentCw = cwStore.getSavedContextWindow(cascadeId);
+        const maxLimit = cwStore.getLimit(currentCw);
+        let totalGenLen = snap?.totalGenLen || (typeof getRcGenLen === 'function' ? getRcGenLen(cascadeId) : 0) || 0;
+        const totalStepsLen = snap?.totalStepsLen || (typeof getRcStepLen === 'function' ? getRcStepLen(cascadeId) : 0) || 0;
+        let fetchOffset = Math.max(0, totalGenLen > 20 ? totalGenLen - 20 : 0);
+        let metas = [];
+        if (typeof transport.getGeneratorMetadataRange === 'function') {
+          metas = await transport.getGeneratorMetadataRange({
+            cascadeId,
+            offset: fetchOffset,
+            el: inputBox || view,
+            csrf,
+          });
+        }
+        if (metas.length > 0) {
+          const possibleEnd = fetchOffset + metas.length;
+          if (possibleEnd > totalGenLen) totalGenLen = possibleEnd;
+        }
+        let parsed = extractStatsFromMetas(metas);
+        if (snap?.rawState) {
+          parsed = applyRealtimeCompactionAndUsage(parsed, snap.rawState);
+        }
+        let latestCwm = null;
+        let latestSections = [];
+        let latestModel = '';
+        for (let i = metas.length - 1; i >= 0; i--) {
+          const cm = getChatModelFromMeta(metas[i]);
+          if (!cm) continue;
+          if (!latestModel && (cm.modelDisplayName || cm.responseModel || cm.model)) {
+            latestModel = cm.modelDisplayName || cm.responseModel || cm.model;
+          }
+          const cwm = cm.chatStartMetadata?.contextWindowMetadata;
+          if (!latestCwm && cwm && cwm.estimatedTokensUsed !== undefined && cwm.estimatedTokensUsed !== null) {
+            latestCwm = cwm;
+          }
+          if (!latestSections.length && Array.isArray(cm.promptSections) && cm.promptSections.length > 0) {
+            latestSections = cm.promptSections;
+          }
+        }
+        return {
+          unavailable: false,
+          cascadeId,
+          trajectoryId: snap?.trajectoryId || '',
+          currentCw: snap?.reduxSessionCw || currentCw,
+          maxLimit,
+          parsed,
+          metas: metas.length > 20 ? metas.slice(-20) : metas,
+          totalGenLen,
+          totalStepsLen,
+          latestCwm,
+          latestSections,
+          latestModel,
+        };
+      }
+      function start() {
+        updateAll();
+        const stopObs = engine.observeSessions(() => scheduleUpdate(40));
+        scope.add(stopObs);
+        scope.setInterval(() => {
+          if (!scope.isDisposed()) updateAll();
+        }, 3000);
+      }
+      function dispose() {
+        if (scheduledTimer !== null) {
+          scope.clearTimeout(scheduledTimer);
+          scheduledTimer = null;
+        }
+        for (const targetDoc of getTargetDocs()) {
+          adapterRegistry.clearAllMenus?.(targetDoc);
+          try {
+            const bars = targetDoc?.querySelectorAll?.('.agy-ctx-statusbar') || [];
+            for (const b of bars) b.remove?.();
+            const hostViews = targetDoc?.querySelectorAll?.('.agy-rc-host-view') || [];
+            for (const hv of hostViews) hv.remove?.();
+            const modal = targetDoc?.getElementById?.('agy-ctx-debug-modal');
+            modal?.remove?.();
+          } catch {}
+        }
+        removeStyles?.();
+        statsPendingRefresh.clear();
+      }
+      return {
+        getConversationContextWindow,
+        setConversationContextWindow,
+        cycleConversationContextWindow,
+        saveDefaultContextWindow,
+        loadDebugTelemetry,
+        updateAll,
+        scheduleUpdate,
+        start,
+        dispose,
+      };
+    }
+    module.exports = {
+      createStateCoordinator,
+    };
+  },
+  "./app/index": function(module, exports, __require) {
+    const require = (spec) => __require("./app", spec);
+    'use strict';
+    /**
+     * Antigravity Status Bar v2.0.0 — Hexagonal Composition Root.
+     * Sole module allowed to wire Domain + Ports + UI + Antigravity Drivers together.
+     */
+    const { PLUGIN_BUS_SYMBOL, getOrCreatePluginBus } = require('../ports/contracts');
+    const { createTranslator } = require('../domain/i18n');
+    const { createContextWindowStore } = require('../domain/context-window-policy');
+    const { resolveHostAdapterConfig } = require('../drivers/antigravity/host-config');
+    const { createStorageAdapter, createLocalHttpTransport } = require('../drivers/antigravity/local-http-transport');
+    const { createRemotePortDriver, createDocumentHostDriver } = require('../drivers/antigravity/remote-port-driver');
+    const {
+      createReactFiberDriver,
+      registerCustomCwForStyles,
+      cleanupLegacyObjectPrototypeCwGetters,
+    } = require('../drivers/antigravity/react-fiber-driver');
+    const { createCompactDriver } = require('../drivers/antigravity/compact-driver');
+    const { createCompanionDriver } = require('../drivers/antigravity/companion-driver');
+    const { ensureStyleElement, removeStyleElements, getCspNonce } = require('../ui/style-manager');
+    const { createAdapterRegistry } = require('../ui/adapter-registry');
+    const { createCoreMetricsAdapter } = require('../ui/views/metrics-view');
+    const { createCompactButtonAdapter } = require('../ui/views/compact-button');
+    const { createContextModalAdapter } = require('../ui/views/context-modal');
+    const { createDisposableScope } = require('./disposable');
+    const { createStateCoordinator } = require('./state-coordinator');
+    function mountStatusBar(targetWindow = typeof window !== 'undefined' ? window : globalThis, overrides = {}) {
+      const win = targetWindow || globalThis;
+      const doc = overrides.document || win.document;
+      if (typeof win.__agyStatusBarCleanup === 'function') {
+        try {
+          win.__agyStatusBarCleanup();
+        } catch {}
+      }
+      const scope = createDisposableScope(win);
+      const resolvedHostConfig = resolveHostAdapterConfig(overrides.hostConfig || win.__AGY_STATUSBAR_HOST_CONFIG__, win);
+      const translator = createTranslator(
+        resolvedHostConfig.locale,
+        win.navigator?.language || win.navigator?.userLanguage || ''
+      );
+      const remotePortDriver = createRemotePortDriver({
+        window: win,
+        document: doc,
+        hostConfig: resolvedHostConfig,
+        scope,
+      });
+      const documentHost = createDocumentHostDriver({
+        document: doc,
+        remotePortDriver,
+      });
+      const underDefaultCwSet = new Set(['128K', '256K']);
+      const ensureStyles = () => ensureStyleElement(doc, underDefaultCwSet, documentHost);
+      const removeStyles = () => removeStyleElements(doc, documentHost);
+      let localStorageObj = overrides.localStorage || null;
+      if (!localStorageObj) {
+        try {
+          localStorageObj = win.localStorage;
+        } catch {
+          localStorageObj = null;
+        }
+      }
+      const storage = createStorageAdapter({
+        window: win,
+        document: doc,
+        localStorage: localStorageObj,
+      });
+      let engineRef = null;
+      let coordinatorRef = null;
+      let flushSaveTimer = null;
+      const cwStore = createContextWindowStore({
+        storage,
+        translator,
+        onCustomCw(cw) {
+          registerCustomCwForStyles(cw, underDefaultCwSet, ensureStyles, win);
+        },
+        onSaveCw() {
+          if (flushSaveTimer) scope.clearTimeout(flushSaveTimer);
+          flushSaveTimer = scope.setTimeout(() => {
+            flushSaveTimer = null;
+            if (!scope.isDisposed() && engineRef) {
+              Promise.resolve(
+                engineRef.syncDesktopAnnotations(win.__APP_CONFIG__?.csrfToken || '', null)
+              ).catch(() => {});
+            }
+          }, 250);
+        },
+      });
+      cwStore.loadPersistentContextSettings().then(() => coordinatorRef?.updateAll?.()).catch(() => {});
+      const fetchImpl =
+        overrides.fetch ||
+        (typeof win.fetch === 'function' ? win.fetch.bind(win) : typeof fetch === 'function' ? fetch : null);
+      const transport = createLocalHttpTransport({
+        fetchFn: fetchImpl,
+        window: win,
+        localStorage: localStorageObj,
+        hostConfig: resolvedHostConfig,
+        scope,
+        getRemoteRpcServiceForElement: (el) => engineRef?.getRemoteRpcServiceForElement?.(el) || null,
+        onQuotaUpdated() {
+          coordinatorRef?.scheduleUpdate?.(20);
+        },
+      });
+      const engine = createReactFiberDriver({
+        window: win,
+        document: doc,
+        localStorage: localStorageObj,
+        cwStore,
+        transport,
+        remotePortDriver,
+        hostConfig: resolvedHostConfig,
+        scope,
+        onCascadeSniffed() {
+          coordinatorRef?.scheduleUpdate?.(20);
+        },
+        onRemoteAnnotationsUpdated(updated) {
+          if (updated) {
+            coordinatorRef?.scheduleUpdate?.(30);
+          }
+        },
+      });
+      engineRef = engine;
+      const compactDriver = createCompactDriver({
+        window: win,
+        document: doc,
+        getRemoteRpcServiceForElement: (el) => engine.getRemoteRpcServiceForElement(el),
+        getActiveCascadeId: (el) =>
+          el?.closest?.('[data-cascade-id]')?.getAttribute?.('data-cascade-id') || engine.getActiveSniffedCascadeId(),
+        resolveEffectiveInputBox: (el) => engine.resolveEffectiveInputBox(el),
+        compactPrompt: resolvedHostConfig.compactPrompt,
+      });
+      engine.triggerCompact = (inputBox, promptOverride) => compactDriver.runCompactForInputBox(inputBox, promptOverride);
+      const adapterRegistry = createAdapterRegistry({
+        window: win,
+        document: doc,
+        onUpdate() {
+          coordinatorRef?.updateAll?.();
+        },
+      });
+      const coordinator = createStateCoordinator({
+        document: doc,
+        documentHost,
+        transport,
+        storage,
+        engine,
+        cwStore,
+        translator,
+        adapterRegistry,
+        underDefaultCwSet,
+        ensureStyles,
+        removeStyles,
+        scope,
+        csrfProvider: () => win.__APP_CONFIG__?.csrfToken || '',
+        getRcGenLen: (cid) => transport.getKnownGenLen?.(cid) || 0,
+        getRcStepLen: (cid) => transport.getStepCount?.(cid) || 0,
+      });
+      coordinatorRef = coordinator;
+      const coreMetricsAdapter = createCoreMetricsAdapter({
+        document: doc,
+        documentHost,
+        cwStore,
+        translator,
+        getConversationContextWindow: coordinator.getConversationContextWindow,
+        setConversationContextWindow: coordinator.setConversationContextWindow,
+        cycleConversationContextWindow: coordinator.cycleConversationContextWindow,
+        saveDefaultContextWindow: coordinator.saveDefaultContextWindow,
+        updateAll: coordinator.updateAll,
+      });
+      const compactAdapter = createCompactButtonAdapter({
+        runCompactForInputBox: (inputBox) => compactDriver.runCompactForInputBox(inputBox),
+        translator,
+      });
+      const contextModalAdapter = createContextModalAdapter({
+        document: doc,
+        documentHost,
+        window: win,
+        translator,
+        loadDebugTelemetry: coordinator.loadDebugTelemetry,
+        toggleInlineStats(view, inputBox) {
+          const snap = engine.getDebugSnapshot(view, inputBox);
+          snap?.toggleInlineDebug?.();
+        },
+      });
+      adapterRegistry.registerBuiltinAdapters([coreMetricsAdapter, compactAdapter, contextModalAdapter]);
+      const companionDriver = createCompanionDriver({
+        window: win,
+        document: doc,
+        hostConfig: resolvedHostConfig,
+        transport,
+        scope,
+        getNonce: () => getCspNonce(doc),
+      });
+      if (Array.isArray(resolvedHostConfig.companionScripts) && resolvedHostConfig.companionScripts.length > 0) {
+        Promise.resolve(companionDriver.loadCompanions({ fetch: fetchImpl })).catch(() => {});
+      }
+      const pluginBus = getOrCreatePluginBus(win);
+      const unregisterBus = pluginBus.registerPlugin('antigravity-statusbar', {
+        version: '2.0.0',
+        capabilities: ['context-window', 'metrics', 'compact', 'debug-modal', 'i18n'],
+      });
+      scope.add(() => unregisterBus());
+      scope.add(() => coordinator.dispose());
+      scope.add(() => engine.dispose());
+      scope.add(() => transport.dispose());
+      scope.add(() => remotePortDriver.dispose());
+      scope.add(() => cleanupLegacyObjectPrototypeCwGetters(win));
+      if (!resolvedHostConfig.isRemoteHost(win.location?.hostname)) {
+        Promise.resolve(engine.syncDesktopAnnotations(win.__APP_CONFIG__?.csrfToken || '', null)).catch(() => {});
+      }
+      coordinator.start();
+      const destroy = () => {
+        scope.dispose();
+        if (win.__agyStatusBarCleanup === destroy) {
+          delete win.__agyStatusBarCleanup;
+        }
+      };
+      scope.listen(win, 'pagehide', destroy);
+      win.__agyStatusBarCleanup = destroy;
+      const api = {
+        version: '2.0.0',
+        pluginBus,
+        registerAdapter: adapterRegistry.registerAdapter,
+        unregisterAdapter: adapterRegistry.unregisterAdapter,
+        getAdapters: adapterRegistry.getAdapters,
+        getContextWindow: (cascadeId) => cwStore.getSavedContextWindow(cascadeId),
+        setContextWindow: (cascadeId, cw) => {
+          const res = coordinator.setConversationContextWindow(null, cascadeId, cw);
+          coordinator.updateAll();
+          return res;
+        },
+        getLocale: () => translator.getLocale(),
+        setLocale: (locale) => {
+          const next = translator.setLocale(locale);
+          coordinator.updateAll();
+          return next;
+        },
+        updateAll: coordinator.updateAll,
+        runCompact: (inputBox, promptOverride) => compactDriver.runCompactForInputBox(inputBox, promptOverride),
+        openDebugModal: (view, inputBox) => contextModalAdapter.openOrToggleDebugModal(view, inputBox),
+        destroy,
+      };
+      win.agyStatusBar = api;
+      return api;
+    }
+    function shouldAutoMount() {
+      if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+      if (globalThis.__AGY_STATUSBAR_DISABLE_AUTOMOUNT__ || window.__AGY_STATUSBAR_DISABLE_AUTOMOUNT__) return false;
+      if (typeof process !== 'undefined' && process.env && process.env.AGY_STATUSBAR_DISABLE_AUTOMOUNT === '1') {
+        return false;
+      }
+      return true;
+    }
+    if (shouldAutoMount()) {
+      try {
+        mountStatusBar(window);
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.error) {
+          console.error('[agy-statusbar] mount failed:', err);
+        }
+      }
+    }
+    module.exports = {
+      PLUGIN_BUS_SYMBOL,
+      mountStatusBar,
     };
   },
   "./index": function(module, exports, __require) {
     const require = (spec) => __require(".", spec);
     'use strict';
-    const { CONTEXT_WINDOWS, PRESET_CONTEXT_WINDOWS, createContextWindowStore } = require('./context-window-policy');
-    const { resolveHostAdapterConfig } = require('./host-adapter-config');
-    const { ensureStyleElement, createTrustedHtmlSetter } = require('./dom-styles');
-    const {
-      disposeCompanionPolicyController,
-      ensureRemoteCompanionScripts,
-    } = require('./companion-loader');
-    const { registerCustomCwInPrototype, createHostBridge } = require('./host-bridge');
-    const { createRpcClient } = require('./rpc-client');
-    const { createAdapterRegistry } = require('./adapter-registry');
-    const { createCoreMetricsAdapter } = require('./adapters/core-metrics');
-    const { createCompactButtonAdapter } = require('./adapters/compact-button');
-    const { createContextButtonAdapter } = require('./adapters/context-button');
-    const STATUSBAR_VERSION = 'v34';
-    function isIgnoredCustomOrTranslatedNode(node) {
-      let cur = node && node.nodeType !== 1 ? (node.parentElement || node.parentNode) : node;
-      while (cur && cur.nodeType === 1) {
-        const id = cur.id || '';
-        if (
-          id === 'agy-ctx-debug-modal' ||
-          id === 'agy-ctx-statusbar-style' ||
-          id === 'agy-mcp-remote-launcher' ||
-          id === 'agy-mcp-manager-modal-backdrop' ||
-          id === 'agy-mcp-edit-popup-backdrop' ||
-          id === 'agy-mcp-oauth-connect-backdrop' ||
-          id === 'agy-mcp-settings-pane' ||
-          id === 'agy-ko-settings-pane' ||
-          id === 'agy-mcp-manager-styles'
-        ) {
-          return true;
-        }
-        const cls = typeof cur.className === 'string' ? cur.className : '';
-        if (
-          cls.includes('agy-ctx-statusbar') ||
-          cls.includes('agy-ctx-menu') ||
-          cur.classList?.contains?.('agy-ctx-statusbar') ||
-          cur.classList?.contains?.('agy-ctx-menu')
-        ) {
-          return true;
-        }
-        if (
-          typeof cur.hasAttribute === 'function' &&
-          (cur.hasAttribute('data-agy-no-translate') ||
-            cur.hasAttribute('data-agy-custom-mcp-btn') ||
-            cur.hasAttribute('data-ko-translated') ||
-            cur.hasAttribute('data-agy-ko-translated'))
-        ) {
-          return true;
-        }
-        cur = cur.parentElement || cur.parentNode;
-      }
-      return false;
-    }
-    function nodeTouchesStatusBarAnchors(node) {
-      if (!node || node.nodeType !== 1) return false;
-      const tag = String(node.tagName || '').toUpperCase();
-      if (tag === 'GA-REMOTE-CONTROL' || tag === 'IFRAME') return true;
-      const tid = typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') : '';
-      if (tid === 'conversation-view' || tid === 'agent-input-box' || tid === 'model-selector-trigger') {
-        return true;
-      }
-      if (typeof node.querySelector === 'function') {
-        try {
-          if (
-            node.querySelector(
-              '[data-testid="conversation-view"], [data-testid="agent-input-box"], [data-testid="model-selector-trigger"], ga-remote-control'
-            )
-          ) {
-            return true;
-          }
-        } catch {}
-      }
-      return false;
-    }
-    function isRelevantStatusBarMutation(mutations) {
-      if (!Array.isArray(mutations) || mutations.length === 0) return true;
-      for (let i = 0; i < mutations.length; i++) {
-        const m = mutations[i];
-        if (!m) continue;
-        if (isIgnoredCustomOrTranslatedNode(m.target)) continue;
-        if (m.type === 'attributes') {
-          if (
-            m.attributeName === 'data-context-window' &&
-            m.target?.__agyInternalDomCw &&
-            typeof m.target.getAttribute === 'function' &&
-            m.target.getAttribute('data-context-window') === m.target.__agyInternalDomCw
-          ) {
-            continue;
-          }
-          if (!m.attributeName || m.attributeName === 'data-cascade-id' || m.attributeName === 'data-context-window') {
-            return true;
-          }
-          continue;
-        }
-        if (!m.addedNodes && !m.removedNodes) return true;
-        const targetTid = m.target && typeof m.target.getAttribute === 'function' ? m.target.getAttribute('data-testid') : '';
-        if (targetTid === 'agent-input-box' || targetTid === 'conversation-view' || targetTid === 'model-selector-trigger') {
-          return true;
-        }
-        const added = m.addedNodes;
-        if (added && added.length > 0) {
-          for (let j = 0; j < added.length; j++) {
-            const n = added[j];
-            if (!n || isIgnoredCustomOrTranslatedNode(n)) continue;
-            if (!n.nodeType || nodeTouchesStatusBarAnchors(n)) return true;
-          }
-        }
-        const removed = m.removedNodes;
-        if (removed && removed.length > 0) {
-          for (let j = 0; j < removed.length; j++) {
-            const n = removed[j];
-            if (!n) continue;
-            if (
-              (typeof n.className === 'string' && n.className.includes('agy-ctx-statusbar')) ||
-              nodeTouchesStatusBarAnchors(n)
-            ) {
-              return true;
-            }
-          }
-        }
-      }
-      return false;
-    }
-    function mountStatusBar(env = {}) {
-      const win = env.window || (typeof window !== 'undefined' ? window : null);
-      const doc = env.document || win?.document || (typeof document !== 'undefined' ? document : null);
-      let ls = env.localStorage || null;
-      if (!ls) {
-        try {
-          ls = win?.localStorage || (typeof localStorage !== 'undefined' ? localStorage : null);
-        } catch {
-          ls = null;
-        }
-      }
-      const fetchFn = env.fetch || win?.fetch || (typeof fetch !== 'undefined' ? fetch : null);
-      if (!win || !doc) return null;
-      if (win.__agyStatusBarActiveVersion === STATUSBAR_VERSION && win.__agyStatusBarCleanup) {
-        return win.agyStatusBar;
-      }
-      if (win.__agyStatusBarCleanup) {
-        try { win.__agyStatusBarCleanup(); } catch {}
-      }
-      const underDefaultCwSet = new Set(['128K', '256K']);
-      const refreshStyles = () => ensureStyleElement(doc, underDefaultCwSet);
-      let hostBridge = null;
-      const cwStore = createContextWindowStore({
-        document: doc,
-        localStorage: ls,
-        nativeStorage: win.nativeStorage,
-        onCustomCw: (cw) => {
-          let extraWin = null;
-          try {
-            extraWin = doc.querySelector?.('ga-remote-control iframe')?.contentWindow || null;
-          } catch {}
-          registerCustomCwInPrototype(cw, underDefaultCwSet, refreshStyles, extraWin);
-        },
-        onSaveCw: (cid) => {
-          if (hostBridge && typeof hostBridge.pushSessionCwToServer === 'function') {
-            const targetView = (cid && doc.querySelector?.(`[data-testid="conversation-view"][data-cascade-id="${cid}"]`))
-              || doc.querySelector?.('[data-testid="conversation-view"]');
-            hostBridge.pushSessionCwToServer(
-              cid,
-              win.__APP_CONFIG__?.csrfToken,
-              targetView
-            );
-          }
-        },
-      });
-      refreshStyles();
-      const setHtml = createTrustedHtmlSetter(win, doc);
-      const resolvedHostConfig = resolveHostAdapterConfig(env.hostConfig, win);
-      hostBridge = createHostBridge({
-        window: win,
-        document: doc,
-        localStorage: ls,
-        fetchFn,
-        cwStore,
-        hostConfig: resolvedHostConfig,
-      });
-      Promise.resolve(ensureRemoteCompanionScripts(win, doc, fetchFn, hostBridge, resolvedHostConfig)).catch(() => null);
-      const rpcClient = createRpcClient({
-        window: win,
-        fetchFn,
-        localStorage: ls,
-        getAgentStateProviderForInputBox: hostBridge.getAgentStateProviderForInputBox,
-        getRemoteRpcServiceForElement: hostBridge.getRemoteRpcServiceForElement,
-        hostConfig: resolvedHostConfig,
-      });
-      function getConversationContextWindow(view, cascadeId) {
-        if (cascadeId && !cwStore.hasSessionOverride(cascadeId)) {
-          const info = hostBridge.getModelSelectorContextForView(view);
-          const reduxCw = info?.reduxStore?.getState?.()?.modelSelection?.byConversation?.[cascadeId]?.contextWindow;
-          cwStore.seedSessionIfEmpty(cascadeId, reduxCw);
-        }
-        const saved = cwStore.getSavedContextWindow(cascadeId);
-        hostBridge.applyContextWindowToEngine(view, cascadeId, saved);
-        return saved;
-      }
-      function setConversationContextWindow(view, cascadeId, rawTargetCw) {
-        const norm = cwStore.saveContextWindowSetting(cascadeId, rawTargetCw);
-        if (!norm) return null;
-        if (view) {
-          view.__lastAppliedTargetCw = norm;
-          view.__lastObservedDomCw = norm;
-          view.__ignoreDomCwUntil = Date.now() + 500;
-        }
-        hostBridge.applyContextWindowToEngine(view, cascadeId, norm, true);
-        return norm;
-      }
-      function cycleConversationContextWindow(view, cascadeId) {
-        const current = cwStore.getSavedContextWindow(cascadeId);
-        const idx = CONTEXT_WINDOWS.indexOf(current);
-        const next = CONTEXT_WINDOWS[(idx + 1) % CONTEXT_WINDOWS.length];
-        setConversationContextWindow(view, cascadeId, next);
-        return next;
-      }
-      const registry = createAdapterRegistry({
-        window: win,
-        document: doc,
-        setHtml,
-        onUpdate: () => updateAll(),
-      });
-      const coreMetricsAdapter = createCoreMetricsAdapter({
-        document: doc,
-        setHtml,
-        cwStore,
-        getConversationContextWindow,
-        setConversationContextWindow,
-        cycleConversationContextWindow,
-        updateAll: () => updateAll(),
-      });
-      const compactButtonAdapter = createCompactButtonAdapter({
-        runCompactForInputBox: hostBridge.runCompactForInputBox,
-      });
-      const contextButtonAdapter = createContextButtonAdapter({
-        window: win,
-        document: doc,
-        fetchFn,
-        setHtml,
-        cwStore,
-        hostBridge,
-        hostConfig: resolvedHostConfig,
-      });
-      registry.registerBuiltinAdapters([
-        coreMetricsAdapter,
-        compactButtonAdapter,
-        contextButtonAdapter,
-      ]);
-      function renderBar(barEl, view, inputBox, stats, quota, precomputedCw, extraCtx) {
-        const cascadeId = view.getAttribute('data-cascade-id');
-        const { leftEl, rightEl } = registry.ensureBarStructure(barEl);
-        const currentCw = precomputedCw || getConversationContextWindow(view, cascadeId);
-        const ctx = {
-          barEl,
-          view,
-          inputBox,
-          cascadeId,
-          currentCw,
-          stats,
-          quota,
-          deferUncachedMetrics: Boolean(extraCtx && extraCtx.deferUncachedMetrics),
-          updateAll,
-          getConversationContextWindow: () => getConversationContextWindow(view, cascadeId),
-          setConversationContextWindow: (cw) => setConversationContextWindow(view, cascadeId, cw),
-        };
-        registry.renderSlotAdapters(leftEl, 'left', ctx);
-        registry.renderSlotAdapters(rightEl, 'right', ctx);
-      }
-      let disposed = false;
-      function updateAll() {
-        if (disposed) return;
-        refreshStyles();
-        hostBridge.ensureContextWindowSelectorFlag();
-        hostBridge.ensureCustomizationsStoreLoaded();
-        hostBridge.ensureRemoteHostView(() => updateAll());
-        const csrf = win.__APP_CONFIG__ && win.__APP_CONFIG__.csrfToken;
-        const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
-        if (!views.length) return;
-        if (!csrf && !hostBridge.getRemoteRpcServiceForElement(views[0])) return;
-        const quotaPromise = rpcClient.fetchQuota(csrf, views[0]);
-        hostBridge.syncDesktopAnnotations(csrf, views[0], () => updateAll());
-        for (const view of views) {
-          const cascadeId = view.getAttribute('data-cascade-id');
-          const inputBox = view.querySelector('[data-testid="agent-input-box"]');
-          if (!cascadeId || !inputBox) continue;
-          if (view.__lastTrackedCascadeId !== cascadeId) {
-            view.__lastTrackedCascadeId = cascadeId;
-            view.__lastObservedDomCw = null;
-            view.__lastAppliedTargetCw = null;
-            view.__ignoreDomCwUntil = Date.now() + 500;
-          }
-          inputBox.__lastCascadeId = cascadeId;
-          const triggerEl = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
-          const domCw = cwStore.normalize(triggerEl ? triggerEl.getAttribute('data-context-window') : null);
-          const canAdoptFromDom = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
-          if (canAdoptFromDom && domCw && PRESET_CONTEXT_WINDOWS.includes(domCw) && view.__lastObservedDomCw && view.__lastObservedDomCw !== domCw) {
-            const savedCw = cwStore.getSavedContextWindow(cascadeId);
-            if (domCw !== savedCw && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
-              cwStore.saveContextWindowSetting(cascadeId, domCw);
-            }
-          }
-          const targetCw = getConversationContextWindow(view, cascadeId);
-          view.__lastAppliedTargetCw = targetCw;
-          if (triggerEl && canAdoptFromDom) {
-            view.__lastObservedDomCw = triggerEl.getAttribute('data-context-window') || targetCw;
-          }
-          let barEl = inputBox.querySelector('.agy-ctx-statusbar');
-          const isNewlyCreatedBar = !barEl;
-          if (!barEl) {
-            barEl = doc.createElement('div');
-            barEl.className = 'agy-ctx-statusbar';
-            barEl.setAttribute?.('data-agy-no-translate', 'true');
-            barEl.setAttribute?.('translate', 'no');
-            inputBox.appendChild(barEl);
-          }
-          const cachedData = rpcClient.getCachedStats(cascadeId);
-          const immediateData = rpcClient.getImmediateStats
-            ? rpcClient.getImmediateStats(cascadeId, inputBox)
-            : cachedData;
-          const deferUncachedMetrics = Boolean(!isNewlyCreatedBar && !immediateData);
-          renderBar(barEl, view, inputBox, immediateData, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics });
-          Promise.all([
-            Promise.resolve(rpcClient.fetchCascadeStats(cascadeId, csrf, inputBox)).catch(() => null),
-            Promise.resolve(quotaPromise).catch(() => null),
-          ]).then(([data, freshQuota]) => {
-            if (disposed || !barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
-            const finalData = data || cachedData || immediateData;
-            renderBar(barEl, view, inputBox, finalData, freshQuota || rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
-          }).catch(() => {
-            if (disposed || !barEl.isConnected || view.getAttribute('data-cascade-id') !== cascadeId) return;
-            renderBar(barEl, view, inputBox, cachedData || immediateData || null, rpcClient.getLatestQuota(), targetCw, { deferUncachedMetrics: false });
-          });
-        }
-      }
-      win.agyStatusBar = {
-        version: STATUSBAR_VERSION,
-        registerAdapter: registry.registerAdapter,
-        unregisterAdapter: registry.unregisterAdapter,
-        getAdapters: registry.getAdapters,
-        updateAll,
-        getConversationContextWindow,
-        setConversationContextWindow,
-      };
-      Promise.resolve(cwStore.loadPersistentContextSettings()).then(() => {
-        if (disposed) return;
-        hostBridge.syncDesktopAnnotations(
-          win.__APP_CONFIG__?.csrfToken,
-          doc.querySelector?.('[data-testid="conversation-view"]'),
-          () => updateAll(),
-          true
-        );
-        updateAll();
-      }).catch(() => {});
-      updateAll();
-      const setIntervalFn = env.setInterval || win.setInterval || setInterval;
-      const clearIntervalFn = env.clearInterval || win.clearInterval || clearInterval;
-      const timer = setIntervalFn(updateAll, 3000);
-      if (timer && typeof timer.unref === 'function') {
-        timer.unref();
-      }
-      const ObsClass = env.MutationObserver || win.MutationObserver || (typeof MutationObserver !== 'undefined' ? MutationObserver : null);
-      const obs = ObsClass ? new ObsClass((mutations) => {
-        if (!isRelevantStatusBarMutation(mutations)) return;
-        const views = doc.querySelectorAll('[data-testid="conversation-view"][data-cascade-id]');
-        for (const view of views) {
-          const cid = view.getAttribute('data-cascade-id');
-          const box = view.querySelector('[data-testid="agent-input-box"]');
-          if (box && (!box.querySelector('.agy-ctx-statusbar') || box.__lastCascadeId !== cid || view.__lastTrackedCascadeId !== cid)) {
-            box.__lastCascadeId = cid;
-            view.__lastTrackedCascadeId = cid;
-            view.__lastObservedDomCw = null;
-            view.__lastAppliedTargetCw = null;
-            view.__ignoreDomCwUntil = Date.now() + 500;
-            updateAll();
-            return;
-          }
-          const trigger = hostBridge.getModelSelectorContextForView(view)?.triggerEl || view.querySelector('[data-testid="model-selector-trigger"]');
-          if (cid && trigger) {
-            const rawDomCw = trigger.getAttribute('data-context-window');
-            const actual = cwStore.normalize(rawDomCw) || '256K';
-            const expected = cwStore.getSavedContextWindow(cid);
-            const model = hostBridge.getSelectedModelKey(view, cid);
-            const expectedKey = (model || '') + ':' + String(expected);
-            const lastByCid = win.__agyLastAppliedContextWindowByCascade?.[cid];
-            const domMissingOrDrifted = !rawDomCw || actual !== expected;
-            if (domMissingOrDrifted && (lastByCid !== expectedKey || win.__agyLastAppliedContextWindow !== expectedKey || !rawDomCw || actual !== expected)) {
-              const canAdopt = !view.__ignoreDomCwUntil || Date.now() > view.__ignoreDomCwUntil;
-              if (canAdopt && rawDomCw && PRESET_CONTEXT_WINDOWS.includes(actual) && view.__lastObservedDomCw && view.__lastObservedDomCw !== actual && view.__lastAppliedTargetCw === view.__lastObservedDomCw) {
-                cwStore.saveContextWindowSetting(cid, actual);
-                view.__lastAppliedTargetCw = actual;
-                view.__lastObservedDomCw = actual;
-                updateAll();
-              } else {
-                hostBridge.applyContextWindowToEngine(view, cid, expected);
-                view.__lastObservedDomCw = trigger.getAttribute('data-context-window') || expected;
-              }
-            }
-          }
-        }
-      }) : null;
-      function attachBodyObserver() {
-        if (!obs) return;
-        const rootTarget = doc.body || doc.documentElement;
-        if (!rootTarget) {
-          win.addEventListener?.('DOMContentLoaded', attachBodyObserver, { once: true });
-          return;
-        }
-        obs.observe(rootTarget, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['data-cascade-id', 'data-context-window'],
-        });
-      }
-      attachBodyObserver();
-      const cleanupStatusBar = () => {
-        disposed = true;
-        delete win.__agyStatusBarActiveVersion;
-        clearIntervalFn(timer);
-        win.removeEventListener?.('DOMContentLoaded', attachBodyObserver);
-        if (obs) obs.disconnect();
-        for (const adapter of registry.getSortedAdapters()) {
-          if (typeof adapter.unmount === 'function') {
-            try { adapter.unmount(); } catch {}
-          }
-        }
-        if (typeof rpcClient?.dispose === 'function') {
-          try { rpcClient.dispose(); } catch {}
-        }
-        if (typeof hostBridge?.dispose === 'function') {
-          try { hostBridge.dispose(); } catch {}
-        }
-        const targetDocs = [doc];
-        try {
-          const iframeDoc = doc.querySelector?.('ga-remote-control iframe')?.contentDocument;
-          if (iframeDoc && iframeDoc !== doc) targetDocs.push(iframeDoc);
-        } catch {}
-        for (const targetDoc of targetDocs) {
-          const m = targetDoc.getElementById?.('agy-ctx-debug-modal');
-          if (m) {
-            if (typeof m.__agyCleanup === 'function') m.__agyCleanup();
-            else m.remove?.();
-          }
-          const menus = targetDoc.querySelectorAll?.('.agy-ctx-menu') || [];
-          for (const menu of menus) {
-            if (typeof menu.__agyCleanup === 'function') menu.__agyCleanup();
-            else menu.remove?.();
-          }
-          const bars = targetDoc.querySelectorAll?.('.agy-ctx-statusbar') || [];
-          for (const b of bars) b.remove?.();
-          const hostViews = targetDoc.querySelectorAll?.('.agy-rc-host-view') || [];
-          for (const hv of hostViews) hv.remove?.();
-          const styleEl = targetDoc.getElementById?.('agy-ctx-statusbar-style');
-          if (styleEl && typeof styleEl.remove === 'function') {
-            styleEl.remove();
-          }
-        }
-        try {
-          delete win.__agyRcGenLenByCascade;
-          delete win.__agyRcStepCountByCascade;
-          delete win.__agyLastAppliedContextWindow;
-          delete win.__agyLastAppliedContextWindowByCascade;
-          delete win.__agySniffedCascadeId;
-          delete win.__agySniffedCascadeTs;
-          disposeCompanionPolicyController(win);
-          const hasActiveCompanions = Boolean(
-            win.agyMcpManager || win.__agyKoLocalizerActive || win.__agyKoThoughtCleanup
-          );
-          if (!hasActiveCompanions) {
-            delete win.__agyHostInstalledPlugins;
-            delete win.__agyLoadingMcpManagerCompanion;
-            delete win.__agyLoadingKoTranslatorCompanion;
-            delete win.__agyLoadingKoThoughtCompanion;
-            delete win.__agyCapturedLsClient;
-            delete win.__agyRemoteControlInstance;
-            delete win.__agyTrustedTypesPolicy;
-            delete win.__agyTrustedHtmlPolicy;
-          }
-        } catch {}
-        try {
-          delete win.agyStatusBar;
-        } catch {
-          win.agyStatusBar = undefined;
-        }
-        if (win.__agyStatusBarCleanup === cleanupStatusBar) {
-          try {
-            delete win.__agyStatusBarCleanup;
-          } catch {
-            win.__agyStatusBarCleanup = undefined;
-          }
-        }
-      };
-      win.__agyStatusBarCleanup = cleanupStatusBar;
-      win.__agyStatusBarActiveVersion = STATUSBAR_VERSION;
-      return win.agyStatusBar;
-    }
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-      mountStatusBar();
-    }
-    module.exports = {
-      STATUSBAR_VERSION,
-      isIgnoredCustomOrTranslatedNode,
-      isRelevantStatusBarMutation,
-      ensureRemoteCompanionScripts,
-      mountStatusBar,
-    };
+    /**
+     * Compatibility entry facade delegating directly to the Hexagonal Composition Root.
+     */
+    module.exports = require('./app/index');
   }
   };
   const __cache = {};
