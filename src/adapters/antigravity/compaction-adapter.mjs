@@ -203,22 +203,80 @@ export function createAntigravityCompactionAdapter({
     },
 
     /**
-     * Terminates all active child processes immediately on sidecar shutdown (F6, NB4, D-0020).
+     * Asynchronously terminates all active child processes on sidecar shutdown (F1, F6, D-0020):
+     * Checks live status via `exitCode === null && signalCode === null` (not `child.killed`),
+     * sends SIGTERM, clears timer on exit, and escalates to SIGKILL after `graceMs`.
+     *
+     * @param {{ graceMs?: number }} [opts]
+     * @returns {Promise<void>}
      */
-    dispose() {
+    async dispose({ graceMs = 1_500 } = {}) {
+      const children = Array.from(activeChildren);
+      activeChildren.clear();
+
+      await Promise.all(
+        children.map(
+          (child) =>
+            new Promise((resolve) => {
+              const isAlive = () => child.exitCode === null && child.signalCode === null;
+              if (!isAlive()) {
+                resolve();
+                return;
+              }
+
+              let settled = false;
+              let killTimer = null;
+              let finalTimer = null;
+
+              const done = () => {
+                if (settled) return;
+                settled = true;
+                if (killTimer) clearTimeout(killTimer);
+                if (finalTimer) clearTimeout(finalTimer);
+                child.removeListener('exit', done);
+                child.removeListener('close', done);
+                resolve();
+              };
+
+              child.once('exit', done);
+              child.once('close', done);
+
+              try {
+                child.kill('SIGTERM');
+              } catch {
+                done();
+                return;
+              }
+
+              killTimer = setTimeout(() => {
+                if (!isAlive()) {
+                  done();
+                  return;
+                }
+                try {
+                  child.kill('SIGKILL');
+                } catch {
+                  done();
+                  return;
+                }
+                finalTimer = setTimeout(done, 500);
+              }, graceMs);
+            }),
+        ),
+      );
+    },
+
+    /**
+     * Synchronous last-resort cleanup for process `exit` event.
+     */
+    disposeSync() {
       for (const child of activeChildren) {
-        try {
-          child.kill('SIGTERM');
-          const killTimer = setTimeout(() => {
-            try {
-              if (!child.killed) child.kill('SIGKILL');
-            } catch {
-              // ignore
-            }
-          }, 1_500);
-          killTimer.unref?.();
-        } catch {
-          // ignore
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
         }
       }
       activeChildren.clear();

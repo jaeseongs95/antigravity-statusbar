@@ -8,10 +8,13 @@
  * @returns {number | null}
  */
 export function toNonNegativeIntOrNull(value) {
-  if (value === null || value === undefined || value === '') {
+  if (value === null || value === undefined) {
     return null;
   }
-  const num = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  if (typeof value === 'string' && value.trim() === '') {
+    return null;
+  }
+  const num = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : NaN;
   if (!Number.isFinite(num) || num < 0) {
     return null;
   }

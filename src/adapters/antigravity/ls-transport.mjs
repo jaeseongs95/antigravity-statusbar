@@ -469,17 +469,20 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
       }
       const list = Array.isArray(resp?.generatorMetadata) ? resp.generatorMetadata : [];
       if (list.length > 0) {
-        // F4: Accept items carrying usage, chatStartMetadata, modelDisplayName, or oneof chatModel
+        // F4 & NB1: Accept items carrying non-empty usage, chatStartMetadata, modelDisplayName, or model
         const hasUsefulChatModel = list.some((item) => {
           const cm =
             item?.chatModel ||
             (item?.metadata?.case === 'chatModel' ? item.metadata.value : null);
+          if (!cm) return false;
+          const hasNonEmptyUsage = Boolean(
+            cm.usage && (cm.usage.inputTokens != null || cm.usage.cacheReadTokens != null),
+          );
           return Boolean(
-            cm &&
-              (cm.usage ||
-                cm.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups ||
-                cm.modelDisplayName ||
-                cm.model),
+            hasNonEmptyUsage ||
+              cm.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups ||
+              cm.modelDisplayName ||
+              cm.model,
           );
         });
         if (hasUsefulChatModel || offset === 0) {

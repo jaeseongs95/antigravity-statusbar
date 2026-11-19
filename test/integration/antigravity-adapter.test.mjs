@@ -194,8 +194,64 @@ test('compaction-adapter rejects UNC exe paths and runs bounded spawn fallback o
   });
   const failRes = await failAdapter.compactSession('sess-1');
   assert.equal(failRes.accepted, false);
-  failAdapter.dispose();
-  adapter.dispose();
+  await failAdapter.dispose();
+  await adapter.dispose();
+});
+
+test('R4-F1 (D-0020): async dispose() terminates live SIGTERM-trapping child via SIGKILL escalation', async () => {
+  let spawnedChild = null;
+  const adapter = createAntigravityCompactionAdapter({
+    lsTransport: {
+      callUnaryRpc: async () => {
+        throw new Error('RPC unavailable');
+      },
+    },
+    agentApiExePath: process.execPath,
+    fallbackTimeoutMs: 15_000,
+    spawnFn: (_exe, _args, opts) => {
+      // Child intentionally ignores SIGTERM (on POSIX) and stays alive until SIGKILL
+      spawnedChild = spawn(
+        process.execPath,
+        [
+          '-e',
+          "process.on('SIGTERM', () => {}); process.stdout.write('READY\\n'); setInterval(() => {}, 10000);",
+        ],
+        { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], signal: opts.signal },
+      );
+      return spawnedChild;
+    },
+  });
+
+  const compactPromise = adapter.compactSession('sess-kill-test');
+
+  // Wait until child prints READY so SIGTERM trap is registered
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Child did not emit READY')), 5_000);
+    const check = setInterval(() => {
+      if (spawnedChild && spawnedChild.stdout) {
+        clearInterval(check);
+        spawnedChild.stdout.on('data', (chunk) => {
+          if (chunk.toString('utf8').includes('READY')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      }
+    }, 10);
+  });
+
+  assert.equal(adapter.activeChildCount, 1);
+
+  // Dispose MUST escalate SIGTERM -> SIGKILL after graceMs and await full exit
+  await adapter.dispose({ graceMs: 150 });
+  assert.equal(adapter.activeChildCount, 0);
+  assert.ok(
+    spawnedChild.exitCode !== null || spawnedChild.signalCode !== null,
+    'Expected child process to have exited after dispose()',
+  );
+
+  const compactRes = await compactPromise;
+  assert.equal(compactRes.accepted, false);
 });
 
 test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parses real Antigravity LS fields', () => {
@@ -328,9 +384,13 @@ test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parse
   assert.equal(oneofSchema.tokenBreakdown[0].tokens, 6500);
 });
 
-test('F1 & R2-F4: mapQuotaSummary parses real response.groups, displayName, remaining.case, and protobuf Timestamp resetTime', () => {
+test('F1 & R2-F4 & NB2: mapQuotaSummary parses real response.groups, displayName, remaining.case, and protobuf Timestamp resetTime', () => {
   const isoFromProto = normalizeResetTime({ seconds: '1795070000', nanos: 0 });
   assert.ok(isoFromProto && isoFromProto.endsWith('Z'));
+  // NB2: null/empty seconds must return null (not 1970 epoch)
+  assert.equal(normalizeResetTime({ seconds: null }), null);
+  assert.equal(normalizeResetTime({ seconds: '' }), null);
+  assert.equal(normalizeResetTime({ seconds: '   ' }), null);
 
   const mapped = mapQuotaSummary({
     data: {

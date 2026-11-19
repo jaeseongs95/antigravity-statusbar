@@ -18,8 +18,13 @@ const TOKEN_GROUP_LABELS = Object.freeze({
 
 function formatTokenGroupLabel(rawType) {
   if (typeof rawType !== 'string' || !rawType.trim()) return 'Other';
-  if (Object.hasOwn(TOKEN_GROUP_LABELS, rawType)) return TOKEN_GROUP_LABELS[rawType];
-  return rawType
+  const trimmed = rawType.trim();
+  if (Object.hasOwn(TOKEN_GROUP_LABELS, trimmed)) return TOKEN_GROUP_LABELS[trimmed];
+  // NB2: Preserve human-readable displayName containing spaces or mixed case verbatim
+  if (!/^TOKEN_GROUP_|^[A-Z0-9_]+$/.test(trimmed)) {
+    return trimmed;
+  }
+  return trimmed
     .replace(/^TOKEN_GROUP_/, '')
     .toLowerCase()
     .split('_')
@@ -28,7 +33,7 @@ function formatTokenGroupLabel(rawType) {
 }
 
 /**
- * Normalizes a string ISO timestamp or protobuf Timestamp `{ seconds, nanos }` into an ISO-8601 string (F4).
+ * Normalizes a string ISO timestamp or protobuf Timestamp `{ seconds, nanos }` into an ISO-8601 string (F4, NB2).
  *
  * @param {unknown} raw
  * @returns {string | null}
@@ -37,7 +42,14 @@ export function normalizeResetTime(raw) {
   if (typeof raw === 'string' && raw.trim()) {
     return raw.trim();
   }
-  if (raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, 'seconds')) {
+  if (raw && typeof raw === 'object' && Object.hasOwn(raw, 'seconds')) {
+    if (
+      raw.seconds === null ||
+      raw.seconds === undefined ||
+      (typeof raw.seconds === 'string' && raw.seconds.trim() === '')
+    ) {
+      return null;
+    }
     const secs = Number(raw.seconds);
     const nanos = Number(raw.nanos ?? 0);
     if (Number.isFinite(secs) && secs >= 0) {

@@ -514,8 +514,11 @@ export async function startSidecar(env = process.env) {
     })}\n`,
   );
 
+  let shuttingDown = false;
   const shutdown = async () => {
-    compactionPort.dispose();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await compactionPort.dispose();
     await sidecar.close();
     process.exit(0);
   };
@@ -523,7 +526,7 @@ export async function startSidecar(env = process.env) {
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
   process.once('exit', () => {
-    compactionPort.dispose();
+    compactionPort.disposeSync();
   });
 
   return { sidecar, port, url, shutdown };

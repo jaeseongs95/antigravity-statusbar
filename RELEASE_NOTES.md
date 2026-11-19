@@ -27,8 +27,9 @@
 - **Obsolete v1/v2 Defects (`NOT_DEFECT`)**: `D-0001`, `D-0004`, `D-0010`, `D-0011`, `D-0015`, `D-0032`, `D-0034` closed as `NOT_DEFECT` following removal of `app.asar` patching, UserScript bundling, and Remote Web bookmarklet code.
 
 ### 4. Verification & CI Evidence
-- **Test Suite**: `npm test` (static boundary, unit, storage concurrency, Antigravity adapter + live `sidecars/statusbar/main.mjs` subprocess E2E, sidecar security, UI controller + interactive Headless Chromium/Edge CDP E2E)
-- **Branch**: `feature/v3-native-plugin` (2-OS GitHub Actions CI `ubuntu-latest` + `windows-latest` & Linux/Windows TEST servers — exact commit SHA and CI run URL recorded in PostgreSQL ledger `ANTIGRAVITY_STATUSBAR-T-0006`)
+- **Test Suite**: `npm test` (`31/31` passed on Windows TEST & 2-OS CI; `30/30` passed on Linux TEST with 1 headless-browser skip)
+- **Commit SHA**: Tracked on `feature/v3-native-plugin` and recorded in PostgreSQL ledger `ANTIGRAVITY_STATUSBAR-T-0006`
+- **CI Workflow**: `https://github.com/jaeseongs95/antigravity-statusbar/actions` (2-OS `ubuntu-latest` + `windows-latest`, Node 20)
 
 ---
 
@@ -53,5 +54,6 @@
 - **폐기 구버전 결함 (`NOT_DEFECT`)**: `app.asar` 패치·UserScript·원격 북마클릿 전면 제거에 따라 `D-0001`, `D-0004`, `D-0010`, `D-0011`, `D-0015`, `D-0032`, `D-0034`를 `NOT_DEFECT`로 정리했습니다.
 
 ### 4. 검증 및 CI 근거
-- **테스트 결과**: `npm test` (정적 경계 검사, 코어 단위, 저장소 동시성, Antigravity 어댑터 + 실 `sidecars/statusbar/main.mjs` 서브프로세스 E2E, Sidecar 보안, UI 컨트롤러 + 인터랙티브 Headless Chromium/Edge CDP E2E)
-- **브랜치**: `feature/v3-native-plugin` (2-OS GitHub Actions CI `ubuntu-latest` + `windows-latest` 및 Linux/Windows TEST 서버 검증 완료 — 최종 커밋 SHA 및 CI 실행 URL은 PostgreSQL 장부 `ANTIGRAVITY_STATUSBAR-T-0006`에 기록)
+- **테스트 결과**: `npm test` (Windows TEST 및 2-OS CI `31/31` 통과, Linux TEST `30/30` 통과·브라우저 미설치 1건 skip)
+- **커밋 SHA**: `feature/v3-native-plugin` 최신 커밋 SHA (PostgreSQL 장부 `ANTIGRAVITY_STATUSBAR-T-0006`에 원시 증빙과 함께 기록)
+- **CI 실행 이력**: `https://github.com/jaeseongs95/antigravity-statusbar/actions` (2-OS `ubuntu-latest` + `windows-latest`, Node 20)

@@ -72,7 +72,8 @@ export function createStatusbarApp({
   let sessionListEpoch = 0;
   let snapshotEpoch = 0;
   let quotaEpoch = 0;
-  let localeUpdateInFlight = false;
+  let localeUpdateEpoch = 0;
+  let activeLocaleUpdates = 0;
   let snapshotController = null;
   let pollTimer = null;
   let quotaTimer = null;
@@ -153,6 +154,7 @@ export function createStatusbarApp({
     }
 
     renderPresetOptions();
+    renderSessionSelect();
     renderConnectionBadge();
     renderSnapshot();
     renderQuota();
@@ -373,6 +375,7 @@ export function createStatusbarApp({
     if (!sessionId || state.disposed) return;
 
     const myEpoch = ++snapshotEpoch;
+    const myLocaleEpoch = localeUpdateEpoch;
     if (snapshotController) {
       snapshotController.abort();
     }
@@ -392,7 +395,12 @@ export function createStatusbarApp({
       if (isNewSessionLoad) {
         syncLimitInputs(snap);
       }
-      if (snap.locale && snap.locale !== state.locale && !localeUpdateInFlight) {
+      if (
+        snap.locale &&
+        snap.locale !== state.locale &&
+        activeLocaleUpdates === 0 &&
+        myLocaleEpoch === localeUpdateEpoch
+      ) {
         state.locale = snap.locale;
         applyLocaleStrings();
       } else {
@@ -520,14 +528,15 @@ export function createStatusbarApp({
       async () => {
         const nextLocale = state.locale === 'ko' ? 'en' : 'ko';
         state.locale = nextLocale;
-        localeUpdateInFlight = true;
+        localeUpdateEpoch += 1;
+        activeLocaleUpdates += 1;
         applyLocaleStrings();
         try {
           await bridge.updateSettings({ locale: nextLocale });
         } catch {
           // Non-fatal UI fallback
         } finally {
-          localeUpdateInFlight = false;
+          activeLocaleUpdates = Math.max(0, activeLocaleUpdates - 1);
         }
       },
       { signal: sig },
