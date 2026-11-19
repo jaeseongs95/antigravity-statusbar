@@ -28,6 +28,53 @@ function formatTokenGroupLabel(rawType) {
 }
 
 /**
+ * Normalizes a string ISO timestamp or protobuf Timestamp `{ seconds, nanos }` into an ISO-8601 string (F4).
+ *
+ * @param {unknown} raw
+ * @returns {string | null}
+ */
+export function normalizeResetTime(raw) {
+  if (typeof raw === 'string' && raw.trim()) {
+    return raw.trim();
+  }
+  if (raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, 'seconds')) {
+    const secs = Number(raw.seconds);
+    const nanos = Number(raw.nanos ?? 0);
+    if (Number.isFinite(secs) && secs >= 0) {
+      const ms = secs * 1000 + (Number.isFinite(nanos) ? Math.floor(nanos / 1e6) : 0);
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) {
+        return d.toISOString();
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Unwraps a generatorMetadata item's chatModel payload, supporting both direct `item.chatModel`
+ * and protobuf-es oneof `{ metadata: { case: 'chatModel', value } }` (F4).
+ *
+ * @param {any} item
+ */
+function unwrapChatModel(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (item.chatModel && typeof item.chatModel === 'object') {
+    return item.chatModel;
+  }
+  if (
+    item.metadata &&
+    typeof item.metadata === 'object' &&
+    item.metadata.case === 'chatModel' &&
+    item.metadata.value &&
+    typeof item.metadata.value === 'object'
+  ) {
+    return item.metadata.value;
+  }
+  return null;
+}
+
+/**
  * Determines whether a provider's inputTokens already includes cacheReadTokens.
  * Empirically verified on Antigravity 2.33.0:
  * - API_PROVIDER_GOOGLE_GEMINI / API_PROVIDER_ANTHROPIC: uncached inputTokens separated -> false
@@ -58,7 +105,7 @@ export function mapTrajectorySummaries(resp) {
   const items = [];
   for (const [sessionId, info] of Object.entries(summariesObj)) {
     if (!info || typeof info !== 'object') continue;
-    const lastModifiedTime = typeof info.lastModifiedTime === 'string' ? info.lastModifiedTime : '';
+    const lastModifiedTime = normalizeResetTime(info.lastModifiedTime) || '';
     const lastModifiedMs = lastModifiedTime ? Date.parse(lastModifiedTime) : 0;
     items.push({
       sessionId,
@@ -111,7 +158,9 @@ export function extractLastCompactedStep(update) {
 }
 
 /**
- * Finds the most recent generatorMetadata item with chatModel.usage and optional tokenBreakdown.
+ * Finds the most recent generatorMetadata item with chatModel info (usage, model, or tokenBreakdown).
+ * Supports oneof `{ metadata: { case: 'chatModel', value } }`, `startStepIndex`, `modelDisplayName`,
+ * and `chatStartMetadata.contextWindowMetadata.tokenBreakdown.groups` (F4).
  *
  * @param {unknown[]} metadataList
  */
@@ -119,29 +168,67 @@ export function extractLatestUsageMetadata(metadataList) {
   if (!Array.isArray(metadataList) || metadataList.length === 0) {
     return null;
   }
+
+  let bestUsage = null;
+  let bestModel = null;
+  let bestBreakdown = null;
+  let bestStepIndex = null;
+
   for (let i = metadataList.length - 1; i >= 0; i -= 1) {
     const item = metadataList[i];
-    const usage = item?.chatModel?.usage;
-    const chatStartBreakdown =
-      item?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups;
+    const chatModel = unwrapChatModel(item);
+    if (!chatModel) continue;
 
-    if ((usage && typeof usage === 'object') || Array.isArray(chatStartBreakdown)) {
-      return {
-        modelName:
-          typeof item?.chatModel?.model === 'string'
-            ? item.chatModel.model
-            : typeof item?.chatModel?.modelName === 'string'
-              ? item.chatModel.modelName
-              : null,
-        apiProvider: usage?.apiProvider ?? item?.chatModel?.apiProvider ?? null,
-        inputTokens: toNonNegativeIntOrNull(usage?.inputTokens),
-        cacheReadTokens: toNonNegativeIntOrNull(usage?.cacheReadTokens),
-        stepIndex: toNonNegativeIntOrNull(item?.stepIndex ?? item?.stepIndices?.[0]),
-        tokenBreakdownGroups: Array.isArray(chatStartBreakdown) ? chatStartBreakdown : null,
+    const stepIdx = toNonNegativeIntOrNull(
+      item?.stepIndex ?? item?.startStepIndex ?? item?.stepIndices?.[0],
+    );
+    if (bestStepIndex === null && stepIdx !== null) {
+      bestStepIndex = stepIdx;
+    }
+
+    if (bestModel === null) {
+      const candidateModel =
+        (typeof chatModel.modelDisplayName === 'string' && chatModel.modelDisplayName.trim()) ||
+        (typeof chatModel.model === 'string' && chatModel.model.trim()) ||
+        (typeof chatModel.modelName === 'string' && chatModel.modelName.trim()) ||
+        null;
+      if (candidateModel) {
+        bestModel = candidateModel;
+      }
+    }
+
+    if (bestBreakdown === null) {
+      const groups = chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups;
+      if (Array.isArray(groups) && groups.length > 0) {
+        bestBreakdown = groups;
+      }
+    }
+
+    if (bestUsage === null && chatModel.usage && typeof chatModel.usage === 'object') {
+      bestUsage = {
+        apiProvider: chatModel.usage.apiProvider ?? chatModel.apiProvider ?? null,
+        inputTokens: toNonNegativeIntOrNull(chatModel.usage.inputTokens),
+        cacheReadTokens: toNonNegativeIntOrNull(chatModel.usage.cacheReadTokens),
       };
     }
+
+    if (bestUsage && bestModel && bestBreakdown) {
+      break;
+    }
   }
-  return null;
+
+  if (!bestUsage && !bestModel && !bestBreakdown) {
+    return null;
+  }
+
+  return {
+    modelName: bestModel,
+    apiProvider: bestUsage?.apiProvider ?? null,
+    inputTokens: bestUsage?.inputTokens ?? null,
+    cacheReadTokens: bestUsage?.cacheReadTokens ?? null,
+    stepIndex: bestStepIndex,
+    tokenBreakdownGroups: bestBreakdown,
+  };
 }
 
 /**
@@ -150,9 +237,9 @@ export function extractLatestUsageMetadata(metadataList) {
  *
  * Enforces:
  * - F1 / D-0033 Fail-Closed: NEVER falls back to requestedSessionId when update.conversationId is missing.
- * - F1 real LS schema: compactedAtStepIndices[], boolean|number estimatedAfterCompaction,
- *   chatStartMetadata.contextWindowMetadata.tokenBreakdown.groups[].numTokens.
- * - F4 post-compaction guard.
+ * - F1 repeated-compact guard: requires lastCompactedStep >= latestActivityStep in BOTH boolean and numeric branches.
+ * - F4 real LS schema: compactedAtStepIndices[], oneof chatModel, startStepIndex, modelDisplayName,
+ *   tokenBreakdown.groups[].source & numTokens.
  *
  * @param {{
  *   requestedSessionId: string,
@@ -197,22 +284,21 @@ export function mapSessionTelemetry({
     lastStepIndex !== null ? lastStepIndex : -1,
   );
 
-  // F1 & F4: Support both real boolean estimatedAfterCompaction and numeric estimatedAfterCompaction
+  // F1: Require lastCompactedStep >= latestActivityStep in BOTH boolean and numeric branches
+  const compactionIsCurrent =
+    lastCompactedStep !== null &&
+    lastCompactedStep >= 0 &&
+    lastCompactedStep >= latestActivityStep;
+
   let usedTokens = null;
   let usedTokensSource = 'unavailable';
   let compactionJustCompleted = false;
 
   if (afterCompactBool === true && estimatedUsed !== null) {
     usedTokens = estimatedUsed;
-    usedTokensSource = 'after_compaction';
-    compactionJustCompleted = lastCompactedStep !== null && lastCompactedStep >= 0;
-  } else if (
-    lastCompactedStep !== null &&
-    lastCompactedStep >= 0 &&
-    afterCompactTokens !== null &&
-    afterCompactTokens > 0 &&
-    lastCompactedStep >= latestActivityStep
-  ) {
+    usedTokensSource = compactionIsCurrent ? 'after_compaction' : 'estimated';
+    compactionJustCompleted = compactionIsCurrent;
+  } else if (compactionIsCurrent && afterCompactTokens !== null && afterCompactTokens > 0) {
     usedTokens = afterCompactTokens;
     usedTokensSource = 'after_compaction';
     compactionJustCompleted = true;
@@ -229,8 +315,6 @@ export function mapSessionTelemetry({
       })
     : null;
 
-  // F1: Prefer real chatStartMetadata.contextWindowMetadata.tokenBreakdown.groups[].numTokens,
-  // with fallback to contextWindowUsage.tokenGroups
   const rawGroups =
     Array.isArray(latestUsage?.tokenBreakdownGroups) && latestUsage.tokenBreakdownGroups.length > 0
       ? latestUsage.tokenBreakdownGroups
@@ -240,8 +324,10 @@ export function mapSessionTelemetry({
 
   const tokenBreakdown = normalizeTokenGroups(
     rawGroups.map((g) => ({
-      key: g?.groupType ?? g?.type ?? g?.name ?? g?.category ?? 'other',
-      label: formatTokenGroupLabel(g?.displayName ?? g?.groupType ?? g?.type ?? g?.name ?? g?.category),
+      key: g?.source ?? g?.groupType ?? g?.type ?? g?.name ?? g?.category ?? 'other',
+      label: formatTokenGroupLabel(
+        g?.displayName ?? g?.source ?? g?.groupType ?? g?.type ?? g?.name ?? g?.category,
+      ),
       tokens: g?.numTokens ?? g?.estimatedTokens ?? g?.tokens ?? g?.tokenCount,
     })),
   );
@@ -275,7 +361,8 @@ export function mapSessionTelemetry({
 
 /**
  * Maps RetrieveUserQuotaSummary response to vendor-neutral QuotaSummary.
- * F1: Supports real `data.response.groups`, `displayName`, and `remaining.case === 'remainingFraction'`.
+ * F4: Supports `data.response.groups`, `displayName`, `remaining.case === 'remainingFraction'`,
+ * and protobuf Timestamp `{ seconds, nanos }` resetTime.
  *
  * @param {{ data: any, stale: boolean, fetchedAt: number }} rawResult
  */
@@ -306,7 +393,7 @@ export function mapQuotaSummary(rawResult) {
               ? b.windowLabel.trim()
               : 'unknown',
         remainingPercent: normalizeRemainingPercent(remainingFraction),
-        resetTime: typeof b?.resetTime === 'string' ? b.resetTime : null,
+        resetTime: normalizeResetTime(b?.resetTime),
       };
     });
     const label =
@@ -350,19 +437,16 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
 
       const trajectorySummary = trajectoriesResp?.trajectorySummaries?.[sessionId] ?? null;
 
-      // F1: Read real trajectorySlice.totalGeneratorMetadataLength first to avoid offset=0 4MB overflow
+      // F4: Read trajectorySlice.totalGeneratorMetadataLength first; fall back to bounded tail probe if absent
       const totalMetaLen = toNonNegativeIntOrNull(
         streamFrame?.update?.trajectorySlice?.totalGeneratorMetadataLength ??
           streamFrame?.update?.contextWindowUsage?.generatorMetadataIndex ??
           trajectorySummary?.generatorMetadataLength,
       );
 
-      let generatorMetadata = [];
-      if (totalMetaLen !== null && totalMetaLen > 0) {
-        generatorMetadata = await lsTransport
-          .getTailGeneratorMetadata(sessionId, totalMetaLen)
-          .catch(() => []);
-      }
+      const generatorMetadata = await lsTransport
+        .getTailGeneratorMetadata(sessionId, totalMetaLen)
+        .catch(() => []);
 
       return mapSessionTelemetry({
         requestedSessionId: sessionId,

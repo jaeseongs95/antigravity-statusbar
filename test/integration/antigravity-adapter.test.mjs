@@ -7,10 +7,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { installPlugin } from '../../scripts/install-plugin.mjs';
+import { installPlugin, parseArgs } from '../../scripts/install-plugin.mjs';
 import { createAntigravityCompactionAdapter, resolveSafeAgentApiExe } from '../../src/adapters/antigravity/compaction-adapter.mjs';
 import { createLsTransport, encodeConnectFrame, parseLoopbackLsAddress } from '../../src/adapters/antigravity/ls-transport.mjs';
-import { mapQuotaSummary, mapSessionTelemetry } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
+import { mapQuotaSummary, mapSessionTelemetry, normalizeResetTime } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -256,9 +256,63 @@ test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parse
   assert.equal(realSchema.tokenBreakdown.length, 2);
   assert.equal(realSchema.tokenBreakdown[0].tokens, 4200);
   assert.equal(realSchema.tokenBreakdown[1].tokens, 9100);
+
+  // 3. R2-F1: estimatedAfterCompaction: true with newer steps (lastStepIndex 18 > lastCompactedStep 14) -> compactionJustCompleted MUST be false
+  const staleAfterCompact = mapSessionTelemetry({
+    requestedSessionId: 'sess-1',
+    streamFrame: {
+      update: {
+        conversationId: 'sess-1',
+        compactionInfo: { compactedAtStepIndices: [14] },
+        contextWindowUsage: {
+          estimatedTokensUsed: 52_000,
+          estimatedAfterCompaction: true,
+          maxContextTokens: 200_000,
+          lastStepIndex: 18,
+        },
+      },
+    },
+  });
+  assert.equal(staleAfterCompact.compactionJustCompleted, false);
+  assert.equal(staleAfterCompact.usedTokensSource, 'estimated');
+
+  // 4. R2-F4: protobuf-es oneof { metadata: { case: 'chatModel', value } }, startStepIndex, modelDisplayName, tokenBreakdown.groups[].source
+  const oneofSchema = mapSessionTelemetry({
+    requestedSessionId: 'sess-oneof',
+    streamFrame: {
+      update: {
+        conversationId: 'sess-oneof',
+        contextWindowUsage: { estimatedTokensUsed: 15_000, maxContextTokens: 200_000, lastStepIndex: 6 },
+      },
+    },
+    generatorMetadata: [
+      {
+        startStepIndex: 6,
+        metadata: {
+          case: 'chatModel',
+          value: {
+            modelDisplayName: 'Gemini 2.5 Pro',
+            chatStartMetadata: {
+              contextWindowMetadata: {
+                tokenBreakdown: {
+                  groups: [{ source: 'TOKEN_GROUP_FILES', numTokens: '6500' }],
+                },
+              },
+            },
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(oneofSchema.modelName, 'Gemini 2.5 Pro');
+  assert.equal(oneofSchema.tokenBreakdown[0].key, 'TOKEN_GROUP_FILES');
+  assert.equal(oneofSchema.tokenBreakdown[0].tokens, 6500);
 });
 
-test('F1: mapQuotaSummary parses real response.groups, displayName, and remaining.case === remainingFraction', () => {
+test('F1 & R2-F4: mapQuotaSummary parses real response.groups, displayName, remaining.case, and protobuf Timestamp resetTime', () => {
+  const isoFromProto = normalizeResetTime({ seconds: '1795070000', nanos: 0 });
+  assert.ok(isoFromProto && isoFromProto.endsWith('Z'));
+
   const mapped = mapQuotaSummary({
     data: {
       response: {
@@ -269,7 +323,7 @@ test('F1: mapQuotaSummary parses real response.groups, displayName, and remainin
               {
                 window: '5h',
                 remaining: { case: 'remainingFraction', value: 0.85 },
-                resetTime: '2026-11-19T05:00:00Z',
+                resetTime: { seconds: '1795070000', nanos: 0 },
               },
               {
                 window: 'weekly',
@@ -287,6 +341,7 @@ test('F1: mapQuotaSummary parses real response.groups, displayName, and remainin
   assert.equal(mapped.available, true);
   assert.equal(mapped.groups[0].label, 'Gemini Models');
   assert.equal(mapped.groups[0].buckets[0].remainingPercent, 85);
+  assert.equal(mapped.groups[0].buckets[0].resetTime, isoFromProto);
   assert.equal(mapped.groups[0].buckets[1].remainingPercent, 92);
 
   const empty = mapQuotaSummary({ data: null, stale: true, fetchedAt: 1000 });
@@ -295,6 +350,7 @@ test('F1: mapQuotaSummary parses real response.groups, displayName, and remainin
 
 test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTelemetryAdapter + callUnaryRpc) end-to-end', async () => {
   const seenOffsets = [];
+  const seenCompactPayloads = [];
   const lsServer = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -389,6 +445,7 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
         return;
       }
       if (req.url?.endsWith('/SendUserCascadeMessage')) {
+        seenCompactPayloads.push(JSON.parse(bodyStr || '{}'));
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
         return;
@@ -482,6 +539,11 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
     assert.equal(compactRes.status, 200);
     const compactData = await compactRes.json();
     assert.equal(compactData.accepted, true);
+    // R2-F4: Verify exact SendUserCascadeMessage request payload received by LS
+    assert.deepEqual(seenCompactPayloads[0], {
+      cascadeId: 'sess-live-1',
+      items: [{ text: '/compact' }],
+    });
   } finally {
     child.kill('SIGTERM');
     await new Promise((resolve) => child.once('exit', resolve));
@@ -491,7 +553,11 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
   }
 });
 
-test('NB4: install-plugin.mjs installs cleanly and preserves existing data/settings.json', async () => {
+test('NB3 & NB4: install-plugin.mjs validates --target flags, installs cleanly with fs.cp, and preserves data/settings.json', async () => {
+  assert.throws(() => parseArgs(['--target']), /--target requires/);
+  assert.throws(() => parseArgs(['--target', '-x']), /--target requires/);
+  assert.throws(() => parseArgs(['--target', '--dry-run']), /--target requires/);
+
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-install-test-'));
   const destDir = path.join(tempRoot, 'antigravity-statusbar');
   try {

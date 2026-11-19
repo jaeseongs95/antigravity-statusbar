@@ -185,6 +185,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
         });
 
         res.on('data', (chunk) => {
+          if (settled) return;
           totalBytes += chunk.length;
           if (totalBytes > MAX_RESPONSE_BYTES) {
             res.destroy();
@@ -460,9 +461,20 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
       });
       const list = Array.isArray(resp?.generatorMetadata) ? resp.generatorMetadata : [];
       if (list.length > 0) {
-        // Return tail items if any item has chatModel.usage
-        const hasUsage = list.some((item) => item?.chatModel?.usage);
-        if (hasUsage || offset === 0) {
+        // F4: Accept items carrying usage, chatStartMetadata, modelDisplayName, or oneof chatModel
+        const hasUsefulChatModel = list.some((item) => {
+          const cm =
+            item?.chatModel ||
+            (item?.metadata?.case === 'chatModel' ? item.metadata.value : null);
+          return Boolean(
+            cm &&
+              (cm.usage ||
+                cm.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups ||
+                cm.modelDisplayName ||
+                cm.model),
+          );
+        });
+        if (hasUsefulChatModel || offset === 0) {
           return list;
         }
       }

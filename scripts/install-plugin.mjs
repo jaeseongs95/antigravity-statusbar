@@ -5,9 +5,43 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PLUGIN_NAME = 'antigravity-statusbar';
-const INCLUDE_ENTRIES = ['plugin.json', 'package.json', 'sidecars', 'src', 'LICENSE', 'README.md'];
+const INCLUDE_ENTRIES = [
+  'plugin.json',
+  'package.json',
+  'package-lock.json',
+  'sidecars',
+  'src',
+  'node_modules',
+  'LICENSE',
+  'README.md',
+];
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_MAX_TOTAL_MS = 2_500;
 
-function parseArgs(argv) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function renameWithRetry(srcPath, destPath) {
+  const startedAt = Date.now();
+  let delayMs = 20;
+
+  while (true) {
+    try {
+      await fs.rename(srcPath, destPath);
+      return;
+    } catch (err) {
+      const elapsed = Date.now() - startedAt;
+      if (!RETRYABLE_RENAME_CODES.has(err?.code) || elapsed + delayMs >= RENAME_MAX_TOTAL_MS) {
+        throw err;
+      }
+      await sleep(delayMs);
+      delayMs = Math.min(delayMs * 2, 400);
+    }
+  }
+}
+
+export function parseArgs(argv) {
   let targetDir = null;
   let dryRun = false;
 
@@ -17,8 +51,8 @@ function parseArgs(argv) {
       dryRun = true;
     } else if (arg === '--target') {
       const next = argv[i + 1];
-      // NB4: Reject missing or flag-like --target values
-      if (!next || next.startsWith('--') || next.includes('\0')) {
+      // NB3: Reject missing, single/double-dash flag-like, or null-byte --target values
+      if (!next || next.startsWith('-') || next.includes('\0')) {
         throw new Error('--target requires a valid destination directory path.');
       }
       targetDir = next;
@@ -34,21 +68,25 @@ function parseArgs(argv) {
   return { destDir, dryRun };
 }
 
-async function copyRecursive(src, dest) {
-  const stat = await fs.lstat(src);
-  if (stat.isSymbolicLink()) {
+/**
+ * Copies files/directories using Node 20 built-in `fs.cp` with explicit symlink refusal.
+ */
+async function copySafe(src, dest) {
+  const rootStat = await fs.lstat(src);
+  if (rootStat.isSymbolicLink()) {
     throw new Error(`Refusing to copy symlink: ${src}`);
   }
-  if (stat.isDirectory()) {
-    await fs.mkdir(dest, { recursive: true });
-    const entries = await fs.readdir(src);
-    for (const entry of entries) {
-      await copyRecursive(path.join(src, entry), path.join(dest, entry));
-    }
-    return;
-  }
-  await fs.mkdir(path.dirname(dest), { recursive: true });
-  await fs.copyFile(src, dest);
+  await fs.cp(src, dest, {
+    recursive: true,
+    verbatimSymlinks: true,
+    filter: async (srcPath) => {
+      const stat = await fs.lstat(srcPath);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Refusing to copy symlink: ${srcPath}`);
+      }
+      return true;
+    },
+  });
 }
 
 /**
@@ -64,7 +102,7 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       await fs.access(full);
       plannedFiles.push(rel);
     } catch {
-      // Optional file such as LICENSE may not exist
+      // Optional entry (e.g. LICENSE or node_modules in dry-run before install)
     }
   }
 
@@ -82,14 +120,14 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
   try {
     await fs.mkdir(stagingDir, { recursive: true });
     for (const rel of plannedFiles) {
-      await copyRecursive(path.join(repoRoot, rel), path.join(stagingDir, rel));
+      await copySafe(path.join(repoRoot, rel), path.join(stagingDir, rel));
     }
 
     // Preserve user data/ (settings.json) if it already exists
     try {
       const dataStat = await fs.stat(preservedDataDir);
       if (dataStat.isDirectory()) {
-        await copyRecursive(preservedDataDir, stagedDataDir);
+        await copySafe(preservedDataDir, stagedDataDir);
       }
     } catch {
       // No existing data directory
@@ -105,13 +143,13 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
     }
 
     if (hadExisting) {
-      await fs.rename(destDir, backupDir);
+      await renameWithRetry(destDir, backupDir);
     }
     try {
-      await fs.rename(stagingDir, destDir);
+      await renameWithRetry(stagingDir, destDir);
     } catch (err) {
       if (hadExisting) {
-        await fs.rename(backupDir, destDir).catch(() => {});
+        await renameWithRetry(backupDir, destDir).catch(() => {});
       }
       throw err;
     }

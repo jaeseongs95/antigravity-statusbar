@@ -20,5 +20,9 @@
     "test:security": "node --test test/security/sidecar-security.test.mjs",
     "test:ui": "node --test test/ui/ui-app.test.mjs",
     "test": "node --test test/static/boundary.test.mjs test/unit/core.test.mjs test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/security/sidecar-security.test.mjs test/ui/ui-app.test.mjs"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2",
+    "write-file-atomic": "^8.0.0"
   }
 }

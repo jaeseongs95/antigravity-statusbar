@@ -91,6 +91,15 @@ export function createStatusbarApp({
     el.limitFeedback.classList.add('hidden');
   }
 
+  function syncLimitInputs(snap) {
+    // NB2: Sync limit preset/input to the current session's active custom limit (or clear on host default)
+    const val = snap && typeof snap.customLimit === 'number' ? String(snap.customLimit) : '';
+    if (el.limitCustomInput) el.limitCustomInput.value = val;
+    if (el.limitPresetSelect) {
+      el.limitPresetSelect.value = PRESETS.includes(snap?.customLimit) ? val : '';
+    }
+  }
+
   function clearChildren(node) {
     if (!node) return;
     while (node.firstChild) {
@@ -372,7 +381,11 @@ export function createStatusbarApp({
         return;
       }
       state.connected = true;
+      const isNewSessionLoad = !state.snapshot || state.snapshot.sessionId !== snap.sessionId;
       state.snapshot = snap;
+      if (isNewSessionLoad) {
+        syncLimitInputs(snap);
+      }
       if (snap.locale && snap.locale !== state.locale) {
         state.locale = snap.locale;
         applyLocaleStrings();
@@ -486,8 +499,9 @@ export function createStatusbarApp({
         state.selectionMode = 'manual';
         state.selectedSessionId = nextId;
         state.snapshot = null;
-        // F5: Clear previous session's compactStatus & limitFeedback immediately on switch
+        // F5 & NB2: Clear previous session's transient feedback & limit inputs immediately on switch
         clearTransientFeedback();
+        syncLimitInputs(null);
         renderSessionSelect();
         renderSnapshot();
         await refreshSnapshot(nextId);
@@ -531,6 +545,7 @@ export function createStatusbarApp({
     el.btnApplyLimit.addEventListener(
       'click',
       async () => {
+        const targetSessionId = state.selectedSessionId;
         const t = getStrings(state.locale);
         const rawStr = el.limitCustomInput.value.trim() || el.limitPresetSelect.value.trim();
         let limit = null;
@@ -548,19 +563,27 @@ export function createStatusbarApp({
         const patch =
           scope === 'default'
             ? { defaultCustomLimit: limit }
-            : state.selectedSessionId
-              ? { sessionLimit: { sessionId: state.selectedSessionId, limit } }
+            : targetSessionId
+              ? { sessionLimit: { sessionId: targetSessionId, limit } }
               : { defaultCustomLimit: limit };
 
         try {
           await bridge.updateSettings(patch);
-          setTextIfChanged(el.limitFeedback, t.limitSaved);
+          // F3: Guard against session switch during async settings update
+          if (state.disposed || (scope !== 'default' && state.selectedSessionId !== targetSessionId)) {
+            return;
+          }
+          setTextIfChanged(el.limitFeedback, getStrings(state.locale).limitSaved);
           el.limitFeedback.classList.remove('hidden');
           if (state.selectedSessionId) {
             await refreshSnapshot(state.selectedSessionId);
           }
         } catch {
-          setTextIfChanged(el.limitFeedback, t.limitInvalid);
+          // F3: Guard against session switch & show backend save error (NOT integer validation error)
+          if (state.disposed || (scope !== 'default' && state.selectedSessionId !== targetSessionId)) {
+            return;
+          }
+          setTextIfChanged(el.limitFeedback, getStrings(state.locale).limitSaveFailed);
           el.limitFeedback.classList.remove('hidden');
         }
       },

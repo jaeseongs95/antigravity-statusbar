@@ -28,7 +28,13 @@ export function renderUiBridgeScript() {
         url.searchParams.delete('token');
         const cleanSearch = url.searchParams.toString();
         const cleanUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
-        window.history.replaceState(null, '', cleanUrl);
+        // F5: Isolate history.replaceState in its own try/catch so restricted webviews
+        // never clear authToken when replaceState throws.
+        try {
+          window.history.replaceState(null, '', cleanUrl);
+        } catch {
+          // ignore restricted history API
+        }
       } else {
         try {
           token = window.sessionStorage.getItem(STORAGE_KEY) || '';

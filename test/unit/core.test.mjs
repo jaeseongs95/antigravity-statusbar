@@ -211,3 +211,45 @@ test('F2: requestCompaction prevents async TOCTOU duplicate execution during con
   assert.equal(firstResult.accepted, true);
   assert.equal(compactCallCount, 1);
 });
+
+test('R2-F1: repeated /compact does NOT prematurely clear mutex when lastCompactedStep has not advanced', async () => {
+  let telemetry = {
+    sessionId: 'sess-repeat',
+    usedTokens: 90_000,
+    maxContextTokens: 200_000,
+    lastCompactedStep: 5,
+    compactionJustCompleted: true,
+    tokenBreakdown: [],
+  };
+
+  const service = createStatusbarService({
+    clock: () => 3_000_000,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => telemetry,
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: 0 }),
+    },
+    compactionPort: {
+      compactSession: async () => ({ accepted: true, method: 'rpc' }),
+    },
+    settingsPort: {
+      read: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: new Map() }),
+      update: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: new Map() }),
+    },
+  });
+
+  // Trigger a second /compact when baseline lastCompactedStep is already 5
+  const req = await service.requestCompaction('sess-repeat');
+  assert.equal(req.accepted, true);
+
+  // First poll still returns old lastCompactedStep: 5 with compactionJustCompleted: true -> MUST stay inProgress!
+  const snap1 = await service.getSessionSnapshot('sess-repeat');
+  assert.equal(snap1.compaction.inProgress, true);
+  assert.equal(snap1.compaction.status, 'accepted');
+
+  // Once lastCompactedStep actually advances past baseline (10 > 5) -> clears mutex and reports completed
+  telemetry = { ...telemetry, lastCompactedStep: 10, compactionJustCompleted: true };
+  const snap2 = await service.getSessionSnapshot('sess-repeat');
+  assert.equal(snap2.compaction.inProgress, false);
+  assert.equal(snap2.compaction.status, 'completed');
+});

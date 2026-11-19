@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
-import { promisify } from 'node:util';
 import vm from 'node:vm';
 
 import { createSidecarServer } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 import { renderUiBridgeScript } from '../../src/adapters/antigravity/ui-bridge.mjs';
 import { createStatusbarApp } from '../../src/ui/app.js';
-
-const execFileAsync = promisify(execFile);
 
 function findHeadlessBrowser() {
   const candidates =
@@ -295,9 +297,24 @@ test('/bridge.js strips ?token= via history.replaceState and retains token on re
   const win2 = makeWindow('http://127.0.0.1:41234/');
   vm.runInNewContext(scriptCode, win2);
   assert.equal(win2.__STATUSBAR_HOST_BRIDGE__.hasToken(), true);
+
+  // R2-F5: If history.replaceState throws in restricted webview, authToken MUST still be retained!
+  const winThrow = {
+    location: { href: 'http://127.0.0.1:41234/?token=retained-token-after-throw-1234' },
+    sessionStorage: { getItem: () => null, setItem: () => {} },
+    history: {
+      replaceState: () => {
+        throw new Error('SecurityError: replaceState blocked');
+      },
+    },
+    URL,
+  };
+  winThrow.window = winThrow;
+  vm.runInNewContext(scriptCode, winThrow);
+  assert.equal(winThrow.__STATUSBAR_HOST_BRIDGE__.hasToken(), true);
 });
 
-test('F5 & NB2: session switch clears transient feedback, blocks stale async compact error, and preserves unchanged <option> nodes', async () => {
+test('F5, R2-F3 & NB2: session switch clears transient feedback, blocks stale async compact/limit errors, distinguishes backend save failure, and syncs limit inputs', async () => {
   const doc = createMockDocument();
   const win = createMockElement('window');
 
@@ -305,10 +322,19 @@ test('F5 & NB2: session switch clears transient feedback, blocks stale async com
   const compactPromise = new Promise((_resolve, reject) => {
     rejectCompact = reject;
   });
+  let rejectLimit;
+  let limitShouldFail = false;
 
   const bridge = {
     getSettings: async () => ({ locale: 'en' }),
-    updateSettings: async () => ({ locale: 'en' }),
+    updateSettings: () => {
+      if (limitShouldFail) {
+        return new Promise((_resolve, reject) => {
+          rejectLimit = reject;
+        });
+      }
+      return Promise.resolve({ locale: 'en' });
+    },
     listSessions: async () => ({
       sessions: [
         { sessionId: 'sess-1', title: 'First' },
@@ -319,7 +345,8 @@ test('F5 & NB2: session switch clears transient feedback, blocks stale async com
       sessionId: sid,
       usedTokens: 10_000,
       effectiveLimit: 100_000,
-      limitSource: 'host',
+      customLimit: sid === 'sess-1' ? 128_000 : null,
+      limitSource: sid === 'sess-1' ? 'session' : 'host',
       usagePercent: 10,
       thresholdLevel: 'normal',
       exceededSoftLimit: false,
@@ -339,31 +366,158 @@ test('F5 & NB2: session switch clears transient feedback, blocks stale async com
   const app = createStatusbarApp({ doc, win, bridge });
   await app.start();
 
+  // NB2: Limit input synced on initial session load
+  assert.equal(doc.byId.get('limit-custom-input').value, '128000');
+
   // NB2: Second refreshSessions with identical list must NOT recreate <option> nodes
   const firstOptRef = doc.byId.get('session-select').options[0];
   await app.refreshSessions();
   assert.equal(doc.byId.get('session-select').options[0], firstOptRef);
 
-  // Trigger compact on sess-1, then immediately switch to sess-2 BEFORE compact rejects
+  // R2-F3: Backend save error shows limitSaveFailed (NOT integer validation error!)
+  limitShouldFail = true;
+  doc.byId.get('limit-custom-input').value = '256000';
+  const failLimitClick = doc.byId.get('btn-apply-limit').dispatch('click');
+  rejectLimit(new Error('HTTP 503'));
+  await failLimitClick;
+  assert.equal(doc.byId.get('limit-feedback').textContent, 'Failed to save limit.');
+
+  // Trigger compact + limit save on sess-1, then switch to sess-2 BEFORE both reject
   const compactClick = doc.byId.get('btn-compact').dispatch('click');
+  const limitClick2 = doc.byId.get('btn-apply-limit').dispatch('click');
   assert.equal(doc.byId.get('compact-status').classList.contains('hidden'), false);
 
   doc.byId.get('session-select').value = 'sess-2';
   await doc.byId.get('session-select').dispatch('change');
-  // F5: compact-status cleared immediately on session switch
+  // F5 & NB2: transient feedback cleared and limit input synced to sess-2 (empty/host default)
   assert.equal(doc.byId.get('compact-status').classList.contains('hidden'), true);
-  assert.equal(doc.byId.get('compact-status').textContent, '');
+  assert.equal(doc.byId.get('limit-feedback').classList.contains('hidden'), true);
+  assert.equal(doc.byId.get('limit-custom-input').value, '');
 
-  // Now reject sess-1's stale compaction request -> MUST NOT contaminate sess-2!
+  // Reject sess-1's stale compaction & limit requests -> MUST NOT contaminate sess-2!
   rejectCompact(new Error('network failed'));
-  await compactClick;
+  rejectLimit(new Error('HTTP 500'));
+  await Promise.all([compactClick, limitClick2]);
   assert.equal(doc.byId.get('compact-status').classList.contains('hidden'), true);
-  assert.equal(doc.byId.get('compact-status').textContent, '');
+  assert.equal(doc.byId.get('limit-feedback').classList.contains('hidden'), true);
 
   app.dispose();
 });
 
-test('F4: real Headless Chromium/Edge browser E2E renders Sidecar UI under strict CSP with /bridge.js auth', async (t) => {
+/**
+ * Minimal CDP WebSocket client over Node built-in http Upgrade (works on Node 20, 22, 24).
+ */
+function connectCdpWebSocket(wsUrl) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(wsUrl);
+    const key = crypto.randomBytes(16).toString('base64');
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: Number(parsed.port),
+      path: parsed.pathname + parsed.search,
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Key': key,
+        'Sec-WebSocket-Version': '13',
+      },
+    });
+
+    req.on('error', reject);
+    req.on('upgrade', (_res, socket, head) => {
+      let buf = head && head.length ? Buffer.from(head) : Buffer.alloc(0);
+      let nextId = 1;
+      const pending = new Map();
+
+      function parseFrames() {
+        while (buf.length >= 2) {
+          const opcode = buf[0] & 0x0f;
+          const masked = (buf[1] & 0x80) !== 0;
+          let len = buf[1] & 0x7f;
+          let offset = 2;
+          if (len === 126) {
+            if (buf.length < 4) return;
+            len = buf.readUInt16BE(2);
+            offset = 4;
+          } else if (len === 127) {
+            if (buf.length < 10) return;
+            len = Number(buf.readBigUInt64BE(2));
+            offset = 10;
+          }
+          const maskLen = masked ? 4 : 0;
+          if (buf.length < offset + maskLen + len) return;
+          const payload = buf.subarray(offset + maskLen, offset + maskLen + len);
+          buf = buf.subarray(offset + maskLen + len);
+
+          if (opcode === 0x01) {
+            try {
+              const msg = JSON.parse(payload.toString('utf8'));
+              if (msg.id && pending.has(msg.id)) {
+                const { res: r, rej } = pending.get(msg.id);
+                pending.delete(msg.id);
+                if (msg.error) rej(new Error(msg.error.message || 'CDP error'));
+                else r(msg.result);
+              }
+            } catch {
+              // ignore non-JSON frame
+            }
+          }
+        }
+      }
+
+      socket.on('data', (chunk) => {
+        buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+        parseFrames();
+      });
+      socket.on('error', () => {});
+
+      function sendText(text) {
+        const data = Buffer.from(text, 'utf8');
+        const mask = crypto.randomBytes(4);
+        let header;
+        if (data.length < 126) {
+          header = Buffer.alloc(6);
+          header[0] = 0x81;
+          header[1] = 0x80 | data.length;
+          mask.copy(header, 2);
+        } else if (data.length < 65536) {
+          header = Buffer.alloc(8);
+          header[0] = 0x81;
+          header[1] = 0x80 | 126;
+          header.writeUInt16BE(data.length, 2);
+          mask.copy(header, 4);
+        } else {
+          header = Buffer.alloc(14);
+          header[0] = 0x81;
+          header[1] = 0x80 | 127;
+          header.writeBigUInt64BE(BigInt(data.length), 2);
+          mask.copy(header, 10);
+        }
+        const maskedPayload = Buffer.allocUnsafe(data.length);
+        for (let i = 0; i < data.length; i += 1) {
+          maskedPayload[i] = data[i] ^ mask[i & 3];
+        }
+        socket.write(Buffer.concat([header, maskedPayload]));
+      }
+
+      resolve({
+        call(method, params = {}) {
+          return new Promise((res, rej) => {
+            const id = nextId++;
+            pending.set(id, { res, rej });
+            sendText(JSON.stringify({ id, method, params }));
+          });
+        },
+        close() {
+          socket.destroy();
+        },
+      });
+    });
+    req.end();
+  });
+}
+
+test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session switch, limit save, compact click, and reload token retention', async (t) => {
   const browserPath = findHeadlessBrowser();
   if (!browserPath) {
     if (process.env.CI === 'true') {
@@ -373,20 +527,28 @@ test('F4: real Headless Chromium/Edge browser E2E renders Sidecar UI under stric
     return;
   }
 
-  const token = 'real-browser-e2e-token-32chars-ok';
+  const token = 'real-browser-cdp-token-32chars-ok';
+  const settingsUpdates = [];
+  const compactCalls = [];
+  let savedLimitForSess2 = null;
+
   const sidecar = createSidecarServer({
     token,
     service: {
       listSessions: async () => ({
-        sessions: [{ sessionId: 'sess-chrome-1', title: 'Blink Real DOM' }],
+        sessions: [
+          { sessionId: 'sess-chrome-1', title: 'Blink Session One' },
+          { sessionId: 'sess-chrome-2', title: 'Blink Session Two' },
+        ],
         fetchedAt: Date.now(),
       }),
       getSessionSnapshot: async (sid) => ({
         sessionId: sid,
-        usedTokens: 64_000,
-        effectiveLimit: 100_000,
-        limitSource: 'host',
-        usagePercent: 64.0,
+        usedTokens: sid === 'sess-chrome-1' ? 64_000 : 22_000,
+        effectiveLimit: sid === 'sess-chrome-2' && savedLimitForSess2 ? savedLimitForSess2 : 100_000,
+        customLimit: sid === 'sess-chrome-2' ? savedLimitForSess2 : null,
+        limitSource: sid === 'sess-chrome-2' && savedLimitForSess2 ? 'session' : 'host',
+        usagePercent: sid === 'sess-chrome-1' ? 64.0 : 22.0,
         thresholdLevel: 'normal',
         exceededSoftLimit: false,
         cacheHitPercent: 90.0,
@@ -410,33 +572,143 @@ test('F4: real Headless Chromium/Edge browser E2E renders Sidecar UI under stric
         fetchedAt: Date.now(),
       }),
       getSettings: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: [] }),
-      updateSettings: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: [] }),
-      requestCompaction: async (sid) => ({ accepted: true, sessionId: sid, method: 'rpc' }),
+      updateSettings: async (patch) => {
+        settingsUpdates.push(patch);
+        if (patch?.sessionLimit?.sessionId === 'sess-chrome-2') {
+          savedLimitForSess2 = patch.sessionLimit.limit;
+        }
+        return { locale: 'en', defaultCustomLimit: null, sessions: [] };
+      },
+      requestCompaction: async (sid) => {
+        compactCalls.push(sid);
+        return { accepted: true, sessionId: sid, method: 'rpc' };
+      },
     },
   });
 
   const { port } = await sidecar.listen();
-  try {
-    const args = [
+  const userDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'statusbar-cdp-profile-'));
+
+  const browser = spawn(
+    browserPath,
+    [
       '--headless=new',
       '--disable-gpu',
       '--no-sandbox',
       '--disable-dev-shm-usage',
-      '--virtual-time-budget=3000',
-      '--dump-dom',
-      `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`,
-    ];
-    const { stdout } = await execFileAsync(browserPath, args, {
-      timeout: 20_000,
-      maxBuffer: 4 * 1024 * 1024,
+      '--remote-debugging-port=0',
+      `--user-data-dir=${userDataDir}`,
+      'about:blank',
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
+  );
+
+  let cdp = null;
+  try {
+    const devToolsWsBase = await new Promise((resolve, reject) => {
+      let errBuf = '';
+      const timer = setTimeout(() => reject(new Error(`CDP startup timeout: ${errBuf}`)), 15_000);
+      browser.stderr.on('data', (chunk) => {
+        errBuf += chunk.toString('utf8');
+        const m = errBuf.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/[^\s]+)/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[1]);
+        }
+      });
+      browser.once('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`Browser exited early (${code}): ${errBuf}`));
+      });
     });
 
-    assert.ok(stdout.includes('64.0%'), 'Expected live rendered 64.0% context usage in Blink DOM');
-    assert.ok(stdout.includes('90.0%'), 'Expected live rendered 90.0% cache hit in Blink DOM');
-    assert.ok(stdout.includes('Gemini Models'), 'Expected live rendered quota group in Blink DOM');
-    assert.ok(stdout.includes('Blink Real DOM'), 'Expected session title in Blink DOM');
-    assert.ok(stdout.includes('Live'), 'Expected connected Live badge in Blink DOM');
+    const cdpPort = new URL(devToolsWsBase).port;
+    const targetsRes = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
+    const targets = await targetsRes.json();
+    const pageTarget = targets.find((tg) => tg.type === 'page' && tg.webSocketDebuggerUrl);
+    assert.ok(pageTarget, 'Expected a page target from CDP /json/list');
+
+    cdp = await connectCdpWebSocket(pageTarget.webSocketDebuggerUrl);
+    await cdp.call('Page.enable');
+    await cdp.call('Runtime.enable');
+
+    const evalExpr = async (expression) => {
+      const res = await cdp.call('Runtime.evaluate', {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      return res?.result?.value;
+    };
+
+    const waitForCondition = async (expression, timeoutMs = 8_000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const val = await evalExpr(expression);
+        if (val) return val;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error(`Timed out waiting for browser condition: ${expression}`);
+    };
+
+    // 1. Navigate with ?token= -> verify token stripped via replaceState & initial live metrics render
+    await cdp.call('Page.navigate', {
+      url: `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`,
+    });
+    await waitForCondition("document.getElementById('context-pct')?.textContent === '64.0%'");
+    assert.equal(await evalExpr('window.location.search'), '');
+    assert.equal(await evalExpr("document.getElementById('cache-pct')?.textContent"), '90.0%');
+    assert.ok(
+      String(await evalExpr("document.getElementById('quota-groups')?.textContent")).includes('Gemini Models'),
+    );
+
+    // 2. Interactive session switch -> context-pct updates to 22.0%
+    await evalExpr(`(() => {
+      const sel = document.getElementById('session-select');
+      sel.value = 'sess-chrome-2';
+      sel.dispatchEvent(new Event('change'));
+    })()`);
+    await waitForCondition("document.getElementById('context-pct')?.textContent === '22.0%'");
+
+    // 3. Interactive custom soft limit save -> POST /api/settings/update + feedback
+    await evalExpr(`(() => {
+      const inp = document.getElementById('limit-custom-input');
+      inp.value = '256000';
+      document.getElementById('btn-apply-limit').click();
+    })()`);
+    await waitForCondition("document.getElementById('limit-feedback')?.textContent === 'Limit updated.'");
+    assert.deepEqual(settingsUpdates[0], {
+      sessionLimit: { sessionId: 'sess-chrome-2', limit: 256_000 },
+    });
+
+    // 4. Interactive compact button click -> POST /api/compact
+    await evalExpr("document.getElementById('btn-compact').click()");
+    await waitForCondition("document.getElementById('compact-status')?.textContent === 'Compaction requested...'");
+    assert.equal(compactCalls[0], 'sess-chrome-2');
+
+    // 5. Real browser reload WITHOUT ?token= in URL -> sessionStorage retains auth & re-renders live data
+    await cdp.call('Page.reload', { ignoreCache: true });
+    await waitForCondition("document.getElementById('context-pct')?.textContent === '64.0%'");
+    assert.equal(await evalExpr('window.location.search'), '');
+    assert.equal(await evalExpr("document.getElementById('conn-badge')?.textContent"), 'Live');
   } finally {
+    cdp?.close();
+    browser.kill('SIGTERM');
+    await new Promise((resolve) => {
+      const t = setTimeout(() => {
+        try {
+          browser.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+        resolve();
+      }, 2_000);
+      browser.once('exit', () => {
+        clearTimeout(t);
+        resolve();
+      });
+    });
     await sidecar.close();
+    await fsp.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
   }
 });

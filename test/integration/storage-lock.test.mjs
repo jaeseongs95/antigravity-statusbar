@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { createJsonSettingsStore } from '../../src/adapters/storage/json-settings-store.mjs';
+
+const STORE_MODULE_URL = pathToFileURL(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/adapters/storage/json-settings-store.mjs'),
+).href;
 
 async function withTempDir(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-store-test-'));
@@ -54,49 +60,42 @@ test('json-settings-store backs up corrupt settings.json inside lock and recover
   });
 });
 
-test('json-settings-store recovers stale dead-PID lock via rename-aside and respects 0-byte grace (F7)', async () => {
+test('R2-F2: proper-lockfile + write-file-atomic prevents lost updates across concurrent child processes', async () => {
   await withTempDir(async (dir) => {
-    const store = createJsonSettingsStore({
-      dataDir: dir,
-      zeroByteGraceMs: 250,
-      lockTimeoutMs: 2_000,
-    });
+    const runWorker = (sessionId, limit, locale) =>
+      new Promise((resolve, reject) => {
+        const script = `
+          import { createJsonSettingsStore } from ${JSON.stringify(STORE_MODULE_URL)};
+          const store = createJsonSettingsStore({ dataDir: ${JSON.stringify(dir)} });
+          await store.update({ sessionLimit: { sessionId: ${JSON.stringify(sessionId)}, limit: ${limit} } });
+          if (${JSON.stringify(Boolean(locale))}) {
+            await store.update({ locale: ${JSON.stringify(locale || 'en')} });
+          }
+        `;
+        const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        child.stderr.on('data', (c) => {
+          stderr += c.toString('utf8');
+        });
+        child.on('exit', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Worker ${sessionId} exited ${code}: ${stderr}`));
+        });
+      });
 
-    // 1. Dead PID lock is recovered immediately via rename-aside
-    await fs.writeFile(
-      store.lockPath,
-      JSON.stringify({ pid: 999_999_999, token: 'dead-token-1234', createdAt: Date.now() }),
-      'utf8',
-    );
-    const res1 = await store.update({ locale: 'ko' });
-    assert.equal(res1.locale, 'ko');
+    await Promise.all([
+      runWorker('proc-sess-1', 128_000, 'ko'),
+      runWorker('proc-sess-2', 256_000, null),
+      runWorker('proc-sess-3', 384_000, null),
+    ]);
 
-    // 2. 0-byte lock waits for zeroByteGraceMs before recovering
-    await fs.writeFile(store.lockPath, '', 'utf8');
-    const started = Date.now();
-    const res2 = await store.update({ defaultCustomLimit: 200_000 });
-    const elapsed = Date.now() - started;
-    assert.equal(res2.defaultCustomLimit, 200_000);
-    assert.ok(elapsed >= 200, `Expected 0-byte lock grace wait >= 200ms, got ${elapsed}ms`);
-
-    // 3. F3: Live PID lock is NEVER unlinked during lockTimeoutMs -> throws STORAGE_LOCK_TIMEOUT and preserves lock
-    const livePayload = JSON.stringify({
-      pid: process.pid,
-      token: 'live-holder-token-xyz',
-      createdAt: Date.now(),
-    });
-    await fs.writeFile(store.lockPath, livePayload, 'utf8');
-    const shortStore = createJsonSettingsStore({
-      dataDir: dir,
-      lockTimeoutMs: 180,
-      staleLockMs: 60_000,
-    });
-    await assert.rejects(
-      () => shortStore.update({ locale: 'en' }),
-      (err) => err?.code === 'STORAGE_LOCK_TIMEOUT',
-    );
-    const preserved = JSON.parse(await fs.readFile(store.lockPath, 'utf8'));
-    assert.equal(preserved.token, 'live-holder-token-xyz');
-    await fs.unlink(store.lockPath);
+    const store = createJsonSettingsStore({ dataDir: dir });
+    const state = await store.read();
+    assert.equal(state.locale, 'ko');
+    assert.equal(state.sessions.get('proc-sess-1')?.limit, 128_000);
+    assert.equal(state.sessions.get('proc-sess-2')?.limit, 256_000);
+    assert.equal(state.sessions.get('proc-sess-3')?.limit, 384_000);
   });
 });

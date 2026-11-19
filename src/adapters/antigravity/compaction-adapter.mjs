@@ -191,12 +191,20 @@ export function createAntigravityCompactionAdapter({
     },
 
     /**
-     * Terminates all active child processes immediately on sidecar shutdown (F6, D-0020).
+     * Terminates all active child processes immediately on sidecar shutdown (F6, NB4, D-0020).
      */
     dispose() {
       for (const child of activeChildren) {
         try {
           child.kill('SIGTERM');
+          const killTimer = setTimeout(() => {
+            try {
+              if (!child.killed) child.kill('SIGKILL');
+            } catch {
+              // ignore
+            }
+          }, 1_500);
+          killTimer.unref?.();
         } catch {
           // ignore
         }

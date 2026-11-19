@@ -1,6 +1,8 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+
+import lockfile from 'proper-lockfile';
+import writeFileAtomic from 'write-file-atomic';
 
 import { DEFAULT_LOCALE, DomainError, ERROR_CODES, normalizeLocale } from '../../core/i18n/error-codes.mjs';
 import {
@@ -11,29 +13,8 @@ import {
 } from '../../core/model/context-policy.mjs';
 
 const SETTINGS_FILENAME = 'settings.json';
-const LOCK_FILENAME = 'settings.lock';
-const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
-const DEFAULT_ZERO_BYTE_GRACE_MS = 10_000;
-const DEFAULT_STALE_LOCK_MS = 30_000;
-const RENAME_MAX_TOTAL_MS = 2_500;
-const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM means the process exists but belongs to another user/privilege level.
-    return err?.code === 'EPERM';
-  }
-}
+const DEFAULT_STALE_LOCK_MS = 15_000;
+const DEFAULT_LOCK_RETRIES = 25;
 
 function createDefaultState() {
   return {
@@ -101,50 +82,26 @@ function serializeState(state) {
 }
 
 /**
- * Atomic rename with bounded Windows EPERM/EBUSY/EACCES retry backoff (< 3s total, F7).
- */
-async function atomicRenameWithRetry(srcPath, destPath) {
-  const startedAt = Date.now();
-  let delayMs = 20;
-
-  while (true) {
-    try {
-      await fs.rename(srcPath, destPath);
-      return;
-    } catch (err) {
-      const elapsed = Date.now() - startedAt;
-      if (!RETRYABLE_RENAME_CODES.has(err?.code) || elapsed + delayMs >= RENAME_MAX_TOTAL_MS) {
-        throw err;
-      }
-      await sleep(delayMs);
-      delayMs = Math.min(delayMs * 2, 400);
-    }
-  }
-}
-
-/**
- * Creates a file-backed SettingsPort implementation with:
+ * Creates a file-backed SettingsPort implementation using battle-tested libraries
+ * (`proper-lockfile` atomic mkdir locking + `write-file-atomic` cross-platform atomic writes):
  * - Injected dataDir (F10: no direct environment variable reads)
- * - In-process async mutex + cross-process O_EXCL settings.lock (F7)
- * - 0-byte lock mtime > 10s grace + rename-aside & token check stale recovery (F7)
+ * - In-process async mutex + cross-process proper-lockfile lock (F2)
  * - Monotonic timestamps for same-ms updates (F10)
  * - Corrupt settings backup (.corrupt.<ts>) inside lock
- * - 0o600 permissions + Windows EPERM/EBUSY/EACCES rename backoff (< 3s)
+ * - 0o600 permissions
  *
  * @param {{
  *   dataDir: string,
  *   clock?: () => number,
- *   lockTimeoutMs?: number,
- *   zeroByteGraceMs?: number,
  *   staleLockMs?: number,
+ *   lockRetries?: number,
  * }} options
  */
 export function createJsonSettingsStore({
   dataDir,
   clock = () => Date.now(),
-  lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
-  zeroByteGraceMs = DEFAULT_ZERO_BYTE_GRACE_MS,
   staleLockMs = DEFAULT_STALE_LOCK_MS,
+  lockRetries = DEFAULT_LOCK_RETRIES,
 }) {
   if (typeof dataDir !== 'string' || !dataDir.trim()) {
     throw new DomainError(ERROR_CODES.STORAGE_IO_ERROR, 500, 'dataDir must be a non-empty string.');
@@ -152,7 +109,7 @@ export function createJsonSettingsStore({
 
   const resolvedDir = path.resolve(dataDir);
   const settingsPath = path.join(resolvedDir, SETTINGS_FILENAME);
-  const lockPath = path.join(resolvedDir, LOCK_FILENAME);
+  const lockPath = `${resolvedDir}.lock`;
 
   let inProcessChain = Promise.resolve();
   let lastMonotonicTs = 0;
@@ -168,160 +125,41 @@ export function createJsonSettingsStore({
     await fs.mkdir(resolvedDir, { recursive: true, mode: 0o700 });
   }
 
-  async function tryRecoverStaleLock() {
-    let stat;
-    try {
-      stat = await fs.stat(lockPath);
-    } catch (err) {
-      if (err?.code === 'ENOENT') return true;
-      return false;
-    }
-
-    const now = Date.now();
-    const ageMs = now - stat.mtimeMs;
-
-    // F7: 0-byte lock grace period (10s) to avoid stealing a lock currently being written.
-    if (stat.size === 0) {
-      if (ageMs < zeroByteGraceMs) {
-        return false;
-      }
-      const asidePath = `${lockPath}.stale.${crypto.randomUUID()}`;
+  async function withLock(fn) {
+    const run = async () => {
+      await ensureDir();
+      let release;
       try {
-        await fs.rename(lockPath, asidePath);
-        await fs.unlink(asidePath).catch(() => {});
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    let rawContent = '';
-    try {
-      rawContent = await fs.readFile(lockPath, 'utf8');
-    } catch {
-      return false;
-    }
-
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawContent);
-    } catch {
-      // Corrupt lock payload: treat as stale only after grace window
-      if (ageMs < zeroByteGraceMs) {
-        return false;
-      }
-    }
-
-    const observedToken = typeof parsed?.token === 'string' ? parsed.token : null;
-    const ownerPid = typeof parsed?.pid === 'number' ? parsed.pid : -1;
-    const isStale = !isPidAlive(ownerPid) || ageMs >= staleLockMs;
-
-    if (!isStale) {
-      return false;
-    }
-
-    // F7: Stale recovery via rename-aside + token verification before unlink.
-    const asidePath = `${lockPath}.stale.${crypto.randomUUID()}`;
-    try {
-      await fs.rename(lockPath, asidePath);
-    } catch {
-      return false;
-    }
-
-    try {
-      const movedContent = await fs.readFile(asidePath, 'utf8').catch(() => '');
-      if (observedToken !== null) {
-        let movedParsed = null;
-        try {
-          movedParsed = JSON.parse(movedContent);
-        } catch {
-          movedParsed = null;
-        }
-        if (movedParsed?.token !== observedToken) {
-          // F3: NEVER unlink another live process's lock on token mismatch.
-          // Attempt to restore the live lock to lockPath so its holder remains protected.
-          await fs.rename(asidePath, lockPath).catch(() => {});
-          return false;
-        }
-      }
-      await fs.unlink(asidePath).catch(() => {});
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async function acquireFileLock() {
-    await ensureDir();
-    const token = crypto.randomUUID();
-    const deadline = Date.now() + lockTimeoutMs;
-    let attempt = 0;
-
-    while (true) {
-      let handle = null;
-      try {
-        handle = await fs.open(lockPath, 'wx', 0o600);
-        const payload = JSON.stringify({
-          pid: process.pid,
-          token,
-          createdAt: Date.now(),
+        // F2: Atomic mkdir-based cross-process lock via proper-lockfile (with heartbeat & safe stale recovery)
+        release = await lockfile.lock(resolvedDir, {
+          realpath: false,
+          stale: Math.max(5_000, staleLockMs),
+          retries: {
+            retries: lockRetries,
+            factor: 1.4,
+            minTimeout: 15,
+            maxTimeout: 150,
+          },
         });
-        await handle.writeFile(payload, 'utf8');
-        await handle.sync().catch(() => {});
-        await handle.close();
-        handle = null;
-        return token;
       } catch (err) {
-        if (handle) {
-          await handle.close().catch(() => {});
-        }
-        if (err?.code !== 'EEXIST') {
-          throw new DomainError(
-            ERROR_CODES.STORAGE_IO_ERROR,
-            500,
-            `Failed to acquire settings lock: ${err?.message || String(err)}`,
-          );
-        }
-
-        const recovered = await tryRecoverStaleLock();
-        if (recovered) {
-          continue;
-        }
-
-        if (Date.now() >= deadline) {
+        if (err?.code === 'ELOCKED') {
           throw new DomainError(
             ERROR_CODES.STORAGE_LOCK_TIMEOUT,
             503,
-            'Timed out waiting for settings.lock.',
+            'Timed out waiting for cross-process settings lock.',
           );
         }
-
-        attempt += 1;
-        const backoff = Math.min(15 + attempt * 15, 120);
-        await sleep(backoff);
+        throw new DomainError(
+          ERROR_CODES.STORAGE_IO_ERROR,
+          500,
+          `Failed to acquire settings lock: ${err?.message || String(err)}`,
+        );
       }
-    }
-  }
 
-  async function releaseFileLock(token) {
-    try {
-      const content = await fs.readFile(lockPath, 'utf8');
-      const parsed = JSON.parse(content);
-      if (parsed?.token === token) {
-        await fs.unlink(lockPath);
-      }
-    } catch {
-      // Lock already removed or unreadable
-    }
-  }
-
-  async function withLock(fn) {
-    const run = async () => {
-      const token = await acquireFileLock();
       try {
         return await fn();
       } finally {
-        await releaseFileLock(token);
+        await release().catch(() => {});
       }
     };
 
@@ -360,22 +198,14 @@ export function createJsonSettingsStore({
   }
 
   async function writeStateUnlocked(state) {
-    const tmpPath = `${settingsPath}.tmp.${process.pid}.${crypto.randomUUID()}`;
     const payload = serializeState(state);
-    let handle = null;
     try {
-      handle = await fs.open(tmpPath, 'wx', 0o600);
-      await handle.writeFile(payload, 'utf8');
-      await handle.sync().catch(() => {});
-      await handle.close();
-      handle = null;
-      await atomicRenameWithRetry(tmpPath, settingsPath);
-      await fs.chmod(settingsPath, 0o600).catch(() => {});
+      await writeFileAtomic(settingsPath, payload, {
+        encoding: 'utf8',
+        mode: 0o600,
+        fsync: true,
+      });
     } catch (err) {
-      if (handle) {
-        await handle.close().catch(() => {});
-      }
-      await fs.unlink(tmpPath).catch(() => {});
       throw new DomainError(
         ERROR_CODES.STORAGE_IO_ERROR,
         500,

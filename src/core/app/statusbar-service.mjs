@@ -61,19 +61,19 @@ export function createStatusbarService({
       };
     }
 
-    // Detect post-acceptance compaction completion (F5):
-    // If telemetry reports compaction finished or lastCompactedStep advanced past baseline,
-    // clear the session mutex immediately so subsequent compacts are not blocked.
+    // Detect post-acceptance compaction completion (F1 & F5):
+    // Require strict step progression past baselineCompactedStep so repeated /compact calls
+    // cannot prematurely clear the mutex or return false 'completed' on the first poll.
     if (entry.status === 'accepted' && telemetry) {
       const currentCompactedStep =
         typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
       const stepAdvanced =
         currentCompactedStep !== null &&
         (entry.baselineCompactedStep === null
-          ? currentCompactedStep >= 0
+          ? currentCompactedStep >= 0 && telemetry.compactionJustCompleted === true
           : currentCompactedStep > entry.baselineCompactedStep);
 
-      if (telemetry.compactionJustCompleted === true || stepAdvanced) {
+      if (stepAdvanced) {
         compactingSessions.delete(sessionId);
         return {
           inProgress: false,
