@@ -1,6 +1,6 @@
 /**
  * 2-tab popover DOM view (Context tab + Settings tab) for the inline statusbar (SRP).
- * Zero innerHTML / outerHTML / insertAdjacentHTML — DOM createElement + textContent only.
+ * Safe DOM construction via createElement + textContent only (no HTML string injection).
  */
 
 export function createPopoverView({ doc, i18n, presets }) {

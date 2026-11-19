@@ -4,7 +4,7 @@
  *
  * Security & Isolation Invariants:
  * - Never exposes `addonHost` on `window` or DOM.
- * - Never creates `<style>` tags or appends directly to `document.head` / host containers;
+ * - Never creates `<style>` tags or appends directly to host containers;
  *   all DOM slots, styles, and lifecycle cleanup delegate exclusively to `addonHost`.
  */
 

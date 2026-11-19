@@ -1,6 +1,6 @@
 /**
  * Main inline statusbar DOM view (SRP).
- * Zero innerHTML / outerHTML / insertAdjacentHTML — DOM createElement + textContent only.
+ * Safe DOM construction via createElement + textContent only (no HTML string injection).
  */
 
 export function createBarView({ doc, i18n }) {
