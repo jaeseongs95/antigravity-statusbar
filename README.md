@@ -28,6 +28,7 @@ Previous versions patched Electron `app.asar` and hooked renderer internals (`ls
 ```bash
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
+npm ci --omit=dev
 npm run install-plugin
 ```
 

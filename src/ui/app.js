@@ -72,6 +72,7 @@ export function createStatusbarApp({
   let sessionListEpoch = 0;
   let snapshotEpoch = 0;
   let quotaEpoch = 0;
+  let localeUpdateInFlight = false;
   let snapshotController = null;
   let pollTimer = null;
   let quotaTimer = null;
@@ -186,6 +187,11 @@ export function createStatusbarApp({
         emptyOpt.textContent = t.noSessions;
         el.sessionSelect.appendChild(emptyOpt);
         el.sessionSelect.disabled = true;
+        // NB3: Keep sessionModeBadge synchronized even when session list is empty
+        setTextIfChanged(
+          el.sessionModeBadge,
+          state.selectionMode === 'manual' ? t.modeManual : t.modeAuto,
+        );
         return;
       }
 
@@ -386,7 +392,7 @@ export function createStatusbarApp({
       if (isNewSessionLoad) {
         syncLimitInputs(snap);
       }
-      if (snap.locale && snap.locale !== state.locale) {
+      if (snap.locale && snap.locale !== state.locale && !localeUpdateInFlight) {
         state.locale = snap.locale;
         applyLocaleStrings();
       } else {
@@ -514,11 +520,14 @@ export function createStatusbarApp({
       async () => {
         const nextLocale = state.locale === 'ko' ? 'en' : 'ko';
         state.locale = nextLocale;
+        localeUpdateInFlight = true;
         applyLocaleStrings();
         try {
           await bridge.updateSettings({ locale: nextLocale });
         } catch {
           // Non-fatal UI fallback
+        } finally {
+          localeUpdateInFlight = false;
         }
       },
       { signal: sig },
@@ -538,6 +547,16 @@ export function createStatusbarApp({
       'change',
       () => {
         el.limitCustomInput.value = el.limitPresetSelect.value;
+      },
+      { signal: sig },
+    );
+
+    el.limitCustomInput.addEventListener(
+      'input',
+      () => {
+        // NB3: Keep preset dropdown synchronized when user types custom value
+        const parsed = Number(el.limitCustomInput.value.trim());
+        el.limitPresetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
       },
       { signal: sig },
     );

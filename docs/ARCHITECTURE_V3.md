@@ -21,7 +21,7 @@ Sidecar HTTP Server (src/adapters/antigravity/sidecar-entry.mjs)
 Statusbar Service (src/core/app/statusbar-service.mjs)
    ├── TelemetryPort  ──► ls-transport.mjs (loopback Connect JSON & 5B stream)
    ├── CompactionPort ──► compaction-adapter.mjs (SendUserCascadeMessage RPC + bounded spawn fallback)
-   └── SettingsPort   ──► json-settings-store.mjs (O_EXCL settings.lock + atomic rename)
+   └── SettingsPort   ──► json-settings-store.mjs (proper-lockfile + write-file-atomic)
 ```
 
 ## 3. Hardening Guarantees (Gate 1 PASS `F1`–`F10`)
@@ -32,6 +32,6 @@ Statusbar Service (src/core/app/statusbar-service.mjs)
 - **F4**: Post-compaction guard requires `lastCompactedStep >= 0 && afterCompact > 0 && lastCompactedStep >= max(lastMetaStepIndex, lastStepIndex)`; `effectiveLimit = hostMax > 0 ? Math.min(hostMax, custom) : custom`.
 - **F5**: `compactingSessions` mutex is released immediately if both primary RPC and fallback fail; cleared automatically when telemetry confirms completion.
 - **F6**: Fallback uses `spawn` (`shell: false`, `windowsHide: true`, `stdio: ['ignore','pipe','pipe']`, `AbortSignal`), `64KB` bounded stream drain, and `dispose()` PID cleanup.
-- **F7**: `settings.lock` enforces `10s` 0-byte grace, rename-aside + token verification before stale `unlink`, and `< 3s` Windows `EPERM`/`EBUSY`/`EACCES` rename backoff.
+- **F7**: Cross-process locking and atomic persistence use user-approved trusted libraries (`proper-lockfile` atomic `mkdir` lock with heartbeat + `write-file-atomic`).
 - **F8–F9**: `Host` validation on both static `GET` and API `POST`, `405` + zero CORS on non-`POST` `/api/*`, `path.relative` + `path.sep` `realpathSync` jail (`%` -> `400`, `\0` -> `400`), and `sessionStorage` token retention across webview reloads after `history.replaceState`.
 - **F10**: `dataDir` injected into `json-settings-store.mjs`; monotonic timestamps prevent same-ms overwrite races.

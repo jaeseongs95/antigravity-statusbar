@@ -18,7 +18,7 @@ const TOKEN_GROUP_LABELS = Object.freeze({
 
 function formatTokenGroupLabel(rawType) {
   if (typeof rawType !== 'string' || !rawType.trim()) return 'Other';
-  if (TOKEN_GROUP_LABELS[rawType]) return TOKEN_GROUP_LABELS[rawType];
+  if (Object.hasOwn(TOKEN_GROUP_LABELS, rawType)) return TOKEN_GROUP_LABELS[rawType];
   return rawType
     .replace(/^TOKEN_GROUP_/, '')
     .toLowerCase()
@@ -173,14 +173,23 @@ export function extractLatestUsageMetadata(metadataList) {
   let bestModel = null;
   let bestBreakdown = null;
   let bestStepIndex = null;
+  let bestContextWindowMeta = null;
 
   for (let i = metadataList.length - 1; i >= 0; i -= 1) {
     const item = metadataList[i];
     const chatModel = unwrapChatModel(item);
     if (!chatModel) continue;
 
+    // F2: Read chatModel.chatStartMetadata.startStepIndex first, and last element of stepIndices[]
+    const lastStepFromArray =
+      Array.isArray(item?.stepIndices) && item.stepIndices.length > 0
+        ? item.stepIndices[item.stepIndices.length - 1]
+        : null;
     const stepIdx = toNonNegativeIntOrNull(
-      item?.stepIndex ?? item?.startStepIndex ?? item?.stepIndices?.[0],
+      chatModel?.chatStartMetadata?.startStepIndex ??
+        item?.stepIndex ??
+        item?.startStepIndex ??
+        lastStepFromArray,
     );
     if (bestStepIndex === null && stepIdx !== null) {
       bestStepIndex = stepIdx;
@@ -197,27 +206,41 @@ export function extractLatestUsageMetadata(metadataList) {
       }
     }
 
+    const cwm = chatModel?.chatStartMetadata?.contextWindowMetadata;
+    if (bestContextWindowMeta === null && cwm && typeof cwm === 'object') {
+      const est = toNonNegativeIntOrNull(cwm.estimatedTokensUsed);
+      const max = toNonNegativeIntOrNull(cwm.maxContextTokens);
+      if (est !== null || max !== null) {
+        bestContextWindowMeta = { estimatedTokensUsed: est, maxContextTokens: max };
+      }
+    }
+
     if (bestBreakdown === null) {
-      const groups = chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups;
+      const groups = cwm?.tokenBreakdown?.groups;
       if (Array.isArray(groups) && groups.length > 0) {
         bestBreakdown = groups;
       }
     }
 
+    // NB4: Skip empty usage: {} objects so scan continues to an earlier item with actual token counts
     if (bestUsage === null && chatModel.usage && typeof chatModel.usage === 'object') {
-      bestUsage = {
-        apiProvider: chatModel.usage.apiProvider ?? chatModel.apiProvider ?? null,
-        inputTokens: toNonNegativeIntOrNull(chatModel.usage.inputTokens),
-        cacheReadTokens: toNonNegativeIntOrNull(chatModel.usage.cacheReadTokens),
-      };
+      const inputTokens = toNonNegativeIntOrNull(chatModel.usage.inputTokens);
+      const cacheReadTokens = toNonNegativeIntOrNull(chatModel.usage.cacheReadTokens);
+      if (inputTokens !== null || cacheReadTokens !== null) {
+        bestUsage = {
+          apiProvider: chatModel.usage.apiProvider ?? chatModel.apiProvider ?? null,
+          inputTokens,
+          cacheReadTokens,
+        };
+      }
     }
 
-    if (bestUsage && bestModel && bestBreakdown) {
+    if (bestUsage && bestModel && bestBreakdown && bestContextWindowMeta) {
       break;
     }
   }
 
-  if (!bestUsage && !bestModel && !bestBreakdown) {
+  if (!bestUsage && !bestModel && !bestBreakdown && !bestContextWindowMeta) {
     return null;
   }
 
@@ -228,6 +251,8 @@ export function extractLatestUsageMetadata(metadataList) {
     cacheReadTokens: bestUsage?.cacheReadTokens ?? null,
     stepIndex: bestStepIndex,
     tokenBreakdownGroups: bestBreakdown,
+    contextWindowEstimatedTokens: bestContextWindowMeta?.estimatedTokensUsed ?? null,
+    contextWindowMaxTokens: bestContextWindowMeta?.maxContextTokens ?? null,
   };
 }
 
@@ -266,18 +291,25 @@ export function mapSessionTelemetry({
     ? update.contextWindowUsage
     : {};
 
-  const estimatedUsed = toNonNegativeIntOrNull(cwu.estimatedTokensUsed);
+  const latestUsage = extractLatestUsageMetadata(generatorMetadata);
+  const lastMetaStepIndex = latestUsage ? latestUsage.stepIndex : null;
+
+  // F2: Fallback to chatModel.chatStartMetadata.contextWindowMetadata.{estimatedTokensUsed, maxContextTokens}
+  const estimatedUsed =
+    toNonNegativeIntOrNull(cwu.estimatedTokensUsed) ??
+    latestUsage?.contextWindowEstimatedTokens ??
+    null;
   const rawAfterCompact = cwu.estimatedAfterCompaction;
   const afterCompactBool = typeof rawAfterCompact === 'boolean' ? rawAfterCompact : null;
   const afterCompactTokens =
     afterCompactBool === null ? toNonNegativeIntOrNull(rawAfterCompact) : null;
 
-  const maxContextTokens = toNonNegativeIntOrNull(cwu.maxContextTokens);
+  const maxContextTokens =
+    toNonNegativeIntOrNull(cwu.maxContextTokens) ??
+    latestUsage?.contextWindowMaxTokens ??
+    null;
   const lastStepIndex = toNonNegativeIntOrNull(cwu.lastStepIndex);
   const lastCompactedStep = extractLastCompactedStep(update);
-
-  const latestUsage = extractLatestUsageMetadata(generatorMetadata);
-  const lastMetaStepIndex = latestUsage ? latestUsage.stepIndex : null;
 
   const latestActivityStep = Math.max(
     lastMetaStepIndex !== null ? lastMetaStepIndex : -1,

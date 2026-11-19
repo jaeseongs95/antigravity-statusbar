@@ -3,6 +3,6 @@ coverage/
 *.log
 *.tmp
 *.corrupt.*
-settings.lock
+*.lock
 .DS_Store
 Thumbs.db

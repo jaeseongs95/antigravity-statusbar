@@ -110,6 +110,18 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
     return { installed: false, dryRun: true, destDir, entries: plannedFiles };
   }
 
+  // F3: Fail-Closed when runtime dependencies (node_modules) are missing on real install
+  const requiredDeps = ['proper-lockfile', 'write-file-atomic'];
+  for (const dep of requiredDeps) {
+    try {
+      await fs.access(path.join(repoRoot, 'node_modules', dep));
+    } catch {
+      throw new Error(
+        `Missing runtime dependency '${dep}' in node_modules. Run 'npm ci --omit=dev' before installing the plugin.`,
+      );
+    }
+  }
+
   const parentDir = path.dirname(destDir);
   await fs.mkdir(parentDir, { recursive: true });
 

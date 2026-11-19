@@ -435,6 +435,8 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
 
   /**
    * Bounded overshoot tail reader for GetCascadeTrajectoryGeneratorMetadata (-20/-60/-180).
+   * F2: When approxIndex is missing/<=0, probes offset=0 first and falls back to bounded tail
+   * probes (e.g. if offset=0 exceeds 4MB on a large trajectory).
    *
    * @param {string} cascadeId
    * @param {number | null} approxIndex
@@ -448,17 +450,23 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     const offsets =
       base > 0
         ? [Math.max(0, base - 20), Math.max(0, base - 60), Math.max(0, base - 180)]
-        : [0];
+        : [0, 1000, 500, 200, 50];
 
     const seenOffsets = new Set();
     for (const offset of offsets) {
       if (seenOffsets.has(offset)) continue;
       seenOffsets.add(offset);
 
-      const resp = await callUnaryRpc('GetCascadeTrajectoryGeneratorMetadata', {
-        cascadeId,
-        generatorMetadataOffset: offset,
-      });
+      let resp;
+      try {
+        resp = await callUnaryRpc('GetCascadeTrajectoryGeneratorMetadata', {
+          cascadeId,
+          generatorMetadataOffset: offset,
+        });
+      } catch {
+        // Continue probing smaller tail offsets if offset=0 overflowed 4MB cap
+        continue;
+      }
       const list = Array.isArray(resp?.generatorMetadata) ? resp.generatorMetadata : [];
       if (list.length > 0) {
         // F4: Accept items carrying usage, chatStartMetadata, modelDisplayName, or oneof chatModel

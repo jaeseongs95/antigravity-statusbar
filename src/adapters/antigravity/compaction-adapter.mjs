@@ -160,11 +160,23 @@ export function createAntigravityCompactionAdapter({
 
   return {
     async compactSession(sessionId) {
-      // 1. Primary path: async SendUserCascadeMessage RPC
+      // 1. Primary path: async SendUserCascadeMessage RPC with structured slashCommand ContextScopeItem (F1)
       try {
         await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
           cascadeId: sessionId,
-          items: [{ text: '/compact' }],
+          items: [
+            {
+              item: {
+                slashCommand: {
+                  info: {
+                    name: 'compact',
+                    type: 'SLASH_COMMAND_TYPE_SYSTEM',
+                    icon: 'collapse_all',
+                  },
+                },
+              },
+            },
+          ],
         });
         return { accepted: true, method: 'rpc' };
       } catch (rpcErr) {

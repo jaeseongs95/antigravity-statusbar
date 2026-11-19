@@ -27,6 +27,7 @@
 ```bash
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
 cd antigravity-statusbar
+npm ci --omit=dev
 npm run install-plugin
 ```
 

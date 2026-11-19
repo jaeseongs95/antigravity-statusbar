@@ -276,24 +276,40 @@ test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parse
   assert.equal(staleAfterCompact.compactionJustCompleted, false);
   assert.equal(staleAfterCompact.usedTokensSource, 'estimated');
 
-  // 4. R2-F4: protobuf-es oneof { metadata: { case: 'chatModel', value } }, startStepIndex, modelDisplayName, tokenBreakdown.groups[].source
+  // 4. R2-F4 & R3-F2 & NB4: protobuf-es oneof { metadata: { case: 'chatModel', value } },
+  //    chatModel.chatStartMetadata.startStepIndex, stepIndices[last], contextWindowMetadata.{estimatedTokensUsed, maxContextTokens} fallback,
+  //    and skipping empty usage: {} to find earlier valid usage
   const oneofSchema = mapSessionTelemetry({
     requestedSessionId: 'sess-oneof',
     streamFrame: {
       update: {
         conversationId: 'sess-oneof',
-        contextWindowUsage: { estimatedTokensUsed: 15_000, maxContextTokens: 200_000, lastStepIndex: 6 },
+        contextWindowUsage: { lastStepIndex: 8 },
       },
     },
     generatorMetadata: [
       {
-        startStepIndex: 6,
+        stepIndices: [3, 5],
+        chatModel: {
+          usage: {
+            apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+            inputTokens: '5000',
+            cacheReadTokens: '45000',
+          },
+        },
+      },
+      {
+        stepIndices: [6, 8],
         metadata: {
           case: 'chatModel',
           value: {
             modelDisplayName: 'Gemini 2.5 Pro',
+            usage: {},
             chatStartMetadata: {
+              startStepIndex: 8,
               contextWindowMetadata: {
+                estimatedTokensUsed: 44_000,
+                maxContextTokens: 256_000,
                 tokenBreakdown: {
                   groups: [{ source: 'TOKEN_GROUP_FILES', numTokens: '6500' }],
                 },
@@ -305,6 +321,9 @@ test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parse
     ],
   });
   assert.equal(oneofSchema.modelName, 'Gemini 2.5 Pro');
+  assert.equal(oneofSchema.usedTokens, 44_000);
+  assert.equal(oneofSchema.maxContextTokens, 256_000);
+  assert.equal(oneofSchema.cacheHitPercent, 90);
   assert.equal(oneofSchema.tokenBreakdown[0].key, 'TOKEN_GROUP_FILES');
   assert.equal(oneofSchema.tokenBreakdown[0].tokens, 6500);
 });
@@ -539,10 +558,22 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
     assert.equal(compactRes.status, 200);
     const compactData = await compactRes.json();
     assert.equal(compactData.accepted, true);
-    // R2-F4: Verify exact SendUserCascadeMessage request payload received by LS
+    // R3-F1: Verify exact structured slashCommand ContextScopeItem payload received by LS
     assert.deepEqual(seenCompactPayloads[0], {
       cascadeId: 'sess-live-1',
-      items: [{ text: '/compact' }],
+      items: [
+        {
+          item: {
+            slashCommand: {
+              info: {
+                name: 'compact',
+                type: 'SLASH_COMMAND_TYPE_SYSTEM',
+                icon: 'collapse_all',
+              },
+            },
+          },
+        },
+      ],
     });
   } finally {
     child.kill('SIGTERM');
@@ -553,24 +584,79 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
   }
 });
 
-test('NB3 & NB4: install-plugin.mjs validates --target flags, installs cleanly with fs.cp, and preserves data/settings.json', async () => {
+test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, installs with fs.cp, preserves data/settings.json, and boots installed sidecar cleanly', async () => {
   assert.throws(() => parseArgs(['--target']), /--target requires/);
   assert.throws(() => parseArgs(['--target', '-x']), /--target requires/);
   assert.throws(() => parseArgs(['--target', '--dry-run']), /--target requires/);
 
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-install-test-'));
+  const emptyRepo = path.join(tempRoot, 'empty-repo');
   const destDir = path.join(tempRoot, 'antigravity-statusbar');
+  const dataDir = path.join(destDir, 'data');
+
   try {
-    await fs.mkdir(path.join(destDir, 'data'), { recursive: true });
-    await fs.writeFile(path.join(destDir, 'data', 'settings.json'), '{"locale":"ko"}', 'utf8');
+    // 1. R3-F3: Fail-Closed when node_modules is missing on non-dry-run install
+    await fs.mkdir(emptyRepo, { recursive: true });
+    await fs.writeFile(path.join(emptyRepo, 'plugin.json'), '{}', 'utf8');
+    await assert.rejects(
+      () => installPlugin({ repoRoot: emptyRepo, destDir, dryRun: false }),
+      /Missing runtime dependency/,
+    );
+
+    // 2. Full install from REPO_ROOT preserves existing data/settings.json
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.writeFile(path.join(dataDir, 'settings.json'), '{"locale":"ko"}', 'utf8');
 
     const res = await installPlugin({ repoRoot: REPO_ROOT, destDir, dryRun: false });
     assert.equal(res.installed, true);
 
-    const preserved = await fs.readFile(path.join(destDir, 'data', 'settings.json'), 'utf8');
+    const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
     assert.equal(manifest.version, '3.0.0');
+
+    // 3. R3-F3: Boot installed sidecar directly from destDir (verifies node_modules resolution, zero ERR_MODULE_NOT_FOUND)
+    const installedChild = spawn(
+      process.execPath,
+      [path.join(destDir, 'sidecars', 'statusbar', 'main.mjs')],
+      {
+        env: {
+          ...process.env,
+          ANTIGRAVITY_SIDECAR_UI_TOKEN: 'installed-dest-token-32-chars-ok',
+          ANTIGRAVITY_LS_ADDRESS: 'localhost:49999',
+          ANTIGRAVITY_PLUGIN_DATA_DIR: dataDir,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    try {
+      const readyLine = await new Promise((resolve, reject) => {
+        let out = '';
+        let errOut = '';
+        const timer = setTimeout(() => reject(new Error(`Installed sidecar timeout: ${errOut}`)), 8_000);
+        installedChild.stdout.on('data', (c) => {
+          out += c.toString('utf8');
+          const nl = out.indexOf('\n');
+          if (nl >= 0) {
+            clearTimeout(timer);
+            resolve(out.slice(0, nl));
+          }
+        });
+        installedChild.stderr.on('data', (c) => {
+          errOut += c.toString('utf8');
+        });
+        installedChild.once('exit', (code) => {
+          clearTimeout(timer);
+          reject(new Error(`Installed sidecar exited ${code}: ${errOut}`));
+        });
+      });
+      const ready = JSON.parse(readyLine);
+      assert.equal(ready.type, 'sidecar_ready');
+      assert.ok(ready.port > 0);
+    } finally {
+      installedChild.kill('SIGTERM');
+      await new Promise((resolve) => installedChild.once('exit', resolve));
+    }
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
