@@ -990,7 +990,9 @@ export function inlineStatusbarBootstrap(cfg) {
         setText(popSteps, `${tr.steps} ${stepStr}`);
 
         clearChildren(breakdownList);
-        const bdList = Array.isArray(snap.tokenBreakdown) ? snap.tokenBreakdown : [];
+        const bdList = Array.isArray(snap.tokenBreakdown)
+          ? [...snap.tokenBreakdown].sort((a, b) => (b?.tokens || 0) - (a?.tokens || 0))
+          : [];
         const bdTotal = bdList.reduce((sum, it) => sum + (typeof it?.tokens === 'number' ? it.tokens : 0), 0);
         breakdownSection.style.display = bdList.length > 0 ? '' : 'none';
         for (const item of bdList) {

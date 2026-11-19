@@ -67,7 +67,7 @@ export function normalizeTokenGroups(groups) {
       byLabel.set(label, { key, label, tokens });
     }
   }
-  return Array.from(byLabel.values()).sort((a, b) => b.tokens - a.tokens);
+  return Array.from(byLabel.values());
 }
 
 /**
