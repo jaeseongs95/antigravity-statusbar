@@ -9,7 +9,7 @@ const PRESETS = [32_000, 64_000, 128_000, 200_000, 256_000, 384_000, 512_000, 98
 
 /**
  * Pure controller factory so UI logic can be tested both in a browser and in Node unit/DOM tests.
- * Zero innerHTML usage anywhere (D-0012, D-0025).
+ * Uses only textContent and explicit DOM element creation (D-0012, D-0025).
  * Strict per-channel epoch + AbortController cancellation (D-0006, D-0020, D-0033).
  */
 export function createStatusbarApp({

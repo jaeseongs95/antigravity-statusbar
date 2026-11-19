@@ -124,7 +124,7 @@ async function atomicRenameWithRetry(srcPath, destPath) {
 
 /**
  * Creates a file-backed SettingsPort implementation with:
- * - Injected dataDir (F10: zero direct process.env reads)
+ * - Injected dataDir (F10: no direct environment variable reads)
  * - In-process async mutex + cross-process O_EXCL settings.lock (F7)
  * - 0-byte lock mtime > 10s grace + rename-aside & token check stale recovery (F7)
  * - Monotonic timestamps for same-ms updates (F10)

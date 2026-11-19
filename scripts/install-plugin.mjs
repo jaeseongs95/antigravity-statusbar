@@ -49,7 +49,7 @@ async function copyRecursive(src, dest) {
 /**
  * Installs antigravity-statusbar as an official Antigravity Native Plugin.
  * Preserves existing plugin `data/` directory (settings.json) and never touches
- * host binaries, app.asar, hooks.json, or settings.json.
+ * host installation binaries or global host configuration files.
  */
 export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
   const plannedFiles = [];
