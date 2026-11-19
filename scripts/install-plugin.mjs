@@ -78,6 +78,7 @@ async function copySafe(src, dest) {
   }
   await fs.cp(src, dest, {
     recursive: true,
+    force: true,
     verbatimSymlinks: true,
     filter: async (srcPath) => {
       const stat = await fs.lstat(srcPath);
@@ -154,22 +155,33 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       hadExisting = false;
     }
 
-    if (hadExisting) {
-      await renameWithRetry(destDir, backupDir);
-    }
+    let movedExistingToBackup = false;
     try {
-      await renameWithRetry(stagingDir, destDir);
-    } catch (err) {
       if (hadExisting) {
+        await renameWithRetry(destDir, backupDir);
+        movedExistingToBackup = true;
+      }
+      await renameWithRetry(stagingDir, destDir);
+      if (movedExistingToBackup) {
+        await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
+      }
+      return { installed: true, dryRun: false, mode: 'atomic-rename', destDir, entries: plannedFiles };
+    } catch (renameErr) {
+      if (movedExistingToBackup) {
         await renameWithRetry(backupDir, destDir).catch(() => {});
       }
-      throw err;
+      // On Windows, a running host app watching ~/.gemini/config/plugins/ may hold a directory handle
+      // causing EPERM/EBUSY/EACCES on directory rename. Fall back to direct in-place copy preserving data/.
+      if (!RETRYABLE_RENAME_CODES.has(renameErr?.code)) {
+        throw renameErr;
+      }
+      await fs.mkdir(destDir, { recursive: true });
+      for (const rel of plannedFiles) {
+        await copySafe(path.join(repoRoot, rel), path.join(destDir, rel));
+      }
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      return { installed: true, dryRun: false, mode: 'in-place-fallback', destDir, entries: plannedFiles };
     }
-    if (hadExisting) {
-      await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
-    }
-
-    return { installed: true, dryRun: false, destDir, entries: plannedFiles };
   } catch (err) {
     await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     throw err;
