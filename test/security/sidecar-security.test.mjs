@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
 
+import {
+  renderInlineStatusbarScript,
+  renderInlineTeardownStub,
+} from '../../src/adapters/antigravity/inline-statusbar.mjs';
 import { createSidecarServer } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 
 const TEST_TOKEN = 'statusbar-test-token-32-chars-ok';
@@ -62,14 +66,23 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
   const validOrigin = `http://127.0.0.1:${port}`;
 
   try {
-    // 1. Static GET with evil Host header -> 403 (F8-F9)
-    const badHostStatic = await rawHttpRequest({
+    // 1. Static GET with evil Host header -> 403 (F8-F9), loopback proxy Host -> 200
+    for (const badHost of ['evil.attacker.example:80', '127.0.0.1.evil.com:80', 'localhost:99999']) {
+      const badHostStatic = await rawHttpRequest({
+        port,
+        method: 'GET',
+        path: '/',
+        headers: { host: badHost },
+      });
+      assert.equal(badHostStatic.status, 403, `Expected 403 for Host ${badHost}`);
+    }
+    const proxyHostStatic = await rawHttpRequest({
       port,
       method: 'GET',
       path: '/',
-      headers: { host: 'evil.attacker.example:80' },
+      headers: { host: 'localhost:54321' },
     });
-    assert.equal(badHostStatic.status, 403);
+    assert.equal(proxyHostStatic.status, 200);
 
     // 2. Static GET / returns index.html with strict CSP (including vscode-file:), Referrer-Policy, Cache-Control, nosniff
     const indexRes = await rawHttpRequest({
@@ -111,8 +124,8 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     });
     assert.equal(malformedPctRes.status, 400);
 
-    // 5. Non-POST on /api/* -> 405 Method Not Allowed & ZERO CORS headers (F8-F9)
-    for (const m of ['GET', 'OPTIONS', 'PUT', 'DELETE']) {
+    // 5. Non-POST/OPTIONS on /api/* -> 405 Method Not Allowed & ZERO CORS headers (F8-F9)
+    for (const m of ['GET', 'PUT', 'DELETE']) {
       const nonPost = await rawHttpRequest({
         port,
         method: m,
@@ -123,6 +136,27 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
       assert.equal(nonPost.headers['access-control-allow-origin'], undefined);
       assert.equal(nonPost.headers['access-control-allow-methods'], undefined);
     }
+
+    // 5b. OPTIONS preflight: allowed ONLY for loopback Origin; foreign/missing -> 403 & ZERO CORS
+    const badPreflight = await rawHttpRequest({
+      port,
+      method: 'OPTIONS',
+      path: '/api/sessions',
+      headers: { host: validHost, origin: 'https://evil.example' },
+    });
+    assert.equal(badPreflight.status, 403);
+    assert.equal(badPreflight.headers['access-control-allow-origin'], undefined);
+
+    const loopbackCrossPortOrigin = 'http://localhost:54321';
+    const okPreflight = await rawHttpRequest({
+      port,
+      method: 'OPTIONS',
+      path: '/api/sessions',
+      headers: { host: validHost, origin: loopbackCrossPortOrigin },
+    });
+    assert.equal(okPreflight.status, 204);
+    assert.equal(okPreflight.headers['access-control-allow-origin'], loopbackCrossPortOrigin);
+    assert.equal(okPreflight.headers.vary, 'Origin');
 
     // 6. Missing or null or foreign Origin on API POST -> 403
     for (const badOrigin of [undefined, 'null', 'https://evil.example']) {
@@ -174,23 +208,44 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     assert.equal(tooLarge.status, 413);
     assert.equal(String(tooLarge.headers.connection || '').toLowerCase(), 'close');
 
-    // 9. Valid authenticated POST /api/sessions -> 200
+    // 9. Valid authenticated POST /api/sessions -> 200 (both same-port & cross-port loopback origin)
     const okRes = await rawHttpRequest({
       port,
       method: 'POST',
       path: '/api/sessions',
       headers: {
         host: validHost,
-        origin: validOrigin,
+        origin: loopbackCrossPortOrigin,
         'x-statusbar-token': TEST_TOKEN,
         'content-type': 'application/json',
       },
       body: '{}',
     });
     assert.equal(okRes.status, 200);
+    assert.equal(okRes.headers['access-control-allow-origin'], loopbackCrossPortOrigin);
     const parsed = JSON.parse(okRes.body);
     assert.equal(parsed.sessions[0].sessionId, 'sess-1');
   } finally {
     await sidecar.close();
   }
+});
+
+test('inline statusbar script generator enforces loopback URL, min token length, and safe teardown stub', () => {
+  assert.throws(() =>
+    renderInlineStatusbarScript({ baseUrl: 'https://evil.example:443', token: TEST_TOKEN }),
+  );
+  assert.throws(() =>
+    renderInlineStatusbarScript({ baseUrl: 'http://127.0.0.1:43210', token: 'short' }),
+  );
+  const script = renderInlineStatusbarScript({
+    baseUrl: 'http://127.0.0.1:43210',
+    token: TEST_TOKEN,
+  });
+  assert.ok(script.includes('http://127.0.0.1:43210'));
+  assert.equal(/\binnerHTML\b/.test(script), false);
+  assert.equal(/SetMendelFlagOverrides/.test(script), false);
+
+  const stub = renderInlineTeardownStub();
+  assert.equal(stub.includes(TEST_TOKEN), false);
+  assert.ok(stub.includes('__agyStatusbarInline'));
 });
