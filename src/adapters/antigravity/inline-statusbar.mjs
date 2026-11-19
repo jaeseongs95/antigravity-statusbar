@@ -391,8 +391,8 @@ export function inlineStatusbarBootstrap(cfg) {
   const TOKEN = cfg.token;
   const STYLE_ID = 'agy-inline-statusbar-style';
   const PRESETS = [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
-  const NORMAL_POLL_MS = 1500;
-  const BURST_POLL_MS = 750;
+  const NORMAL_POLL_MS = 1000;
+  const BURST_POLL_MS = 400;
   const QUOTA_POLL_MS = 15000;
   const MAX_BURST_MS = 20000;
 
@@ -405,10 +405,13 @@ export function inlineStatusbarBootstrap(cfg) {
       quota: 'Quota',
       softLimit: 'Limit Reached',
       autoCompacting: 'Auto-compacting…',
+      compactingBadge: 'Compacting…',
       compact: 'compact',
       compacting: '…',
       compactSent: 'Compaction requested',
+      compactInProgress: 'Compaction already in progress',
       compactFail: 'Compaction failed',
+      noActiveSession: 'No active session found',
       settingsTitle: 'Statusbar Settings',
       breakdownTitle: 'Token Breakdown',
       limitTitle: 'Session Context Limit',
@@ -420,6 +423,13 @@ export function inlineStatusbarBootstrap(cfg) {
       scopeDefault: 'Default',
       apply: 'Apply',
       applied: 'Saved',
+      appliedClamped: 'Saved ({val}) — clamped to model max ({max})',
+      limitStatusNormal: 'Active: {eff} ({source}) · Model max {max}',
+      limitStatusClamped: 'Set {custom} → clamped to model max {max}',
+      sourceSession: 'this session',
+      sourceDefault: 'default',
+      sourceHost: 'host default',
+      overModelMax: 'over {max} max',
       invalidLimit: 'Enter 32,000–980,000 or leave blank for host default.',
       steps: 'Steps',
       model: 'Model',
@@ -442,10 +452,13 @@ export function inlineStatusbarBootstrap(cfg) {
       quota: '할당량',
       softLimit: '한도 도달',
       autoCompacting: '자동 컴팩션 중…',
+      compactingBadge: '컴팩션 중…',
       compact: 'compact',
       compacting: '…',
       compactSent: '컴팩션 요청됨',
+      compactInProgress: '이미 컴팩션 진행 중',
       compactFail: '컴팩션 실패',
+      noActiveSession: '활성 세션을 찾을 수 없습니다.',
       settingsTitle: '상태바 상세 · 설정',
       breakdownTitle: '토큰 구성',
       limitTitle: '세션 컨텍스트 한도',
@@ -457,6 +470,13 @@ export function inlineStatusbarBootstrap(cfg) {
       scopeDefault: '기본값',
       apply: '적용',
       applied: '저장되었습니다.',
+      appliedClamped: '{val} 저장됨 (모델 최대 {max}로 제한 적용)',
+      limitStatusNormal: '적용 중: {eff} ({source}) · 모델 최대 {max}',
+      limitStatusClamped: '{custom} 설정됨 → 모델 최대 {max}로 제한 적용됨',
+      sourceSession: '현재 세션',
+      sourceDefault: '기본값',
+      sourceHost: '호스트 기본값',
+      overModelMax: '최대 {max} 초과',
       invalidLimit: '32,000~980,000 사이 숫자 또는 비움(기본값)을 입력하세요.',
       steps: '스텝',
       model: '모델',
@@ -489,6 +509,8 @@ export function inlineStatusbarBootstrap(cfg) {
   let disposed = false;
   let locale = 'ko';
   let autoCompactEnabled = true;
+  let defaultCustomLimit = null;
+  const sessionLimits = new Map();
   let customButtons = [];
   let disabledRuntimeAddonIds = new Set();
   const runtimeButtons = new Map();
@@ -749,10 +771,14 @@ export function inlineStatusbarBootstrap(cfg) {
     autoCompactRow.appendChild(autoCompactLbl);
     autoCompactRow.appendChild(autoCompactBtn);
 
+    const limitStatusEl = document.createElement('div');
+    limitStatusEl.className = 'agy-inline-pop-hint';
+
     limitSection.appendChild(limitTitle);
     limitSection.appendChild(limitHint);
     limitSection.appendChild(limitRow1);
     limitSection.appendChild(limitRow2);
+    limitSection.appendChild(limitStatusEl);
     limitSection.appendChild(autoCompactRow);
 
     const popFeedback = document.createElement('div');
@@ -822,30 +848,96 @@ export function inlineStatusbarBootstrap(cfg) {
       snapshot: null,
       epoch: 0,
       abortCtrl: null,
+      inFlight: false,
+      pendingRefresh: false,
       compacting: false,
+      limitDirty: false,
+      lastPresetsKey: '',
+      lastAddonsKey: '',
+      syncedLimitKey: '',
     };
 
-    function rebuildPresets() {
+    function formatTemplate(tpl, vars) {
+      return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) =>
+        Object.prototype.hasOwnProperty.call(vars, k) ? String(vars[k]) : '',
+      );
+    }
+
+    function rebuildPresets(hostMaxTokens = 0) {
+      const safeHostMax =
+        typeof hostMaxTokens === 'number' && Number.isFinite(hostMaxTokens) && hostMaxTokens > 0
+          ? Math.floor(hostMaxTokens)
+          : 0;
+      const nextKey = `${locale}:${safeHostMax}`;
+      if (state.lastPresetsKey === nextKey) return;
+      state.lastPresetsKey = nextKey;
+
       const prev = presetSelect.value;
       clearChildren(presetSelect);
+      const tr = t();
       const hostOpt = document.createElement('option');
       hostOpt.value = '';
-      hostOpt.textContent = t().hostDefault;
+      hostOpt.textContent = tr.hostDefault;
       presetSelect.appendChild(hostOpt);
       for (const p of PRESETS) {
         const o = document.createElement('option');
         o.value = String(p);
-        o.textContent = `${Math.round(p / 1000)}K`;
+        const kLabel = `${Math.round(p / 1000)}K`;
+        if (safeHostMax > 0 && p > safeHostMax) {
+          o.textContent = `${kLabel} (${formatTemplate(tr.overModelMax, { max: formatTokens(safeHostMax) })})`;
+        } else {
+          o.textContent = kLabel;
+        }
         presetSelect.appendChild(o);
       }
       presetSelect.value = prev;
     }
 
+    function getSavedLimitForScope(scope) {
+      if (scope === 'default') {
+        return typeof defaultCustomLimit === 'number' ? defaultCustomLimit : null;
+      }
+      const sid = getSessionId();
+      if (sid && sessionLimits.has(sid)) {
+        return sessionLimits.get(sid);
+      }
+      const snap = state.snapshot;
+      if (snap && snap.limitSource === 'session' && typeof snap.customLimit === 'number') {
+        return snap.customLimit;
+      }
+      return null;
+    }
+
+    function syncLimitControls(force = false) {
+      const scope = scopeSelect.value === 'default' ? 'default' : 'session';
+      const sid = getSessionId();
+      const savedVal = getSavedLimitForScope(scope);
+      const nextKey = `${sid}:${scope}:${savedVal === null ? 'null' : savedVal}`;
+
+      if (!force) {
+        if (state.limitDirty) return;
+        if (state.syncedLimitKey === nextKey) return;
+        if (document.activeElement === customInput || document.activeElement === presetSelect) return;
+      }
+
+      state.syncedLimitKey = nextKey;
+      state.limitDirty = false;
+      const strVal = savedVal !== null ? String(savedVal) : '';
+      customInput.value = strVal;
+      presetSelect.value = savedVal !== null && PRESETS.includes(savedVal) ? strVal : '';
+    }
+
     function setPopoverOpen(open) {
-      state.popOpen = Boolean(open);
+      const nextOpen = Boolean(open);
+      const wasOpen = state.popOpen;
+      state.popOpen = nextOpen;
       popEl.classList.toggle('hidden', !state.popOpen);
       ctxBtn.setAttribute('aria-expanded', String(state.popOpen));
       settingsBtn.setAttribute('aria-expanded', String(state.popOpen));
+      if (nextOpen && !wasOpen) {
+        setText(popFeedback, '');
+        syncLimitControls(true);
+      }
     }
 
     function getSessionId() {
@@ -856,11 +948,22 @@ export function inlineStatusbarBootstrap(cfg) {
 
     function renderAddons() {
       const tr = t();
-      clearChildren(customBtnsContainer);
-
       const persistedSorted = [...customButtons].sort(
         (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id),
       );
+      const runtimeSorted = Array.from(runtimeButtons.values()).sort(
+        (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id),
+      );
+      const nextAddonsKey = JSON.stringify({
+        locale,
+        p: persistedSorted.map((b) => [b.id, b.label, b.command, b.description, b.enabled !== false, b.source]),
+        r: runtimeSorted.map((r) => [r.id, r.label, r.title, r.description, !disabledRuntimeAddonIds.has(r.id), r.source]),
+      });
+      if (state.lastAddonsKey === nextAddonsKey) return;
+      state.lastAddonsKey = nextAddonsKey;
+
+      clearChildren(customBtnsContainer);
+
       for (const btnDef of persistedSorted) {
         if (btnDef.enabled === false) continue;
         const b = document.createElement('button');
@@ -872,9 +975,6 @@ export function inlineStatusbarBootstrap(cfg) {
         customBtnsContainer.appendChild(b);
       }
 
-      const runtimeSorted = Array.from(runtimeButtons.values()).sort(
-        (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id),
-      );
       for (const rtDef of runtimeSorted) {
         if (disabledRuntimeAddonIds.has(rtDef.id)) continue;
         const b = document.createElement('button');
@@ -982,40 +1082,74 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(optSession, tr.scopeSession);
       setText(optDefault, tr.scopeDefault);
       setText(applyBtn, tr.apply);
-      setText(compactBtn, state.compacting ? tr.compacting : tr.compact);
+      const snap = state.snapshot;
+      const isBackendCompacting = Boolean(snap?.compaction?.inProgress);
+      const isCompactingNow = state.compacting || isBackendCompacting;
+      compactBtn.disabled = isCompactingNow || !getSessionId();
+      setText(compactBtn, isCompactingNow ? tr.compacting : tr.compact);
       setText(addonTitle, tr.addonsTitle);
       setText(langRowLabel, tr.langLabel);
       langSelect.setAttribute('aria-label', tr.langLabel);
       if (langSelect.value !== locale) langSelect.value = locale;
-      rebuildPresets();
+      rebuildPresets(snap?.maxContextTokens || 0);
       renderAddons();
 
-      const snap = state.snapshot;
       if (!snap) {
         setText(ctxTextEl, lastConnected ? `${tr.ctx} --` : tr.connecting);
         fillEl.style.width = '0%';
         fillEl.className = 'agy-inline-bar-fill';
         softBadgeEl.style.display = 'none';
         setText(cacheEl, `${tr.cache} --`);
+        setText(limitStatusEl, '');
       } else {
-        const pct = typeof snap.usagePercent === 'number' ? Math.max(0, Math.min(100, snap.usagePercent)) : 0;
+        const rawPct = typeof snap.usagePercent === 'number' && Number.isFinite(snap.usagePercent) ? Math.max(0, snap.usagePercent) : 0;
+        const barPct = Math.min(100, rawPct);
         const usedStr = formatTokens(snap.usedTokens);
         const limitStr = formatTokens(snap.effectiveLimit);
-        setText(ctxTextEl, `${tr.ctx} ${pct.toFixed(0)}% (${usedStr} / ${limitStr})`);
+        setText(ctxTextEl, `${tr.ctx} ${rawPct.toFixed(0)}% (${usedStr} / ${limitStr})`);
         const isSoftExceeded = Boolean(snap.exceededSoftLimit || snap.softLimitExceeded);
-        fillEl.style.width = `${pct}%`;
+        fillEl.style.width = `${barPct}%`;
         fillEl.className =
           'agy-inline-bar-fill' +
-          (isSoftExceeded || pct >= 90 ? ' danger' : pct >= 75 ? ' warn' : '');
+          (isSoftExceeded || rawPct >= 90 ? ' danger' : rawPct >= 75 ? ' warn' : '');
 
-        if (snap.autoCompactTriggered || snap.compaction?.inProgress) {
+        if (snap.autoCompactTriggered || snap.compaction?.trigger === 'auto') {
           softBadgeEl.style.display = '';
           setText(softBadgeEl, tr.autoCompacting);
+        } else if (isBackendCompacting) {
+          softBadgeEl.style.display = '';
+          setText(softBadgeEl, tr.compactingBadge);
         } else if (isSoftExceeded) {
           softBadgeEl.style.display = '';
           setText(softBadgeEl, tr.softLimit);
         } else {
           softBadgeEl.style.display = 'none';
+        }
+
+        const sourceName =
+          snap.limitSource === 'session'
+            ? tr.sourceSession
+            : snap.limitSource === 'default'
+              ? tr.sourceDefault
+              : tr.sourceHost;
+        const hostMaxStr = formatTokens(snap.maxContextTokens);
+        if (snap.isClampedByHost && typeof snap.customLimit === 'number') {
+          setText(
+            limitStatusEl,
+            formatTemplate(tr.limitStatusClamped, {
+              custom: formatTokens(snap.customLimit),
+              max: hostMaxStr,
+            }),
+          );
+        } else {
+          setText(
+            limitStatusEl,
+            formatTemplate(tr.limitStatusNormal, {
+              eff: limitStr,
+              source: sourceName,
+              max: hostMaxStr,
+            }),
+          );
         }
 
         const rawCachePct =
@@ -1067,14 +1201,7 @@ export function inlineStatusbarBootstrap(cfg) {
           breakdownList.appendChild(li);
         }
 
-        if (typeof snap.customLimit === 'number') {
-          if (document.activeElement !== customInput) {
-            customInput.value = String(snap.customLimit);
-          }
-          if (document.activeElement !== presetSelect) {
-            presetSelect.value = PRESETS.includes(snap.customLimit) ? String(snap.customLimit) : '';
-          }
-        }
+        syncLimitControls(false);
       }
 
       if (quotaState && quotaState.available && Array.isArray(quotaState.groups) && quotaState.groups.length > 0) {
@@ -1112,13 +1239,22 @@ export function inlineStatusbarBootstrap(cfg) {
       if (disposed) return;
       const sid = getSessionId();
       if (!sid) return;
-      if (state.lastSessionId && state.lastSessionId !== sid) {
+      const sessionChanged = Boolean(state.lastSessionId && state.lastSessionId !== sid);
+      if (sessionChanged) {
         state.snapshot = null;
+        state.limitDirty = false;
+        state.syncedLimitKey = '';
         render();
+        if (state.abortCtrl) state.abortCtrl.abort();
+      } else if (state.inFlight) {
+        // Coalesce concurrent refreshes for the same session instead of aborting in-flight responses
+        state.pendingRefresh = true;
+        return;
       }
       state.lastSessionId = sid;
+      state.inFlight = true;
+      state.pendingRefresh = false;
       const reqEpoch = ++state.epoch;
-      if (state.abortCtrl) state.abortCtrl.abort();
       state.abortCtrl = new AbortController();
       try {
         const snap = await apiPost('/api/snapshot', { sessionId: sid }, state.abortCtrl.signal);
@@ -1130,12 +1266,20 @@ export function inlineStatusbarBootstrap(cfg) {
         if (!state.snapshot) {
           setText(ctxTextEl, t().reconnecting);
         }
+      } finally {
+        if (reqEpoch === state.epoch) {
+          state.inFlight = false;
+          if (state.pendingRefresh && !disposed) {
+            state.pendingRefresh = false;
+            refreshSnapshot();
+          }
+        }
       }
     }
 
     async function handleCompact() {
       const sid = getSessionId();
-      if (!sid || state.compacting) return;
+      if (!sid || state.compacting || state.snapshot?.compaction?.inProgress) return;
       state.compacting = true;
       compactBtn.disabled = true;
       render();
@@ -1144,11 +1288,14 @@ export function inlineStatusbarBootstrap(cfg) {
         setText(noteEl, t().compactSent);
         burstUntil = Date.now() + MAX_BURST_MS;
         scheduleSnapshotPoll();
-      } catch {
-        setText(noteEl, t().compactFail);
+        refreshSnapshot();
+      } catch (err) {
+        setText(
+          noteEl,
+          err?.code === 'COMPACTION_IN_PROGRESS' ? t().compactInProgress : t().compactFail,
+        );
       } finally {
         state.compacting = false;
-        compactBtn.disabled = false;
         render();
         setTimeout(() => {
           if (!disposed) setText(noteEl, '');
@@ -1210,27 +1357,49 @@ export function inlineStatusbarBootstrap(cfg) {
     }
 
     async function handleApplyLimit() {
-      const raw = customInput.value.trim();
+      const tr = t();
+      const raw = customInput.value.replace(/[\s,]/g, '').trim();
       let limitVal = null;
       if (raw !== '') {
         const parsed = Number(raw);
         if (!Number.isFinite(parsed) || parsed < 32000 || parsed > 980000) {
           popFeedback.className = 'agy-inline-pop-feedback err';
-          setText(popFeedback, t().invalidLimit);
+          setText(popFeedback, tr.invalidLimit);
           return;
         }
         limitVal = Math.round(parsed);
       }
       const scope = scopeSelect.value === 'default' ? 'default' : 'session';
+      const sid = getSessionId();
+      if (scope === 'session' && !sid) {
+        popFeedback.className = 'agy-inline-pop-feedback err';
+        setText(popFeedback, tr.noActiveSession);
+        return;
+      }
       const payload =
         scope === 'default'
           ? { defaultCustomLimit: limitVal }
-          : { sessionLimit: { sessionId: getSessionId(), limit: limitVal } };
+          : { sessionLimit: { sessionId: sid, limit: limitVal } };
       try {
-        await apiPost('/api/settings/update', payload);
-        popFeedback.className = 'agy-inline-pop-feedback';
-        setText(popFeedback, t().applied);
+        const updated = await apiPost('/api/settings/update', payload);
+        applySettingsPayload(updated);
+        state.limitDirty = false;
+        state.syncedLimitKey = '';
         await refreshSnapshot();
+        syncLimitControls(true);
+        const hostMax = state.snapshot?.maxContextTokens || 0;
+        popFeedback.className = 'agy-inline-pop-feedback';
+        if (limitVal !== null && hostMax > 0 && limitVal > hostMax) {
+          setText(
+            popFeedback,
+            formatTemplate(tr.appliedClamped, {
+              val: formatTokens(limitVal),
+              max: formatTokens(hostMax),
+            }),
+          );
+        } else {
+          setText(popFeedback, tr.applied);
+        }
       } catch (err) {
         popFeedback.className = 'agy-inline-pop-feedback err';
         setText(popFeedback, err?.message || 'Error');
@@ -1284,7 +1453,22 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     };
     const onPresetChange = () => {
+      state.limitDirty = true;
       customInput.value = presetSelect.value;
+      setText(popFeedback, '');
+    };
+    const onCustomInput = () => {
+      state.limitDirty = true;
+      const raw = customInput.value.replace(/[\s,]/g, '').trim();
+      const parsed = raw ? Number(raw) : NaN;
+      presetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
+      setText(popFeedback, '');
+    };
+    const onScopeChange = () => {
+      state.limitDirty = false;
+      state.syncedLimitKey = '';
+      setText(popFeedback, '');
+      syncLimitControls(true);
     };
     const onLangChange = () => {
       applyLocale(langSelect.value);
@@ -1302,7 +1486,9 @@ export function inlineStatusbarBootstrap(cfg) {
     applyBtn.addEventListener('click', handleApplyLimit);
     autoCompactBtn.addEventListener('click', handleToggleAutoCompact);
     langSelect.addEventListener('change', onLangChange);
+    scopeSelect.addEventListener('change', onScopeChange);
     presetSelect.addEventListener('change', onPresetChange);
+    customInput.addEventListener('input', onCustomInput);
     customInput.addEventListener('keydown', onInputKeyDown);
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('pointerdown', onDocPointerDown);
@@ -1373,7 +1559,7 @@ export function inlineStatusbarBootstrap(cfg) {
       for (const ctrl of barControllers.values()) {
         ctrl.refreshSnapshot();
       }
-    }, 350);
+    }, 150);
   }
 
   async function pollSessionsAndSnapshots() {
@@ -1397,22 +1583,38 @@ export function inlineStatusbarBootstrap(cfg) {
     await Promise.all([...snapshotPromises, sessionsPromise]);
   }
 
+  function applySettingsPayload(settings) {
+    if (!settings || typeof settings !== 'object') return;
+    if (settings.locale === 'ko' || settings.locale === 'en') {
+      locale = settings.locale;
+    }
+    if (typeof settings.autoCompact === 'boolean') {
+      autoCompactEnabled = settings.autoCompact;
+    }
+    if (settings.defaultCustomLimit === null || typeof settings.defaultCustomLimit === 'number') {
+      defaultCustomLimit = settings.defaultCustomLimit;
+    }
+    if (Array.isArray(settings.sessions)) {
+      sessionLimits.clear();
+      for (const entry of settings.sessions) {
+        if (entry && typeof entry.sessionId === 'string' && typeof entry.limit === 'number') {
+          sessionLimits.set(entry.sessionId, entry.limit);
+        }
+      }
+    }
+    if (Array.isArray(settings.customButtons)) {
+      customButtons = settings.customButtons;
+    }
+    if (Array.isArray(settings.disabledRuntimeAddonIds)) {
+      disabledRuntimeAddonIds = new Set(settings.disabledRuntimeAddonIds);
+    }
+  }
+
   async function pollQuotaAndSettings() {
     if (disposed) return;
     try {
       const settings = await apiPost('/api/settings/get', {});
-      if (settings && (settings.locale === 'ko' || settings.locale === 'en')) {
-        locale = settings.locale;
-      }
-      if (typeof settings?.autoCompact === 'boolean') {
-        autoCompactEnabled = settings.autoCompact;
-      }
-      if (Array.isArray(settings?.customButtons)) {
-        customButtons = settings.customButtons;
-      }
-      if (Array.isArray(settings?.disabledRuntimeAddonIds)) {
-        disabledRuntimeAddonIds = new Set(settings.disabledRuntimeAddonIds);
-      }
+      applySettingsPayload(settings);
       for (const ctrl of barControllers.values()) ctrl.render();
     } catch {}
     try {

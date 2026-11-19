@@ -253,3 +253,123 @@ test('R2-F1: repeated /compact does NOT prematurely clear mutex when lastCompact
   assert.equal(snap2.compaction.inProgress, false);
   assert.equal(snap2.compaction.status, 'completed');
 });
+
+test('auto-compact defers while RUNNING, fires once on IDLE without looping, and re-arms after drop', async () => {
+  let now = 5_000_000;
+  let compactCalls = 0;
+  let telemetry = {
+    sessionId: 'sess-auto',
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 10,
+    usedTokens: 280_000,
+    maxContextTokens: 512_000,
+    lastCompactedStep: null,
+    compactionJustCompleted: false,
+    tokenBreakdown: [],
+  };
+
+  const service = createStatusbarService({
+    clock: () => now,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => telemetry,
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: now }),
+    },
+    compactionPort: {
+      compactSession: async () => {
+        compactCalls += 1;
+        return { accepted: true, method: 'rpc' };
+      },
+    },
+    settingsPort: {
+      read: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        defaultCustomLimit: null,
+        sessions: new Map([['sess-auto', { limit: 256_000, updatedAt: 100 }]]),
+      }),
+      update: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        defaultCustomLimit: null,
+        sessions: new Map([['sess-auto', { limit: 256_000, updatedAt: 100 }]]),
+      }),
+    },
+  });
+
+  // 1. While RUNNING -> MUST NOT fire auto-compact
+  const snapRunning = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapRunning.autoCompactTriggered, false);
+  assert.equal(compactCalls, 0);
+
+  // 2. Once IDLE -> fires auto-compact ONCE
+  telemetry = { ...telemetry, status: 'CASCADE_RUN_STATUS_IDLE' };
+  const snapIdle1 = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapIdle1.autoCompactTriggered, true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(compactCalls, 1);
+
+  // 3. Even after 120s cooldown, if tokens stayed stuck at 280K without dropping or growing -> MUST NOT loop!
+  now += 120_000;
+  const snapIdle2 = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapIdle2.autoCompactTriggered, false);
+  assert.equal(compactCalls, 1);
+
+  // 4. After tokens drop below limit (120K < 256K), auto-compact re-arms
+  telemetry = { ...telemetry, usedTokens: 120_000, stepCount: 12 };
+  const snapDropped = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapDropped.exceededSoftLimit, false);
+  assert.equal(snapDropped.autoCompactTriggered, false);
+
+  // 5. Crossing limit again after re-arm -> fires ONCE
+  telemetry = { ...telemetry, usedTokens: 260_000, stepCount: 20 };
+  const snapCrossAgain = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapCrossAgain.autoCompactTriggered, true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(compactCalls, 2);
+});
+
+test('large-session compaction detects completion via significant token drop when lastCompactedStep is null', async () => {
+  let now = 6_000_000;
+  let telemetry = {
+    sessionId: 'sess-large',
+    status: 'CASCADE_RUN_STATUS_IDLE',
+    stepCount: 17_500,
+    usedTokens: 298_000,
+    maxContextTokens: 512_000,
+    lastCompactedStep: null,
+    compactionJustCompleted: false,
+    tokenBreakdown: [],
+  };
+
+  const service = createStatusbarService({
+    clock: () => now,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => telemetry,
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: now }),
+    },
+    compactionPort: {
+      compactSession: async () => ({ accepted: true, method: 'rpc' }),
+    },
+    settingsPort: {
+      read: async () => ({ locale: 'ko', autoCompact: false, defaultCustomLimit: null, sessions: new Map() }),
+      update: async () => ({ locale: 'ko', autoCompact: false, defaultCustomLimit: null, sessions: new Map() }),
+    },
+  });
+
+  const req = await service.requestCompaction('sess-large');
+  assert.equal(req.accepted, true);
+  assert.equal(req.trigger, 'manual');
+
+  // Before token drop -> still inProgress
+  const snap1 = await service.getSessionSnapshot('sess-large');
+  assert.equal(snap1.compaction.inProgress, true);
+  assert.equal(snap1.compaction.trigger, 'manual');
+
+  // After token drop (298K -> 108K) -> immediately clears mutex and reports completed
+  telemetry = { ...telemetry, usedTokens: 108_000 };
+  const snap2 = await service.getSessionSnapshot('sess-large');
+  assert.equal(snap2.compaction.inProgress, false);
+  assert.equal(snap2.compaction.status, 'completed');
+});
