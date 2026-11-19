@@ -2,35 +2,46 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - develop
-      - 'feature/**'
-      - 'fix/**'
-      - 'bugfix/**'
-      - 'release/**'
-      - 'hotfix/**'
+    branches: [main, develop, 'feature/**']
   pull_request:
-    branches:
-      - main
-      - develop
-  workflow_dispatch:
+    branches: [main, develop]
 
 jobs:
   test:
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        node: ['20']
+
     steps:
-      - name: Checkout antigravity-statusbar
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
 
-      - name: Build and run test suites
-        run: npm test
+      - name: Verify Node.js version
+        run: node -v
+
+      - name: Run static vendor-neutral boundary checks
+        run: npm run test:static
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run integration & concurrency tests
+        run: npm run test:integration
+
+      - name: Run sidecar security tests
+        run: npm run test:security
+
+      - name: Run UI controller & DOM tests
+        run: npm run test:ui
+
+      - name: Verify official plugin installer dry-run
+        run: node scripts/install-plugin.mjs --dry-run
