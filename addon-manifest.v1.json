@@ -1,0 +1,33 @@
+{
+  "$schema": "https://github.com/jaeseongs95/antigravity-native-addon-host/schemas/addon-manifest.v1.schema.json",
+  "schemaVersion": 1,
+  "pluginId": "antigravity-statusbar",
+  "displayName": "Antigravity Statusbar",
+  "version": "3.1.0",
+  "compatibility": {
+    "hostProfile": "antigravity-desktop",
+    "minHostVersion": "1.0.1"
+  },
+  "capabilities": [
+    "renderer"
+  ],
+  "entry": {
+    "rendererScript": "runtime/statusbar-renderer.js",
+    "mainHookScript": null
+  },
+  "uiSlots": [
+    {
+      "slot": "status-bar",
+      "slotId": "antigravity-statusbar.root",
+      "exclusive": true,
+      "scope": "addon-owned-slot"
+    }
+  ],
+  "isolation": {
+    "noTranslate": true,
+    "i18nSelfManaged": true,
+    "respectsNoTranslate": true,
+    "storageNamespace": "antigravity-statusbar"
+  },
+  "loadOrder": 50
+}

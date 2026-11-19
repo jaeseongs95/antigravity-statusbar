@@ -1,7 +1,7 @@
 {
   "name": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Official native Antigravity auxiliary-pane sidecar displaying real-time session context usage, prompt cache hit rate, account quota, per-session soft context limits, token breakdown, and one-click compaction.",
   "author": "jaeseongs95",
   "license": "MIT",

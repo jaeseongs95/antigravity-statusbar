@@ -718,9 +718,19 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.0.0');
+    assert.equal(manifest.version, '3.1.0');
+    const addonManifest = JSON.parse(
+      await fs.readFile(path.join(destDir, 'addon-manifest.v1.json'), 'utf8'),
+    );
+    assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
+    assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');
 
-    // 3. R3-F3: Boot installed sidecar directly from destDir (verifies node_modules resolution, zero ERR_MODULE_NOT_FOUND)
+    const installedRendererPath = path.join(destDir, 'runtime', 'statusbar-renderer.js');
+    const standbySource = await fs.readFile(installedRendererPath, 'utf8');
+    assert.ok(standbySource.includes('startStandbyStatusbar'));
+    assert.equal(standbySource.includes('installed-dest-token-32-chars-ok'), false);
+
+    // 3. R3-F3: Boot installed sidecar directly from destDir (verifies node_modules resolution & confined runtime bundle publish)
     const installedChild = spawn(
       process.execPath,
       [path.join(destDir, 'sidecars', 'statusbar', 'main.mjs')],
@@ -758,6 +768,9 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
       const ready = JSON.parse(readyLine);
       assert.equal(ready.type, 'sidecar_ready');
       assert.ok(ready.port > 0);
+      const liveRendererSource = await fs.readFile(installedRendererPath, 'utf8');
+      assert.ok(liveRendererSource.includes(`http://127.0.0.1:${ready.port}`));
+      assert.ok(liveRendererSource.includes('startAddonStatusbar'));
     } finally {
       installedChild.kill('SIGTERM');
       await new Promise((resolve) => installedChild.once('exit', resolve));

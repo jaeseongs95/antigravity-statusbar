@@ -3,9 +3,9 @@ import http from 'node:http';
 import test from 'node:test';
 
 import {
-  renderInlineStatusbarScript,
-  renderInlineTeardownStub,
-} from '../../src/adapters/antigravity/inline-statusbar.mjs';
+  renderAddonRendererBundle,
+  renderAddonStandbyStub,
+} from '../../src/adapters/antigravity/addon/bundle-builder.mjs';
 import { createSidecarServer } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 
 const TEST_TOKEN = 'statusbar-test-token-32-chars-ok';
@@ -257,22 +257,27 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
   }
 });
 
-test('inline statusbar script generator enforces loopback URL, min token length, and safe teardown stub', () => {
+test('AddonManifest.v1 renderer bundle generator enforces loopback URL, min token length, capability-only injection, and credential-free standby stub', () => {
   assert.throws(() =>
-    renderInlineStatusbarScript({ baseUrl: 'https://evil.example:443', token: TEST_TOKEN }),
+    renderAddonRendererBundle({ baseUrl: 'https://evil.example:443', token: TEST_TOKEN }),
   );
   assert.throws(() =>
-    renderInlineStatusbarScript({ baseUrl: 'http://127.0.0.1:43210', token: 'short' }),
+    renderAddonRendererBundle({ baseUrl: 'http://127.0.0.1:43210', token: 'short' }),
   );
-  const script = renderInlineStatusbarScript({
+  const script = renderAddonRendererBundle({
     baseUrl: 'http://127.0.0.1:43210',
     token: TEST_TOKEN,
   });
   assert.ok(script.includes('http://127.0.0.1:43210'));
+  assert.ok(script.includes('antigravity-statusbar.root'));
   assert.equal(/\binnerHTML\b/.test(script), false);
   assert.equal(/SetMendelFlagOverrides/.test(script), false);
+  assert.equal(/createElement\s*\(\s*['"]style['"]\s*\)/.test(script), false);
+  assert.equal(/window\.__agyStatusbarInline/.test(script), false);
 
-  const stub = renderInlineTeardownStub();
+  const stub = renderAddonStandbyStub();
   assert.equal(stub.includes(TEST_TOKEN), false);
-  assert.ok(stub.includes('__agyStatusbarInline'));
+  assert.equal(stub.includes('http://127.0.0.1'), false);
+  assert.ok(stub.includes('antigravity-statusbar.root'));
+  assert.ok(stub.includes('startStandbyStatusbar'));
 });

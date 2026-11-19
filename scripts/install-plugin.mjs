@@ -4,9 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { renderAddonStandbyStub } from '../src/adapters/antigravity/addon/bundle-builder.mjs';
+import { DEFAULT_RENDERER_ENTRY } from '../src/adapters/antigravity/addon/runtime-publisher.mjs';
+
 const PLUGIN_NAME = 'antigravity-statusbar';
 const INCLUDE_ENTRIES = [
   'plugin.json',
+  'addon-manifest.v1.json',
   'package.json',
   'package-lock.json',
   'sidecars',
@@ -138,6 +142,14 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       await copySafe(path.join(repoRoot, rel), path.join(stagingDir, rel));
     }
 
+    // Seed credential-free AddonManifest.v1 standby renderer script inside confined runtime/
+    const stagedRendererPath = path.join(stagingDir, DEFAULT_RENDERER_ENTRY);
+    await fs.mkdir(path.dirname(stagedRendererPath), { recursive: true });
+    await fs.writeFile(stagedRendererPath, renderAddonStandbyStub(), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+
     // Preserve user data/ (settings.json) if it already exists
     try {
       const dataStat = await fs.stat(preservedDataDir);
@@ -181,6 +193,12 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       for (const rel of plannedFiles) {
         await copySafe(path.join(repoRoot, rel), path.join(destDir, rel));
       }
+      const fallbackRendererPath = path.join(destDir, DEFAULT_RENDERER_ENTRY);
+      await fs.mkdir(path.dirname(fallbackRendererPath), { recursive: true });
+      await fs.writeFile(fallbackRendererPath, renderAddonStandbyStub(), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       return { installed: true, dryRun: false, mode: 'in-place-fallback', destDir, entries: plannedFiles };
     }

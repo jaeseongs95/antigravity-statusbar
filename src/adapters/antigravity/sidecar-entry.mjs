@@ -4,16 +4,13 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import writeFileAtomic from 'write-file-atomic';
 
 import { createStatusbarService } from '../../core/app/statusbar-service.mjs';
 import { DomainError } from '../../core/i18n/error-codes.mjs';
 import { createJsonSettingsStore } from '../storage/json-settings-store.mjs';
+import { assertRendererPublisherPort } from './addon/ports.mjs';
+import { createAddonRuntimePublisher } from './addon/runtime-publisher.mjs';
 import { createAntigravityCompactionAdapter } from './compaction-adapter.mjs';
-import {
-  renderInlineStatusbarScript,
-  renderInlineTeardownStub,
-} from './inline-statusbar.mjs';
 import { createLsTransport } from './ls-transport.mjs';
 import { createAntigravityTelemetryAdapter } from './telemetry-mapper.mjs';
 import { renderUiBridgeScript } from './ui-bridge.mjs';
@@ -542,13 +539,16 @@ export function createSidecarServer({
 /**
  * Production sidecar entrypoint invoked by sidecars/statusbar/main.mjs.
  */
-export async function startSidecar(env = process.env) {
+export async function startSidecar(env = process.env, deps = {}) {
   const token = env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '';
   if (token.length < MIN_TOKEN_LENGTH) {
     throw new Error(
       `ANTIGRAVITY_SIDECAR_UI_TOKEN is missing or shorter than ${MIN_TOKEN_LENGTH} characters.`,
     );
   }
+
+  const defaultPluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const pluginRootDir = env.ANTIGRAVITY_PLUGIN_ROOT_DIR || defaultPluginRoot;
 
   const dataDir =
     env.ANTIGRAVITY_PLUGIN_DATA_DIR ||
@@ -581,18 +581,19 @@ export async function startSidecar(env = process.env) {
 
   const { port, url } = await sidecar.listen();
 
-  const inlineAutoInjectDisabled = env.STATUSBAR_DISABLE_INLINE_WRITE === '1';
-  const inlineAutoInjectPath =
-    env.STATUSBAR_AUTOINJECT_PATH ||
-    path.join(os.homedir(), '.gemini', 'antigravity', 'statusbar_autoinject.js');
-
-  if (!inlineAutoInjectDisabled) {
+  const addonPublishDisabled = env.STATUSBAR_DISABLE_ADDON_PUBLISH === '1';
+  let rendererPublisher = null;
+  if (!addonPublishDisabled) {
     try {
-      fs.mkdirSync(path.dirname(inlineAutoInjectPath), { recursive: true });
-      const inlineScript = renderInlineStatusbarScript({ baseUrl: url, token });
-      await writeFileAtomic(inlineAutoInjectPath, inlineScript, { encoding: 'utf8', mode: 0o600 });
+      rendererPublisher = assertRendererPublisherPort(
+        deps.rendererPublisher ||
+          createAddonRuntimePublisher({
+            pluginRootDir,
+          }),
+      );
+      await rendererPublisher.publish({ baseUrl: url, token });
     } catch {
-      // Non-fatal: AUX_PANE remains available even if inline script path is not writable
+      // Non-fatal: AUX_PANE remains available even if plugin runtime directory is read-only
     }
   }
 
@@ -609,12 +610,9 @@ export async function startSidecar(env = process.env) {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    if (!inlineAutoInjectDisabled) {
+    if (rendererPublisher) {
       try {
-        await writeFileAtomic(inlineAutoInjectPath, renderInlineTeardownStub(), {
-          encoding: 'utf8',
-          mode: 0o600,
-        });
+        await rendererPublisher.teardown();
       } catch {
         // Best-effort credential cleanup on shutdown
       }

@@ -5,7 +5,7 @@ description: "Attach, enable/disable, remove, or list buttons on the Antigravity
 
 # Statusbar Add-on Standard Interface (`StatusbarAddon.v1`)
 
-When the user asks you to attach, toggle, or remove a button on the Antigravity Statusbar, **never** hand-edit `statusbar_autoinject.js` or core UI files. Use the standard `StatusbarAddon.v1` interface below. Every attached add-on is automatically bridged into the Statusbar Settings (`⚙` → **연결된 애드온 관리 / Attached Add-ons**) where the user can toggle it ON/OFF or remove it at any time.
+When the user asks you to attach, toggle, or remove a button on the Antigravity Statusbar, **never** hand-edit `runtime/statusbar-renderer.js` or core UI files. Use the standard `StatusbarAddon.v1` interface below. Every attached add-on is automatically bridged into the Statusbar Settings (`⚙` → **연결된 애드온 / Attached Add-ons**) where the user can toggle it ON/OFF or remove it at any time.
 
 ## 1. Agent CLI (Persistent Command Add-ons)
 
@@ -47,7 +47,7 @@ Run from the installed plugin directory (`~/.gemini/config/plugins/antigravity-s
 
 ## 2. Runtime Plugin Bridge (`window.statusbarAddons`)
 
-External UI plugins running in the renderer can attach live interactive buttons without touching Sidecar credentials:
+Peer `AddonManifest.v1` UI plugins running in the shared native addon host Isolated World (`999`) can attach live interactive buttons without touching Sidecar credentials or host capability handles:
 
 ```js
 window.statusbarAddons?.register({
