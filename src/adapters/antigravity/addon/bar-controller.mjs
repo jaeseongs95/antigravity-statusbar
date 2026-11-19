@@ -694,8 +694,12 @@ export function createBarController({
     showFeedback('', false);
   };
   const onScopeChange = () => {
-    // G-1: Preserve user's in-progress numeric entry when switching scope before clicking Apply
-    if (state.limitDirty && popoverView.customInput.value.trim() !== '') {
+    // G-1: Preserve a valid in-progress numeric entry when switching scope before clicking Apply;
+    // discard invalid/blank inputs so target scope's saved limit loads cleanly.
+    if (
+      state.limitDirty &&
+      parseStrictLimitInput(popoverView.customInput.value, { allowBlank: false }).ok
+    ) {
       showFeedback('', false);
       return;
     }

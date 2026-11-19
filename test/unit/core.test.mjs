@@ -106,6 +106,7 @@ test('statusbar-service enforces cross-session isolation (D-0033) and releases m
 
   const settingsState = {
     locale: 'en',
+    autoCompact: false,
     defaultCustomLimit: null,
     sessions: new Map([['sess-A', { limit: 128_000, updatedAt: 100 }]]),
   };
