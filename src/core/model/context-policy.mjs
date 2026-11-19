@@ -301,20 +301,21 @@ export function evaluateContextThreshold({ usedTokens, effectiveLimit }) {
 
   const rawPercent = (usedTokens / effectiveLimit) * 100;
   const usagePercent = Math.round(rawPercent * 10) / 10;
+  const exceededSoftLimit = usedTokens >= effectiveLimit;
 
   let thresholdLevel = 'normal';
-  if (usagePercent >= 100) {
+  if (exceededSoftLimit) {
     thresholdLevel = 'exceeded';
-  } else if (usagePercent >= 90) {
+  } else if (rawPercent >= 90) {
     thresholdLevel = 'critical';
-  } else if (usagePercent >= 80) {
+  } else if (rawPercent >= 80) {
     thresholdLevel = 'warning';
   }
 
   return {
     usagePercent,
     thresholdLevel,
-    exceededSoftLimit: usedTokens >= effectiveLimit,
+    exceededSoftLimit,
   };
 }
 

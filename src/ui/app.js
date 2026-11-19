@@ -578,8 +578,9 @@ export function createStatusbarApp({
         const rawStr = el.limitCustomInput.value.trim() || el.limitPresetSelect.value.trim();
         let limit = null;
         if (rawStr !== '') {
-          const parsed = Number(rawStr);
-          if (!Number.isInteger(parsed) || parsed < 32_000 || parsed > 980_000) {
+          const normalizedStr = rawStr.replace(/[\s,]/g, '');
+          const parsed = /^\d+$/.test(normalizedStr) ? Number(normalizedStr) : NaN;
+          if (!Number.isSafeInteger(parsed) || parsed < 32_000 || parsed > 980_000) {
             setTextIfChanged(el.limitFeedback, t.limitInvalid);
             el.limitFeedback.classList.remove('hidden');
             return;

@@ -351,12 +351,16 @@ export function createBarController({
     const raw = popoverView.customInput.value.replace(/[\s,]/g, '').trim();
     let limitVal = null;
     if (raw !== '') {
-      const parsed = Number(raw);
-      if (!Number.isFinite(parsed) || parsed < 32000 || parsed > 980000) {
+      if (!/^\d+$/.test(raw)) {
         showFeedback(tr.invalidLimit, true);
         return;
       }
-      limitVal = Math.round(parsed);
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed) || parsed < 32000 || parsed > 980000) {
+        showFeedback(tr.invalidLimit, true);
+        return;
+      }
+      limitVal = parsed;
     }
     const scope = popoverView.scopeSelect.value === 'default' ? 'default' : 'session';
     const sid = getSessionId();
