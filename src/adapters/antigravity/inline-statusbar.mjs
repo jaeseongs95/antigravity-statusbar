@@ -268,19 +268,23 @@ const INLINE_STYLES = `
   position: absolute;
   bottom: calc(100% + 8px);
   right: 8px;
-  width: 336px;
+  width: 352px;
   max-width: calc(100vw - 24px);
-  background: #1b1c20;
+  max-height: min(540px, calc(100vh - 110px));
+  overflow-y: auto;
+  background: #1a1b1f;
   color: #e6e7ea;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
-  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 13px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(0, 0, 0, 0.25);
+  padding: 12px 14px 13px;
   z-index: 2147483000;
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 10px;
   word-break: keep-all;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 .agy-inline-popover.hidden {
   display: none;
@@ -293,6 +297,120 @@ const INLINE_STYLES = `
   font-weight: 600;
   font-size: 13px;
   color: #f3f4f6;
+}
+.agy-inline-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+}
+.agy-inline-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.agy-inline-tab:hover {
+  color: rgba(255, 255, 255, 0.88);
+}
+.agy-inline-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(78, 161, 255, 0.4);
+}
+.agy-inline-tab[aria-selected="true"] {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  font-weight: 600;
+}
+.agy-inline-tabpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agy-inline-tabpanel.hidden {
+  display: none;
+}
+.agy-inline-card {
+  background: rgba(255, 255, 255, 0.032);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 10px;
+  padding: 10px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agy-inline-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.agy-inline-switch-state {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.68);
+  min-width: 24px;
+  text-align: right;
+}
+.agy-inline-switch {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+.agy-inline-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #e6e7ea;
+  transition: transform 150ms ease, background-color 150ms ease;
+}
+.agy-inline-switch[aria-checked="true"] {
+  background: #2f7cf6;
+  border-color: #468eff;
+}
+.agy-inline-switch[aria-checked="true"]::after {
+  transform: translateX(14px);
+  background: #ffffff;
+}
+.agy-inline-switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(78, 161, 255, 0.45);
+}
+.agy-inline-pop-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  margin: 1px 0;
+}
+.agy-inline-char-count {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.48);
+  font-variant-numeric: tabular-nums;
+}
+.agy-inline-pop-foot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .agy-inline-pop-close {
   background: transparent;
@@ -350,6 +468,7 @@ const INLINE_STYLES = `
 .agy-inline-pop-select:focus-visible,
 .agy-inline-pop-input:focus-visible {
   border-color: #4ea1ff;
+  box-shadow: 0 0 0 2px rgba(78, 161, 255, 0.28);
   outline: none;
 }
 .agy-inline-pop-input {
@@ -358,21 +477,23 @@ const INLINE_STYLES = `
 }
 .agy-inline-pop-textarea {
   width: 100%;
-  min-height: 48px;
-  max-height: 110px;
+  min-height: 54px;
+  max-height: 120px;
   resize: vertical;
   box-sizing: border-box;
-  background: #131417;
+  background: #121317;
   color: #e6e7ea;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 7px;
   font-family: inherit;
   font-size: 11px;
-  line-height: 1.4;
-  padding: 6px 8px;
+  line-height: 1.45;
+  padding: 7px 9px;
 }
+.agy-inline-pop-textarea:focus,
 .agy-inline-pop-textarea:focus-visible {
   border-color: #4ea1ff;
+  box-shadow: 0 0 0 2px rgba(78, 161, 255, 0.28);
   outline: none;
 }
 .agy-inline-pop-actions-end {
@@ -384,15 +505,24 @@ const INLINE_STYLES = `
 .agy-inline-pop-feedback {
   font-size: 11px;
   color: #8cc8ff;
+  background: rgba(78, 161, 255, 0.12);
+  border: 1px solid rgba(78, 161, 255, 0.25);
+  border-radius: 7px;
+  padding: 5px 9px;
 }
 .agy-inline-pop-feedback:empty {
   display: none;
 }
 .agy-inline-pop-feedback.err {
   color: #ff9c9c;
+  background: rgba(240, 101, 101, 0.12);
+  border-color: rgba(240, 101, 101, 0.28);
 }
 @media (prefers-reduced-motion: reduce) {
-  .agy-inline-bar-fill {
+  .agy-inline-bar-fill,
+  .agy-inline-tab,
+  .agy-inline-switch,
+  .agy-inline-switch::after {
     transition: none;
   }
 }
@@ -437,13 +567,17 @@ export function inlineStatusbarBootstrap(cfg) {
       compactInProgress: 'Compaction already in progress',
       compactFail: 'Compaction failed',
       noActiveSession: 'No active session found',
-      settingsTitle: 'Statusbar Settings',
+      settingsTitle: 'Statusbar',
+      tabContext: 'Context',
+      tabSettings: 'Settings',
+      compactionSettingsTitle: 'Compaction',
       breakdownTitle: 'Token Breakdown',
       limitTitle: 'Session Context Limit',
-      limitHint: 'Saved per session. Runs /compact automatically when the limit is reached.',
+      limitHint: 'Saved per session. Auto-compacts when reached.',
       autoCompactLabel: 'Auto /compact on limit',
       compactPromptTitle: 'Compaction Prompt (/compact …)',
-      compactPromptPlaceholder: 'e.g. Focus on modified files and remaining tasks (blank = default /compact)',
+      compactPromptPlaceholder: 'e.g. Focus on modified files and remaining tasks (blank = default)',
+      compactPromptHint: 'Ctrl+Enter to save · blank = default /compact',
       save: 'Save',
       reset: 'Reset',
       limitPlaceholder: 'Custom tokens (32,000 - 980,000)',
@@ -488,13 +622,17 @@ export function inlineStatusbarBootstrap(cfg) {
       compactInProgress: '이미 컴팩션 진행 중',
       compactFail: '컴팩션 실패',
       noActiveSession: '활성 세션을 찾을 수 없습니다.',
-      settingsTitle: '상태바 상세 · 설정',
+      settingsTitle: '상태바',
+      tabContext: '컨텍스트',
+      tabSettings: '설정',
+      compactionSettingsTitle: '컴팩션 설정',
       breakdownTitle: '토큰 구성',
       limitTitle: '세션 컨텍스트 한도',
-      limitHint: '세션마다 따로 저장되며, 한도에 도달하면 자동으로 /compact를 실행합니다.',
+      limitHint: '세션별로 저장되며 한도 도달 시 자동 /compact를 실행합니다.',
       autoCompactLabel: '한도 도달 시 자동 /compact',
       compactPromptTitle: '컴팩션 요약 문구 (/compact …)',
-      compactPromptPlaceholder: '예: 수정 중인 파일과 남은 작업 위주로 요약해줘 (비우면 기본 /compact)',
+      compactPromptPlaceholder: '예: 수정 중인 파일과 남은 작업 위주로 요약해줘 (비우면 기본)',
+      compactPromptHint: 'Ctrl+Enter로 저장 · 비우면 기본 /compact',
       save: '저장',
       reset: '초기화',
       limitPlaceholder: '직접 입력 (32,000 ~ 980,000)',
@@ -707,11 +845,13 @@ export function inlineStatusbarBootstrap(cfg) {
     rightEl.appendChild(compactBtn);
     rightEl.appendChild(settingsBtn);
 
-    // Popover for breakdown + soft context limit + locale
+    // Popover with 2 clean tabs: Context (breakdown + session limit) & Settings (compaction + add-ons + language)
     const popEl = document.createElement('div');
     popEl.className = 'agy-inline-popover hidden';
     popEl.setAttribute('data-agy-no-translate', 'true');
     popEl.setAttribute('translate', 'no');
+    popEl.setAttribute('role', 'dialog');
+    popEl.setAttribute('aria-label', t().settingsTitle);
 
     const popHead = document.createElement('div');
     popHead.className = 'agy-inline-pop-head';
@@ -726,6 +866,32 @@ export function inlineStatusbarBootstrap(cfg) {
     popHead.appendChild(popTitle);
     popHead.appendChild(closeBtn);
 
+    const tabList = document.createElement('div');
+    tabList.className = 'agy-inline-tabs';
+    tabList.setAttribute('role', 'tablist');
+
+    const tabContextBtn = document.createElement('button');
+    tabContextBtn.type = 'button';
+    tabContextBtn.className = 'agy-inline-tab';
+    tabContextBtn.setAttribute('role', 'tab');
+    tabContextBtn.setAttribute('aria-selected', 'true');
+    tabContextBtn.textContent = t().tabContext;
+
+    const tabSettingsBtn = document.createElement('button');
+    tabSettingsBtn.type = 'button';
+    tabSettingsBtn.className = 'agy-inline-tab';
+    tabSettingsBtn.setAttribute('role', 'tab');
+    tabSettingsBtn.setAttribute('aria-selected', 'false');
+    tabSettingsBtn.textContent = t().tabSettings;
+
+    tabList.appendChild(tabContextBtn);
+    tabList.appendChild(tabSettingsBtn);
+
+    // Panel 1: Context (model meta + token breakdown + session context limit)
+    const panelContext = document.createElement('div');
+    panelContext.className = 'agy-inline-tabpanel';
+    panelContext.setAttribute('role', 'tabpanel');
+
     const popMeta = document.createElement('div');
     popMeta.className = 'agy-inline-pop-meta-card';
     const popModel = document.createElement('span');
@@ -736,7 +902,7 @@ export function inlineStatusbarBootstrap(cfg) {
     popMeta.appendChild(popSteps);
 
     const breakdownSection = document.createElement('div');
-    breakdownSection.className = 'agy-inline-pop-section';
+    breakdownSection.className = 'agy-inline-card';
     const breakdownTitle = document.createElement('div');
     breakdownTitle.className = 'agy-inline-pop-subtitle';
     breakdownTitle.textContent = t().breakdownTitle;
@@ -746,7 +912,7 @@ export function inlineStatusbarBootstrap(cfg) {
     breakdownSection.appendChild(breakdownList);
 
     const limitSection = document.createElement('div');
-    limitSection.className = 'agy-inline-pop-section';
+    limitSection.className = 'agy-inline-card';
     const limitTitle = document.createElement('div');
     limitTitle.className = 'agy-inline-pop-subtitle';
     limitTitle.textContent = t().limitTitle;
@@ -793,18 +959,6 @@ export function inlineStatusbarBootstrap(cfg) {
     limitRow2.appendChild(customInput);
     limitRow2.appendChild(applyBtn);
 
-    const autoCompactRow = document.createElement('div');
-    autoCompactRow.className = 'agy-inline-pop-row';
-    const autoCompactLbl = document.createElement('span');
-    autoCompactLbl.className = 'agy-inline-pop-hint';
-    autoCompactLbl.textContent = t().autoCompactLabel;
-    const autoCompactBtn = document.createElement('button');
-    autoCompactBtn.type = 'button';
-    autoCompactBtn.className = 'agy-inline-btn agy-inline-btn-on';
-    autoCompactBtn.textContent = t().addonOn;
-    autoCompactRow.appendChild(autoCompactLbl);
-    autoCompactRow.appendChild(autoCompactBtn);
-
     const limitStatusEl = document.createElement('div');
     limitStatusEl.className = 'agy-inline-pop-hint';
 
@@ -813,19 +967,71 @@ export function inlineStatusbarBootstrap(cfg) {
     limitSection.appendChild(limitRow1);
     limitSection.appendChild(limitRow2);
     limitSection.appendChild(limitStatusEl);
-    limitSection.appendChild(autoCompactRow);
 
-    const compactPromptSection = document.createElement('div');
-    compactPromptSection.className = 'agy-inline-pop-section';
+    panelContext.appendChild(popMeta);
+    panelContext.appendChild(breakdownSection);
+    panelContext.appendChild(limitSection);
+
+    // Panel 2: Settings (compaction auto-toggle + prompt + add-ons + language)
+    const panelSettings = document.createElement('div');
+    panelSettings.className = 'agy-inline-tabpanel hidden';
+    panelSettings.setAttribute('role', 'tabpanel');
+
+    const compactionCard = document.createElement('div');
+    compactionCard.className = 'agy-inline-card';
+
+    const compactionCardTitle = document.createElement('div');
+    compactionCardTitle.className = 'agy-inline-pop-subtitle';
+    compactionCardTitle.textContent = t().compactionSettingsTitle;
+
+    const autoCompactRow = document.createElement('div');
+    autoCompactRow.className = 'agy-inline-pop-row';
+    const autoCompactLbl = document.createElement('span');
+    autoCompactLbl.className = 'agy-inline-pop-hint';
+    autoCompactLbl.textContent = t().autoCompactLabel;
+
+    const autoCompactWrap = document.createElement('span');
+    autoCompactWrap.className = 'agy-inline-switch-wrap';
+    const autoCompactStateText = document.createElement('span');
+    autoCompactStateText.className = 'agy-inline-switch-state';
+    autoCompactStateText.textContent = t().addonOn;
+    const autoCompactBtn = document.createElement('button');
+    autoCompactBtn.type = 'button';
+    autoCompactBtn.className = 'agy-inline-switch';
+    autoCompactBtn.setAttribute('role', 'switch');
+    autoCompactBtn.setAttribute('aria-checked', 'true');
+    autoCompactBtn.setAttribute('aria-label', t().autoCompactLabel);
+    autoCompactWrap.appendChild(autoCompactStateText);
+    autoCompactWrap.appendChild(autoCompactBtn);
+
+    autoCompactRow.appendChild(autoCompactLbl);
+    autoCompactRow.appendChild(autoCompactWrap);
+
+    const compactDivider = document.createElement('div');
+    compactDivider.className = 'agy-inline-pop-divider';
+
+    const compactPromptHead = document.createElement('div');
+    compactPromptHead.className = 'agy-inline-pop-row';
     const compactPromptTitle = document.createElement('div');
     compactPromptTitle.className = 'agy-inline-pop-subtitle';
     compactPromptTitle.textContent = t().compactPromptTitle;
+    const compactPromptCount = document.createElement('span');
+    compactPromptCount.className = 'agy-inline-char-count';
+    compactPromptCount.textContent = '0 / 1,000';
+    compactPromptHead.appendChild(compactPromptTitle);
+    compactPromptHead.appendChild(compactPromptCount);
 
     const compactPromptInput = document.createElement('textarea');
     compactPromptInput.className = 'agy-inline-pop-textarea';
     compactPromptInput.rows = 2;
     compactPromptInput.maxLength = 1000;
     compactPromptInput.placeholder = t().compactPromptPlaceholder;
+
+    const compactPromptFoot = document.createElement('div');
+    compactPromptFoot.className = 'agy-inline-pop-foot-row';
+    const compactPromptHintEl = document.createElement('span');
+    compactPromptHintEl.className = 'agy-inline-pop-hint';
+    compactPromptHintEl.textContent = t().compactPromptHint;
 
     const compactPromptActions = document.createElement('div');
     compactPromptActions.className = 'agy-inline-pop-actions-end';
@@ -840,16 +1046,19 @@ export function inlineStatusbarBootstrap(cfg) {
     compactPromptActions.appendChild(compactPromptResetBtn);
     compactPromptActions.appendChild(compactPromptSaveBtn);
 
-    compactPromptSection.appendChild(compactPromptTitle);
-    compactPromptSection.appendChild(compactPromptInput);
-    compactPromptSection.appendChild(compactPromptActions);
+    compactPromptFoot.appendChild(compactPromptHintEl);
+    compactPromptFoot.appendChild(compactPromptActions);
 
-    const popFeedback = document.createElement('div');
-    popFeedback.className = 'agy-inline-pop-feedback';
+    compactionCard.appendChild(compactionCardTitle);
+    compactionCard.appendChild(autoCompactRow);
+    compactionCard.appendChild(compactDivider);
+    compactionCard.appendChild(compactPromptHead);
+    compactionCard.appendChild(compactPromptInput);
+    compactionCard.appendChild(compactPromptFoot);
 
     // Attached Add-ons management bridge (enable/disable/remove agent & plugin add-ons)
     const addonSection = document.createElement('div');
-    addonSection.className = 'agy-inline-pop-section';
+    addonSection.className = 'agy-inline-card';
 
     const addonTitle = document.createElement('div');
     addonTitle.className = 'agy-inline-pop-subtitle';
@@ -863,7 +1072,7 @@ export function inlineStatusbarBootstrap(cfg) {
 
     // Language selector inside settings popover
     const langSection = document.createElement('div');
-    langSection.className = 'agy-inline-pop-section';
+    langSection.className = 'agy-inline-card';
     const langRow = document.createElement('div');
     langRow.className = 'agy-inline-pop-row';
     const langRowLabel = document.createElement('label');
@@ -887,13 +1096,19 @@ export function inlineStatusbarBootstrap(cfg) {
     langRow.appendChild(langSelect);
     langSection.appendChild(langRow);
 
+    panelSettings.appendChild(compactionCard);
+    panelSettings.appendChild(addonSection);
+    panelSettings.appendChild(langSection);
+
+    const popFeedback = document.createElement('div');
+    popFeedback.className = 'agy-inline-pop-feedback';
+    popFeedback.setAttribute('role', 'status');
+    popFeedback.setAttribute('aria-live', 'polite');
+
     popEl.appendChild(popHead);
-    popEl.appendChild(popMeta);
-    popEl.appendChild(breakdownSection);
-    popEl.appendChild(limitSection);
-    popEl.appendChild(compactPromptSection);
-    popEl.appendChild(addonSection);
-    popEl.appendChild(langSection);
+    popEl.appendChild(tabList);
+    popEl.appendChild(panelContext);
+    popEl.appendChild(panelSettings);
     popEl.appendChild(popFeedback);
 
     barEl.appendChild(leftEl);
@@ -908,6 +1123,9 @@ export function inlineStatusbarBootstrap(cfg) {
       barEl,
       popEl,
       popOpen: false,
+      activeTab: 'context',
+      lastTriggerEl: settingsBtn,
+      feedbackTimer: null,
       lastSessionId: '',
       snapshot: null,
       epoch: 0,
@@ -993,6 +1211,26 @@ export function inlineStatusbarBootstrap(cfg) {
       presetSelect.value = savedVal !== null && PRESETS.includes(savedVal) ? strVal : '';
     }
 
+    function updatePromptCount() {
+      const len = compactPromptInput.value.length;
+      setText(compactPromptCount, `${len.toLocaleString()} / 1,000`);
+    }
+
+    function showFeedback(text, isErr = false) {
+      if (state.feedbackTimer) {
+        clearTimeout(state.feedbackTimer);
+        state.feedbackTimer = null;
+      }
+      popFeedback.className = isErr ? 'agy-inline-pop-feedback err' : 'agy-inline-pop-feedback';
+      setText(popFeedback, text);
+      if (text) {
+        state.feedbackTimer = setTimeout(() => {
+          state.feedbackTimer = null;
+          if (!disposed) setText(popFeedback, '');
+        }, 3500);
+      }
+    }
+
     function syncCompactPrompt(force = false) {
       if (!force) {
         if (state.promptDirty) return;
@@ -1002,17 +1240,30 @@ export function inlineStatusbarBootstrap(cfg) {
       state.syncedPromptVal = compactPrompt;
       state.promptDirty = false;
       compactPromptInput.value = compactPrompt;
+      updatePromptCount();
     }
 
-    function setPopoverOpen(open) {
+    function setActiveTab(tab) {
+      const next = tab === 'settings' ? 'settings' : 'context';
+      state.activeTab = next;
+      const isCtx = next === 'context';
+      tabContextBtn.setAttribute('aria-selected', String(isCtx));
+      tabSettingsBtn.setAttribute('aria-selected', String(!isCtx));
+      panelContext.classList.toggle('hidden', !isCtx);
+      panelSettings.classList.toggle('hidden', isCtx);
+    }
+
+    function setPopoverOpen(open, tab, triggerEl) {
       const nextOpen = Boolean(open);
       const wasOpen = state.popOpen;
+      if (triggerEl) state.lastTriggerEl = triggerEl;
+      if (tab) setActiveTab(tab);
       state.popOpen = nextOpen;
       popEl.classList.toggle('hidden', !state.popOpen);
-      ctxBtn.setAttribute('aria-expanded', String(state.popOpen));
-      settingsBtn.setAttribute('aria-expanded', String(state.popOpen));
+      ctxBtn.setAttribute('aria-expanded', String(state.popOpen && state.activeTab === 'context'));
+      settingsBtn.setAttribute('aria-expanded', String(state.popOpen && state.activeTab === 'settings'));
       if (nextOpen && !wasOpen) {
-        setText(popFeedback, '');
+        showFeedback('');
         syncLimitControls(true);
         syncCompactPrompt(true);
       }
@@ -1148,20 +1399,24 @@ export function inlineStatusbarBootstrap(cfg) {
     function render() {
       const tr = t();
       setText(popTitle, tr.settingsTitle);
+      popEl.setAttribute('aria-label', tr.settingsTitle);
+      setText(tabContextBtn, tr.tabContext);
+      setText(tabSettingsBtn, tr.tabSettings);
+      setText(compactionCardTitle, tr.compactionSettingsTitle);
       setText(breakdownTitle, tr.breakdownTitle);
       setText(limitTitle, tr.limitTitle);
       setText(limitHint, tr.limitHint);
       setText(autoCompactLbl, tr.autoCompactLabel);
-      autoCompactBtn.className = autoCompactEnabled
-        ? 'agy-inline-btn agy-inline-btn-on'
-        : 'agy-inline-btn';
-      setText(autoCompactBtn, autoCompactEnabled ? tr.addonOn : tr.addonOff);
+      autoCompactBtn.setAttribute('aria-checked', String(autoCompactEnabled));
+      autoCompactBtn.setAttribute('aria-label', tr.autoCompactLabel);
+      setText(autoCompactStateText, autoCompactEnabled ? tr.addonOn : tr.addonOff);
       customInput.placeholder = tr.limitPlaceholder;
       setText(optSession, tr.scopeSession);
       setText(optDefault, tr.scopeDefault);
       setText(applyBtn, tr.apply);
       setText(compactPromptTitle, tr.compactPromptTitle);
       compactPromptInput.placeholder = tr.compactPromptPlaceholder;
+      setText(compactPromptHintEl, tr.compactPromptHint);
       setText(compactPromptResetBtn, tr.reset);
       setText(compactPromptSaveBtn, tr.save);
       const snap = state.snapshot;
@@ -1416,12 +1671,10 @@ export function inlineStatusbarBootstrap(cfg) {
         if (Array.isArray(updated?.disabledRuntimeAddonIds)) {
           disabledRuntimeAddonIds = new Set(updated.disabledRuntimeAddonIds);
         }
-        popFeedback.className = 'agy-inline-pop-feedback';
-        setText(popFeedback, t().applied);
+        showFeedback(t().applied, false);
         for (const ctrl of barControllers.values()) ctrl.render();
       } catch (err) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, err?.message || 'Error');
+        showFeedback(err?.message || 'Error', true);
       }
     }
 
@@ -1434,12 +1687,10 @@ export function inlineStatusbarBootstrap(cfg) {
       try {
         const updated = await apiPost('/api/addons/remove', { id });
         if (Array.isArray(updated?.customButtons)) customButtons = updated.customButtons;
-        popFeedback.className = 'agy-inline-pop-feedback';
-        setText(popFeedback, t().applied);
+        showFeedback(t().applied, false);
         for (const ctrl of barControllers.values()) ctrl.render();
       } catch (err) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, err?.message || 'Error');
+        showFeedback(err?.message || 'Error', true);
       }
     }
 
@@ -1450,8 +1701,7 @@ export function inlineStatusbarBootstrap(cfg) {
       if (raw !== '') {
         const parsed = Number(raw);
         if (!Number.isFinite(parsed) || parsed < 32000 || parsed > 980000) {
-          popFeedback.className = 'agy-inline-pop-feedback err';
-          setText(popFeedback, tr.invalidLimit);
+          showFeedback(tr.invalidLimit, true);
           return;
         }
         limitVal = Math.round(parsed);
@@ -1459,8 +1709,7 @@ export function inlineStatusbarBootstrap(cfg) {
       const scope = scopeSelect.value === 'default' ? 'default' : 'session';
       const sid = getSessionId();
       if (scope === 'session' && !sid) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, tr.noActiveSession);
+        showFeedback(tr.noActiveSession, true);
         return;
       }
       const payload =
@@ -1475,21 +1724,19 @@ export function inlineStatusbarBootstrap(cfg) {
         await refreshSnapshot();
         syncLimitControls(true);
         const hostMax = state.snapshot?.maxContextTokens || 0;
-        popFeedback.className = 'agy-inline-pop-feedback';
         if (limitVal !== null && hostMax > 0 && limitVal > hostMax) {
-          setText(
-            popFeedback,
+          showFeedback(
             formatTemplate(tr.appliedClamped, {
               val: formatTokens(limitVal),
               max: formatTokens(hostMax),
             }),
+            false,
           );
         } else {
-          setText(popFeedback, tr.applied);
+          showFeedback(tr.applied, false);
         }
       } catch (err) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, err?.message || 'Error');
+        showFeedback(err?.message || 'Error', true);
       }
     }
 
@@ -1499,11 +1746,11 @@ export function inlineStatusbarBootstrap(cfg) {
       for (const ctrl of barControllers.values()) ctrl.render();
       try {
         await apiPost('/api/settings/update', { autoCompact: next });
-        popFeedback.className = 'agy-inline-pop-feedback';
-        setText(popFeedback, t().applied);
+        showFeedback(t().applied, false);
       } catch (err) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, err?.message || 'Error');
+        autoCompactEnabled = !next;
+        for (const ctrl of barControllers.values()) ctrl.render();
+        showFeedback(err?.message || 'Error', true);
       }
     }
 
@@ -1516,12 +1763,11 @@ export function inlineStatusbarBootstrap(cfg) {
         state.promptDirty = false;
         state.syncedPromptVal = compactPrompt;
         compactPromptInput.value = compactPrompt;
+        updatePromptCount();
         for (const ctrl of barControllers.values()) ctrl.render();
-        popFeedback.className = 'agy-inline-pop-feedback';
-        setText(popFeedback, t().applied);
+        showFeedback(t().applied, false);
       } catch (err) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, err?.message || 'Error');
+        showFeedback(err?.message || 'Error', true);
       }
     }
 
@@ -1531,6 +1777,7 @@ export function inlineStatusbarBootstrap(cfg) {
 
     function handleResetCompactPrompt() {
       compactPromptInput.value = '';
+      updatePromptCount();
       return saveCompactPromptValue('');
     }
 
@@ -1547,7 +1794,7 @@ export function inlineStatusbarBootstrap(cfg) {
       if (e.key === 'Escape' && state.popOpen) {
         setPopoverOpen(false);
         try {
-          settingsBtn.focus();
+          (state.lastTriggerEl || settingsBtn).focus();
         } catch {}
       }
     };
@@ -1569,24 +1816,25 @@ export function inlineStatusbarBootstrap(cfg) {
     const onPresetChange = () => {
       state.limitDirty = true;
       customInput.value = presetSelect.value;
-      setText(popFeedback, '');
+      showFeedback('');
     };
     const onCustomInput = () => {
       state.limitDirty = true;
       const raw = customInput.value.replace(/[\s,]/g, '').trim();
       const parsed = raw ? Number(raw) : NaN;
       presetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
-      setText(popFeedback, '');
+      showFeedback('');
     };
     const onScopeChange = () => {
       state.limitDirty = false;
       state.syncedLimitKey = '';
-      setText(popFeedback, '');
+      showFeedback('');
       syncLimitControls(true);
     };
     const onPromptInput = () => {
       state.promptDirty = true;
-      setText(popFeedback, '');
+      updatePromptCount();
+      showFeedback('');
     };
     const onPromptKeyDown = (e) => {
       if (e.isComposing || e.keyCode === 229) return;
@@ -1595,21 +1843,48 @@ export function inlineStatusbarBootstrap(cfg) {
         handleSaveCompactPrompt();
       }
     };
+    const onTabKeyDown = (e) => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const next = state.activeTab === 'context' ? 'settings' : 'context';
+        setActiveTab(next);
+        try {
+          (next === 'context' ? tabContextBtn : tabSettingsBtn).focus();
+        } catch {}
+      }
+    };
     const onLangChange = () => {
       applyLocale(langSelect.value);
     };
 
-    ctxBtn.addEventListener('click', () => setPopoverOpen(!state.popOpen));
-    settingsBtn.addEventListener('click', () => setPopoverOpen(!state.popOpen));
+    ctxBtn.addEventListener('click', () => {
+      if (state.popOpen && state.activeTab === 'context') {
+        setPopoverOpen(false);
+      } else {
+        setPopoverOpen(true, 'context', ctxBtn);
+      }
+    });
+    settingsBtn.addEventListener('click', () => {
+      if (state.popOpen && state.activeTab === 'settings') {
+        setPopoverOpen(false);
+      } else {
+        setPopoverOpen(true, 'settings', settingsBtn);
+      }
+    });
+    tabContextBtn.addEventListener('click', () => setActiveTab('context'));
+    tabSettingsBtn.addEventListener('click', () => setActiveTab('settings'));
+    tabContextBtn.addEventListener('keydown', onTabKeyDown);
+    tabSettingsBtn.addEventListener('keydown', onTabKeyDown);
     closeBtn.addEventListener('click', () => {
       setPopoverOpen(false);
       try {
-        settingsBtn.focus();
+        (state.lastTriggerEl || settingsBtn).focus();
       } catch {}
     });
     compactBtn.addEventListener('click', handleCompact);
     applyBtn.addEventListener('click', handleApplyLimit);
     autoCompactBtn.addEventListener('click', handleToggleAutoCompact);
+    autoCompactStateText.addEventListener('click', handleToggleAutoCompact);
     compactPromptSaveBtn.addEventListener('click', handleSaveCompactPrompt);
     compactPromptResetBtn.addEventListener('click', handleResetCompactPrompt);
     compactPromptInput.addEventListener('input', onPromptInput);
@@ -1629,6 +1904,7 @@ export function inlineStatusbarBootstrap(cfg) {
       render,
       refreshSnapshot,
       destroy() {
+        if (state.feedbackTimer) clearTimeout(state.feedbackTimer);
         if (state.abortCtrl) state.abortCtrl.abort();
         document.removeEventListener('keydown', onKeyDown);
         document.removeEventListener('pointerdown', onDocPointerDown);
