@@ -1,6 +1,8 @@
 node_modules/
+coverage/
 *.log
-*.bak
-*.orig
-*.tmp.*
+*.tmp
+*.corrupt.*
+*.lock
 .DS_Store
+Thumbs.db

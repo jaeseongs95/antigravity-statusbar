@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Statusbar</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="app" class="panel" aria-live="polite">
+      <header class="panel-header">
+        <div class="title-group">
+          <h1 id="panel-title" class="panel-title">Statusbar</h1>
+          <span id="conn-badge" class="badge badge-muted">Connecting</span>
+        </div>
+        <div class="header-actions">
+          <button id="btn-locale" class="btn btn-ghost" type="button">KO</button>
+        </div>
+      </header>
+
+      <section class="card" aria-label="Session selector">
+        <div class="row-between">
+          <label id="lbl-session" class="field-label" for="session-select">Session</label>
+          <span id="session-mode-badge" class="badge badge-muted">Auto</span>
+        </div>
+        <select id="session-select" class="select-input"></select>
+      </section>
+
+      <section class="card" aria-label="Context usage">
+        <div class="row-between">
+          <span id="lbl-context" class="section-label">Context Window</span>
+          <span id="context-pct" class="metric-strong">--%</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="context-progress">
+          <div id="context-progress-fill" class="progress-fill"></div>
+        </div>
+        <div class="row-between sub-row">
+          <span id="context-tokens" class="muted">-- / --</span>
+          <span id="context-limit-tag" class="badge badge-muted">Host</span>
+        </div>
+        <div id="soft-limit-banner" class="alert-banner hidden" role="alert">
+          <span id="soft-limit-banner-text"></span>
+        </div>
+        <div class="action-row">
+          <button id="btn-compact" class="btn btn-primary" type="button">compact</button>
+          <button id="btn-context-detail" class="btn btn-secondary" type="button" aria-expanded="false">context</button>
+        </div>
+        <div id="compact-status" class="status-note hidden"></div>
+      </section>
+
+      <section id="context-detail-panel" class="card hidden" aria-label="Context breakdown">
+        <div class="row-between">
+          <span id="lbl-detail-title" class="section-label">Token Breakdown</span>
+          <span id="detail-steps" class="muted">--</span>
+        </div>
+        <div id="detail-model" class="muted detail-model">--</div>
+        <ul id="breakdown-list" class="breakdown-list"></ul>
+      </section>
+
+      <section class="card" aria-label="Custom context limit">
+        <div class="row-between">
+          <label id="lbl-custom-limit" class="field-label" for="limit-preset-select">Soft Context Limit</label>
+          <select id="limit-scope-select" class="select-compact" aria-label="Limit scope">
+            <option value="session">This session</option>
+            <option value="default">Default</option>
+          </select>
+        </div>
+        <div class="limit-controls">
+          <select id="limit-preset-select" class="select-input"></select>
+          <input id="limit-custom-input" class="text-input" type="number" min="32000" max="980000" step="1000" placeholder="32000-980000" />
+          <button id="btn-apply-limit" class="btn btn-secondary" type="button">Apply</button>
+        </div>
+        <div id="limit-feedback" class="status-note hidden"></div>
+      </section>
+
+      <section class="card" aria-label="Prompt cache">
+        <div class="row-between">
+          <span id="lbl-cache" class="section-label">Prompt Cache Hit</span>
+          <span id="cache-pct" class="metric-strong">--%</span>
+        </div>
+        <div id="cache-detail" class="muted sub-row">--</div>
+      </section>
+
+      <section class="card" aria-label="Account quota">
+        <div class="row-between">
+          <span id="lbl-quota" class="section-label">Account Quota</span>
+          <span id="quota-stale-badge" class="badge badge-warn hidden">Stale</span>
+        </div>
+        <div id="quota-groups" class="quota-groups"></div>
+      </section>
+    </main>
+
+    <script src="/bridge.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

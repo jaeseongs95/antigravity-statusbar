@@ -1,21 +1,28 @@
 {
   "name": "antigravity-statusbar",
-  "version": "1.3.26",
-  "description": "Custom context window statusbar, StatusBarAdapter extension architecture, per-session arbitrary token limit selector (32K-980K), Remote Control web support, and resilient zero-offset ASAR + CDP auto-patcher for Google Antigravity IDE.",
-  "main": "src/index.js",
-  "scripts": {
-    "build": "node scripts/build.js",
-    "install-statusbar": "node scripts/install.js",
-    "status": "node scripts/ensure_statusbar_patch.js --status",
-    "test": "node scripts/build.js && node --test test/statusbar.test.js"
+  "version": "3.0.0",
+  "description": "Official Antigravity Native Plugin (AUX_PANE Sidecar) for real-time context usage, prompt cache hit rate, account quota, custom soft context limits, and one-click compaction.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
   },
-  "keywords": [
-    "antigravity",
-    "statusbar",
-    "context-window",
-    "electron",
-    "cdp"
-  ],
-  "author": "jaeseongs95",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaeseongs95/antigravity-statusbar.git"
+  },
+  "scripts": {
+    "start": "node sidecars/statusbar/main.mjs",
+    "install-plugin": "node scripts/install-plugin.mjs",
+    "test:static": "node --test test/static/boundary.test.mjs",
+    "test:unit": "node --test test/unit/core.test.mjs",
+    "test:integration": "node --test test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs",
+    "test:security": "node --test test/security/sidecar-security.test.mjs",
+    "test:ui": "node --test test/ui/ui-app.test.mjs",
+    "test": "node --test test/static/boundary.test.mjs test/unit/core.test.mjs test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/security/sidecar-security.test.mjs test/ui/ui-app.test.mjs"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2",
+    "write-file-atomic": "^5.0.1"
+  }
 }
