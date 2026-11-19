@@ -119,12 +119,14 @@ test('json-settings-store.mjs has zero direct process.env reads (F10)', () => {
   assert.equal(/process\.env/.test(content), false, 'json-settings-store.mjs must inject dataDir');
 });
 
-test('plugin.json and sidecars/statusbar/sidecar.json declare AUX_PANE entrypoint', () => {
+test('plugin.json and sidecars/statusbar/sidecar.json declare official AUX_PANE web UI schema', () => {
   const pluginManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'plugin.json'), 'utf8'));
   const sidecarManifest = JSON.parse(
     fs.readFileSync(path.join(REPO_ROOT, 'sidecars', 'statusbar', 'sidecar.json'), 'utf8'),
   );
   assert.equal(pluginManifest.name, 'antigravity-statusbar');
   assert.equal(pluginManifest.version, '3.0.0');
-  assert.equal(sidecarManifest.ui.entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
+  assert.equal(sidecarManifest.has_web_ui, true);
+  assert.equal(sidecarManifest.ui_config?.views?.[0]?.path, '/');
+  assert.equal(sidecarManifest.ui_config?.views?.[0]?.entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
 });

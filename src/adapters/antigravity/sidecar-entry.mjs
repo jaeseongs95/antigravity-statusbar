@@ -15,7 +15,7 @@ import { renderUiBridgeScript } from './ui-bridge.mjs';
 
 const MIN_TOKEN_LENGTH = 16;
 const MAX_BODY_BYTES = 16 * 1024; // 16KB hard cap
-const DEFAULT_FRAME_ANCESTORS = "'self' vscode-webview: vscode-file: file:";
+const DEFAULT_FRAME_ANCESTORS = "'self' vscode-webview: vscode-file: file: http://127.0.0.1:* http://localhost:*";
 
 const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -480,7 +480,7 @@ export async function startSidecar(env = process.env) {
 
   const lsTransport = createLsTransport({
     lsAddress: env.ANTIGRAVITY_LS_ADDRESS || '',
-    csrfToken: env.ANTIGRAVITY_LS_CSRF_TOKEN || '',
+    csrfToken: env.ANTIGRAVITY_CSRF_TOKEN || env.ANTIGRAVITY_LS_CSRF_TOKEN || '',
   });
 
   const telemetryPort = createAntigravityTelemetryAdapter(lsTransport);
@@ -500,7 +500,7 @@ export async function startSidecar(env = process.env) {
     token,
     service,
     frameAncestors: env.STATUSBAR_FRAME_ANCESTORS || DEFAULT_FRAME_ANCESTORS,
-    port: Number(env.ANTIGRAVITY_SIDECAR_PORT || 0) || 0,
+    port: Number(env.ANTIGRAVITY_SIDECAR_WEB_PORT || env.ANTIGRAVITY_SIDECAR_PORT || 0) || 0,
   });
 
   const { port, url } = await sidecar.listen();

@@ -106,9 +106,10 @@ export function createAntigravityCompactionAdapter({
       let child;
       try {
         // F6: shell: false, windowsHide: true, ignore stdin, pipe stdout/stderr, AbortSignal
+        // Matches official sidecar_sdk invocation: `<ANTIGRAVITY_AGENTAPI_EXE> agentapi send-message <cid> /compact`
         child = spawnFn(
           realExe,
-          ['--compact', '--cascade-id', sessionId],
+          ['agentapi', 'send-message', sessionId, '/compact'],
           {
             shell: false,
             windowsHide: true,
