@@ -557,7 +557,9 @@ test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session s
         modelName: 'gemini-2.5-pro',
         stepCount: 8,
         tokenBreakdown: [{ key: 'sys', label: 'System Prompt', tokens: 3500 }],
-        compaction: { inProgress: false, status: 'idle' },
+        compaction: compactCalls.includes(sid)
+          ? { inProgress: true, status: 'accepted' }
+          : { inProgress: false, status: 'idle' },
         locale: 'en',
       }),
       getQuotaSummary: async () => ({
@@ -596,6 +598,11 @@ test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session s
       '--disable-gpu',
       '--no-sandbox',
       '--disable-dev-shm-usage',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-sync',
       '--remote-debugging-port=0',
       `--user-data-dir=${userDataDir}`,
       'about:blank',
@@ -607,7 +614,7 @@ test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session s
   try {
     const devToolsWsBase = await new Promise((resolve, reject) => {
       let errBuf = '';
-      const timer = setTimeout(() => reject(new Error(`CDP startup timeout: ${errBuf}`)), 15_000);
+      const timer = setTimeout(() => reject(new Error(`CDP startup timeout: ${errBuf}`)), 30_000);
       browser.stderr.on('data', (chunk) => {
         errBuf += chunk.toString('utf8');
         const m = errBuf.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/[^\s]+)/);
