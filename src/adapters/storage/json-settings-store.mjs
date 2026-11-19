@@ -10,6 +10,7 @@ import {
   pruneSessionOverrides,
   validateCustomButtons,
   validateCustomLimit,
+  validateDisabledAddonIds,
   validateSessionId,
 } from '../../core/model/context-policy.mjs';
 
@@ -26,6 +27,7 @@ function createDefaultState() {
     defaultCustomLimitUpdatedAt: 0,
     customButtons: [],
     customButtonsUpdatedAt: 0,
+    disabledRuntimeAddonIds: [],
     sessions: new Map(),
   };
 }
@@ -76,6 +78,14 @@ function parsePersistedState(raw) {
     state.customButtonsUpdatedAt = Math.floor(raw.customButtonsUpdatedAt);
   }
 
+  if (Array.isArray(raw.disabledRuntimeAddonIds)) {
+    try {
+      state.disabledRuntimeAddonIds = validateDisabledAddonIds(raw.disabledRuntimeAddonIds);
+    } catch {
+      state.disabledRuntimeAddonIds = [];
+    }
+  }
+
   if (Array.isArray(raw.sessions)) {
     state.sessions = pruneSessionOverrides(raw.sessions, MAX_SESSION_OVERRIDES);
   }
@@ -93,6 +103,7 @@ function serializeState(state) {
       defaultCustomLimitUpdatedAt: state.defaultCustomLimitUpdatedAt,
       customButtons: state.customButtons,
       customButtonsUpdatedAt: state.customButtonsUpdatedAt,
+      disabledRuntimeAddonIds: state.disabledRuntimeAddonIds,
       sessions: Array.from(state.sessions.entries()),
     },
     null,
@@ -243,6 +254,7 @@ export function createJsonSettingsStore({
         locale: state.locale,
         defaultCustomLimit: state.defaultCustomLimit,
         customButtons: state.customButtons.map((b) => ({ ...b })),
+        disabledRuntimeAddonIds: [...state.disabledRuntimeAddonIds],
         sessions: new Map(state.sessions),
       };
     },
@@ -269,6 +281,10 @@ export function createJsonSettingsStore({
           current.customButtonsUpdatedAt = ts;
         }
 
+        if (Object.prototype.hasOwnProperty.call(patch, 'disabledRuntimeAddonIds')) {
+          current.disabledRuntimeAddonIds = validateDisabledAddonIds(patch.disabledRuntimeAddonIds);
+        }
+
         if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit') && patch.sessionLimit) {
           const sid = validateSessionId(patch.sessionLimit.sessionId);
           const limit = validateCustomLimit(patch.sessionLimit.limit);
@@ -288,6 +304,7 @@ export function createJsonSettingsStore({
           locale: current.locale,
           defaultCustomLimit: current.defaultCustomLimit,
           customButtons: current.customButtons.map((b) => ({ ...b })),
+          disabledRuntimeAddonIds: [...current.disabledRuntimeAddonIds],
           sessions: new Map(current.sessions),
         };
       });

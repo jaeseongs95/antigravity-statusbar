@@ -65,10 +65,73 @@ export function validateCustomLimit(limit) {
 }
 
 /**
- * Validates and normalizes user-configured custom action buttons.
+ * Validates a single StatusbarAddon.v1 identifier.
+ *
+ * @param {unknown} rawId
+ * @returns {string}
+ */
+export function validateAddonId(rawId) {
+  const id = typeof rawId === 'string' ? rawId.trim() : '';
+  if (!id || FORBIDDEN_KEYS.has(id) || !CUSTOM_BUTTON_ID_PATTERN.test(id)) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'Addon id must match [A-Za-z0-9_-]{1,48}.',
+    );
+  }
+  return id;
+}
+
+/**
+ * Validates a single StatusbarAddon.v1 descriptor.
+ *
+ * @param {unknown} raw
+ * @returns {{ id: string, label: string, command: string, description: string, slot: 'left' | 'right', order: number, enabled: boolean, source: string }}
+ */
+export function validateAddonDescriptor(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'Each addon must be an object with id, label, and command.',
+    );
+  }
+  const id = validateAddonId(raw.id);
+  const label = typeof raw.label === 'string' ? raw.label.trim() : '';
+  const command = typeof raw.command === 'string' ? raw.command.trim() : '';
+  const description =
+    typeof raw.description === 'string' ? raw.description.trim().slice(0, 120) : '';
+  const slot = raw.slot === 'left' ? 'left' : 'right';
+  const order =
+    typeof raw.order === 'number' && Number.isFinite(raw.order)
+      ? Math.max(-999, Math.min(999, Math.round(raw.order)))
+      : 100;
+  const enabled = raw.enabled === undefined ? true : Boolean(raw.enabled);
+  const rawSource = typeof raw.source === 'string' ? raw.source.trim().toLowerCase() : 'agent';
+  const source =
+    rawSource === 'plugin' || rawSource === 'user' || rawSource === 'agent' ? rawSource : 'agent';
+
+  if (!label || label.length > MAX_BUTTON_LABEL_LEN) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      `Addon label must be 1-${MAX_BUTTON_LABEL_LEN} characters.`,
+    );
+  }
+  if (!command || command.length > MAX_BUTTON_COMMAND_LEN || command.includes('\0')) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      `Addon command must be 1-${MAX_BUTTON_COMMAND_LEN} characters.`,
+    );
+  }
+  return { id, label, command, description, slot, order, enabled, source };
+}
+
+/**
+ * Validates and normalizes persisted StatusbarAddon.v1 items (`customButtons`).
  *
  * @param {unknown} rawButtons
- * @returns {Array<{ id: string, label: string, command: string }>}
  */
 export function validateCustomButtons(rawButtons) {
   if (!Array.isArray(rawButtons)) {
@@ -89,48 +152,44 @@ export function validateCustomButtons(rawButtons) {
   const seen = new Set();
   const result = [];
   for (const raw of rawButtons) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    const item = validateAddonDescriptor(raw);
+    if (seen.has(item.id)) {
       throw new DomainError(
         ERROR_CODES.INVALID_SETTINGS_PATCH,
         400,
-        'Each custom button must be an object with id, label, and command.',
+        `Duplicate addon id: ${item.id}`,
       );
     }
-    const id = typeof raw.id === 'string' ? raw.id.trim() : '';
-    const label = typeof raw.label === 'string' ? raw.label.trim() : '';
-    const command = typeof raw.command === 'string' ? raw.command.trim() : '';
-    if (!id || FORBIDDEN_KEYS.has(id) || !CUSTOM_BUTTON_ID_PATTERN.test(id)) {
-      throw new DomainError(
-        ERROR_CODES.INVALID_SETTINGS_PATCH,
-        400,
-        'Custom button id must match [A-Za-z0-9_-]{1,48}.',
-      );
-    }
-    if (seen.has(id)) {
-      throw new DomainError(
-        ERROR_CODES.INVALID_SETTINGS_PATCH,
-        400,
-        `Duplicate custom button id: ${id}`,
-      );
-    }
-    if (!label || label.length > MAX_BUTTON_LABEL_LEN) {
-      throw new DomainError(
-        ERROR_CODES.INVALID_SETTINGS_PATCH,
-        400,
-        `Custom button label must be 1-${MAX_BUTTON_LABEL_LEN} characters.`,
-      );
-    }
-    if (!command || command.length > MAX_BUTTON_COMMAND_LEN || command.includes('\0')) {
-      throw new DomainError(
-        ERROR_CODES.INVALID_SETTINGS_PATCH,
-        400,
-        `Custom button command must be 1-${MAX_BUTTON_COMMAND_LEN} characters.`,
-      );
-    }
-    seen.add(id);
-    result.push({ id, label, command });
+    seen.add(item.id);
+    result.push(item);
   }
   return result;
+}
+
+/**
+ * Validates disabled runtime addon ID list.
+ *
+ * @param {unknown} rawIds
+ * @returns {string[]}
+ */
+export function validateDisabledAddonIds(rawIds) {
+  if (!Array.isArray(rawIds)) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'disabledRuntimeAddonIds must be an array.',
+    );
+  }
+  const seen = new Set();
+  const out = [];
+  for (const raw of rawIds.slice(0, 64)) {
+    const id = validateAddonId(raw);
+    if (!seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
 }
 
 /**

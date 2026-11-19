@@ -5,8 +5,11 @@ import {
   PRESET_LIMITS,
   evaluateContextThreshold,
   resolveEffectiveLimit,
+  validateAddonDescriptor,
+  validateAddonId,
   validateCustomButtons,
   validateCustomLimit,
+  validateDisabledAddonIds,
   validateSessionId,
 } from '../model/context-policy.mjs';
 import {
@@ -165,6 +168,9 @@ export function createStatusbarService({
         compaction,
         locale: settings.locale,
         customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
+        disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
+          ? settings.disabledRuntimeAddonIds
+          : [],
         presets: PRESET_LIMITS,
         fetchedAt: now,
       };
@@ -186,6 +192,9 @@ export function createStatusbarService({
         locale: settings.locale,
         defaultCustomLimit: settings.defaultCustomLimit,
         customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
+        disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
+          ? settings.disabledRuntimeAddonIds
+          : [],
         sessions: Array.from(settings.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -222,6 +231,13 @@ export function createStatusbarService({
         hasChange = true;
       }
 
+      if (Object.prototype.hasOwnProperty.call(patch, 'disabledRuntimeAddonIds')) {
+        normalizedPatch.disabledRuntimeAddonIds = validateDisabledAddonIds(
+          patch.disabledRuntimeAddonIds,
+        );
+        hasChange = true;
+      }
+
       if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit')) {
         const sl = patch.sessionLimit;
         if (!sl || typeof sl !== 'object' || Array.isArray(sl)) {
@@ -251,6 +267,9 @@ export function createStatusbarService({
         locale: updated.locale,
         defaultCustomLimit: updated.defaultCustomLimit,
         customButtons: Array.isArray(updated.customButtons) ? updated.customButtons : [],
+        disabledRuntimeAddonIds: Array.isArray(updated.disabledRuntimeAddonIds)
+          ? updated.disabledRuntimeAddonIds
+          : [],
         sessions: Array.from(updated.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -258,6 +277,40 @@ export function createStatusbarService({
         })),
         presets: PRESET_LIMITS,
       };
+    },
+
+    async upsertAddon(rawAddon) {
+      const addon = validateAddonDescriptor(rawAddon);
+      const current = await settingsPort.read();
+      const list = Array.isArray(current.customButtons) ? [...current.customButtons] : [];
+      const idx = list.findIndex((b) => b.id === addon.id);
+      if (idx >= 0) list[idx] = addon;
+      else list.push(addon);
+      return this.updateSettings({ customButtons: list });
+    },
+
+    async setAddonEnabled(rawId, enabled, isRuntime = false) {
+      const id = validateAddonId(rawId);
+      const current = await settingsPort.read();
+      if (isRuntime) {
+        const disabled = new Set(
+          Array.isArray(current.disabledRuntimeAddonIds) ? current.disabledRuntimeAddonIds : [],
+        );
+        if (enabled) disabled.delete(id);
+        else disabled.add(id);
+        return this.updateSettings({ disabledRuntimeAddonIds: Array.from(disabled) });
+      }
+      const list = Array.isArray(current.customButtons) ? current.customButtons : [];
+      const nextList = list.map((b) => (b.id === id ? { ...b, enabled: Boolean(enabled) } : b));
+      return this.updateSettings({ customButtons: nextList });
+    },
+
+    async removeAddon(rawId) {
+      const id = validateAddonId(rawId);
+      const current = await settingsPort.read();
+      const list = Array.isArray(current.customButtons) ? current.customButtons : [];
+      const nextList = list.filter((b) => b.id !== id);
+      return this.updateSettings({ customButtons: nextList });
     },
 
     async runCustomCommand(rawSessionId, rawCommand) {

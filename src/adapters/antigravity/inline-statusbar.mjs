@@ -281,13 +281,11 @@ export function inlineStatusbarBootstrap(cfg) {
       localeBtn: 'KO',
       langLabel: 'Language',
       stale: 'stale',
-      customBtnsTitle: 'Custom Buttons',
-      btnLabelPlaceholder: 'Label (e.g. plan)',
-      btnCmdPlaceholder: 'Command (e.g. /plan)',
-      addBtn: '+ Add',
-      delBtn: 'Delete',
-      btnEmpty: 'No custom buttons yet.',
-      btnInvalid: 'Enter label (1-24) and command (1-500).',
+      addonsTitle: 'Attached Add-ons',
+      addonEmpty: 'No add-ons attached. Ask an agent to attach a button.',
+      addonOn: 'ON',
+      addonOff: 'OFF',
+      delBtn: 'Remove',
       cmdSent: 'Sent',
       cmdFail: 'Failed',
     },
@@ -315,13 +313,11 @@ export function inlineStatusbarBootstrap(cfg) {
       localeBtn: 'EN',
       langLabel: '언어 선택',
       stale: '오래됨',
-      customBtnsTitle: '커스텀 버튼 (추가 / 삭제)',
-      btnLabelPlaceholder: '버튼 이름 (예: plan)',
-      btnCmdPlaceholder: '명령어 (예: /plan)',
-      addBtn: '+ 추가',
+      addonsTitle: '연결된 애드온 관리',
+      addonEmpty: '연결된 애드온이 없습니다. 에이전트에게 버튼 추가를 요청하세요.',
+      addonOn: '켜짐',
+      addonOff: '꺼짐',
       delBtn: '삭제',
-      btnEmpty: '등록된 커스텀 버튼이 없습니다.',
-      btnInvalid: '이름(1~24자)과 명령어(1~500자)를 입력하세요.',
       cmdSent: '전송됨',
       cmdFail: '전송 실패',
     },
@@ -330,6 +326,7 @@ export function inlineStatusbarBootstrap(cfg) {
   let disposed = false;
   let locale = 'ko';
   let customButtons = [];
+  let disabledRuntimeAddonIds = new Set();
   const runtimeButtons = new Map();
   let quotaState = null;
   let quotaPollTimer = null;
@@ -579,51 +576,25 @@ export function inlineStatusbarBootstrap(cfg) {
     const popFeedback = document.createElement('div');
     popFeedback.className = 'agy-inline-pop-feedback';
 
-    // Custom buttons management section (add / delete persisted buttons)
-    const customBtnSection = document.createElement('div');
-    customBtnSection.className = 'agy-inline-pop-section';
+    // Attached Add-ons management bridge (enable/disable/remove agent & plugin add-ons)
+    const addonSection = document.createElement('div');
+    addonSection.className = 'agy-inline-pop-section';
 
-    const customBtnTitle = document.createElement('div');
-    customBtnTitle.className = 'agy-inline-pop-subtitle';
-    customBtnTitle.textContent = t().customBtnsTitle;
+    const addonTitle = document.createElement('div');
+    addonTitle.className = 'agy-inline-pop-subtitle';
+    addonTitle.textContent = t().addonsTitle;
 
-    const customBtnList = document.createElement('div');
-    customBtnList.className = 'agy-inline-pop-list';
+    const addonListEl = document.createElement('div');
+    addonListEl.className = 'agy-inline-pop-list';
 
-    const customBtnForm = document.createElement('div');
-    customBtnForm.className = 'agy-inline-pop-controls';
-
-    const newBtnLabelInput = document.createElement('input');
-    newBtnLabelInput.className = 'agy-inline-pop-input';
-    newBtnLabelInput.type = 'text';
-    newBtnLabelInput.maxLength = 24;
-    newBtnLabelInput.placeholder = t().btnLabelPlaceholder;
-
-    const newBtnCmdInput = document.createElement('input');
-    newBtnCmdInput.className = 'agy-inline-pop-input';
-    newBtnCmdInput.style.flex = '1';
-    newBtnCmdInput.type = 'text';
-    newBtnCmdInput.maxLength = 500;
-    newBtnCmdInput.placeholder = t().btnCmdPlaceholder;
-
-    const addCustomBtn = document.createElement('button');
-    addCustomBtn.type = 'button';
-    addCustomBtn.className = 'agy-inline-btn';
-    addCustomBtn.textContent = t().addBtn;
-
-    customBtnForm.appendChild(newBtnLabelInput);
-    customBtnForm.appendChild(newBtnCmdInput);
-    customBtnForm.appendChild(addCustomBtn);
-
-    customBtnSection.appendChild(customBtnTitle);
-    customBtnSection.appendChild(customBtnList);
-    customBtnSection.appendChild(customBtnForm);
+    addonSection.appendChild(addonTitle);
+    addonSection.appendChild(addonListEl);
 
     popEl.appendChild(popHead);
     popEl.appendChild(popMeta);
     popEl.appendChild(breakdownList);
     popEl.appendChild(limitControls);
-    popEl.appendChild(customBtnSection);
+    popEl.appendChild(addonSection);
     popEl.appendChild(popFeedback);
 
     barEl.appendChild(leftEl);
@@ -673,26 +644,34 @@ export function inlineStatusbarBootstrap(cfg) {
       return fallbackSessionId;
     }
 
-    function renderCustomButtons() {
+    function renderAddons() {
       const tr = t();
       clearChildren(customBtnsContainer);
 
-      for (const btnDef of customButtons) {
+      const persistedSorted = [...customButtons].sort(
+        (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id),
+      );
+      for (const btnDef of persistedSorted) {
+        if (btnDef.enabled === false) continue;
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'agy-inline-btn';
         b.textContent = btnDef.label;
-        b.title = btnDef.command;
+        b.title = btnDef.description || btnDef.command;
         b.addEventListener('click', () => handleCustomCommand(btnDef, b));
         customBtnsContainer.appendChild(b);
       }
 
-      for (const rtDef of runtimeButtons.values()) {
+      const runtimeSorted = Array.from(runtimeButtons.values()).sort(
+        (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id),
+      );
+      for (const rtDef of runtimeSorted) {
+        if (disabledRuntimeAddonIds.has(rtDef.id)) continue;
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'agy-inline-btn';
         b.textContent = rtDef.label;
-        if (rtDef.title) b.title = rtDef.title;
+        if (rtDef.title || rtDef.description) b.title = rtDef.title || rtDef.description;
         b.addEventListener('click', () => {
           try {
             rtDef.onClick({ sessionId: getSessionId(), barEl, buttonEl: b });
@@ -701,28 +680,64 @@ export function inlineStatusbarBootstrap(cfg) {
         customBtnsContainer.appendChild(b);
       }
 
-      clearChildren(customBtnList);
-      if (customButtons.length === 0) {
+      // Settings bridge list: manage both persisted agent add-ons and runtime plugin add-ons
+      clearChildren(addonListEl);
+      const combined = [
+        ...persistedSorted.map((b) => ({
+          id: b.id,
+          label: b.label,
+          source: b.source || 'agent',
+          detail: b.description || b.command,
+          enabled: b.enabled !== false,
+          runtime: false,
+        })),
+        ...runtimeSorted.map((r) => ({
+          id: r.id,
+          label: r.label,
+          source: r.source || 'plugin',
+          detail: r.description || r.title || r.id,
+          enabled: !disabledRuntimeAddonIds.has(r.id),
+          runtime: true,
+        })),
+      ];
+
+      if (combined.length === 0) {
         const emptyEl = document.createElement('div');
         emptyEl.className = 'agy-inline-status-note';
-        emptyEl.textContent = tr.btnEmpty;
-        customBtnList.appendChild(emptyEl);
+        emptyEl.textContent = tr.addonEmpty;
+        addonListEl.appendChild(emptyEl);
       } else {
-        for (const btnDef of customButtons) {
+        for (const item of combined) {
           const row = document.createElement('div');
           row.className = 'agy-inline-pop-btn-item';
+
           const meta = document.createElement('span');
           meta.className = 'agy-inline-pop-btn-meta';
-          meta.textContent = `${btnDef.label} (${btnDef.command})`;
-          meta.title = `${btnDef.label}: ${btnDef.command}`;
-          const del = document.createElement('button');
-          del.type = 'button';
-          del.className = 'agy-inline-btn';
-          del.textContent = tr.delBtn;
-          del.addEventListener('click', () => handleDeleteCustomButton(btnDef.id));
+          meta.textContent = `${item.label} · ${item.source}`;
+          meta.title = item.detail;
+
+          const actions = document.createElement('div');
+          actions.className = 'agy-inline-pop-controls';
+
+          const toggleBtn = document.createElement('button');
+          toggleBtn.type = 'button';
+          toggleBtn.className = 'agy-inline-btn';
+          toggleBtn.textContent = item.enabled ? tr.addonOn : tr.addonOff;
+          toggleBtn.addEventListener('click', () =>
+            handleToggleAddon(item.id, !item.enabled, item.runtime),
+          );
+
+          const delBtn = document.createElement('button');
+          delBtn.type = 'button';
+          delBtn.className = 'agy-inline-btn';
+          delBtn.textContent = tr.delBtn;
+          delBtn.addEventListener('click', () => handleRemoveAddon(item.id, item.runtime));
+
+          actions.appendChild(toggleBtn);
+          actions.appendChild(delBtn);
           row.appendChild(meta);
-          row.appendChild(del);
-          customBtnList.appendChild(row);
+          row.appendChild(actions);
+          addonListEl.appendChild(row);
         }
       }
     }
@@ -735,14 +750,11 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(optDefault, tr.scopeDefault);
       setText(applyBtn, tr.apply);
       setText(compactBtn, state.compacting ? tr.compacting : tr.compact);
-      setText(customBtnTitle, tr.customBtnsTitle);
-      setText(addCustomBtn, tr.addBtn);
-      newBtnLabelInput.placeholder = tr.btnLabelPlaceholder;
-      newBtnCmdInput.placeholder = tr.btnCmdPlaceholder;
+      setText(addonTitle, tr.addonsTitle);
       langSelect.setAttribute('aria-label', tr.langLabel);
       if (langSelect.value !== locale) langSelect.value = locale;
       rebuildPresets();
-      renderCustomButtons();
+      renderAddons();
 
       const snap = state.snapshot;
       if (!snap) {
@@ -899,21 +911,13 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
-    async function handleAddCustomButton() {
-      const label = newBtnLabelInput.value.trim();
-      const command = newBtnCmdInput.value.trim();
-      if (!label || label.length > 24 || !command || command.length > 500) {
-        popFeedback.className = 'agy-inline-pop-feedback err';
-        setText(popFeedback, t().btnInvalid);
-        return;
-      }
-      const id = `btn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      const nextList = [...customButtons, { id, label, command }];
+    async function handleToggleAddon(id, enabled, isRuntime) {
       try {
-        const updated = await apiPost('/api/settings/update', { customButtons: nextList });
-        customButtons = Array.isArray(updated?.customButtons) ? updated.customButtons : nextList;
-        newBtnLabelInput.value = '';
-        newBtnCmdInput.value = '';
+        const updated = await apiPost('/api/addons/toggle', { id, enabled, runtime: isRuntime });
+        if (Array.isArray(updated?.customButtons)) customButtons = updated.customButtons;
+        if (Array.isArray(updated?.disabledRuntimeAddonIds)) {
+          disabledRuntimeAddonIds = new Set(updated.disabledRuntimeAddonIds);
+        }
         popFeedback.className = 'agy-inline-pop-feedback';
         setText(popFeedback, t().applied);
         for (const ctrl of barControllers.values()) ctrl.render();
@@ -923,11 +927,15 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
-    async function handleDeleteCustomButton(id) {
-      const nextList = customButtons.filter((b) => b.id !== id);
+    async function handleRemoveAddon(id, isRuntime) {
+      if (isRuntime) {
+        runtimeButtons.delete(id);
+        for (const ctrl of barControllers.values()) ctrl.render();
+        return;
+      }
       try {
-        const updated = await apiPost('/api/settings/update', { customButtons: nextList });
-        customButtons = Array.isArray(updated?.customButtons) ? updated.customButtons : nextList;
+        const updated = await apiPost('/api/addons/remove', { id });
+        if (Array.isArray(updated?.customButtons)) customButtons = updated.customButtons;
         popFeedback.className = 'agy-inline-pop-feedback';
         setText(popFeedback, t().applied);
         for (const ctrl of barControllers.values()) ctrl.render();
@@ -990,13 +998,6 @@ export function inlineStatusbarBootstrap(cfg) {
         handleApplyLimit();
       }
     };
-    const onCustomBtnInputKeyDown = (e) => {
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleAddCustomButton();
-      }
-    };
     const onPresetChange = () => {
       customInput.value = presetSelect.value;
     };
@@ -1009,13 +1010,10 @@ export function inlineStatusbarBootstrap(cfg) {
     closeBtn.addEventListener('click', () => setPopoverOpen(false));
     compactBtn.addEventListener('click', handleCompact);
     applyBtn.addEventListener('click', handleApplyLimit);
-    addCustomBtn.addEventListener('click', handleAddCustomButton);
     localeBtn.addEventListener('click', handleToggleLocale);
     langSelect.addEventListener('change', onLangChange);
     presetSelect.addEventListener('change', onPresetChange);
     customInput.addEventListener('keydown', onInputKeyDown);
-    newBtnLabelInput.addEventListener('keydown', onCustomBtnInputKeyDown);
-    newBtnCmdInput.addEventListener('keydown', onCustomBtnInputKeyDown);
     document.addEventListener('keydown', onKeyDown);
 
     rebuildPresets();
@@ -1095,6 +1093,9 @@ export function inlineStatusbarBootstrap(cfg) {
       if (Array.isArray(settings?.customButtons)) {
         customButtons = settings.customButtons;
       }
+      if (Array.isArray(settings?.disabledRuntimeAddonIds)) {
+        disabledRuntimeAddonIds = new Set(settings.disabledRuntimeAddonIds);
+      }
       for (const ctrl of barControllers.values()) ctrl.render();
     } catch {}
     try {
@@ -1154,8 +1155,9 @@ export function inlineStatusbarBootstrap(cfg) {
   scheduleSnapshotPoll();
   quotaPollTimer = setInterval(pollQuotaAndSettings, QUOTA_POLL_MS);
 
-  const api = {
-    addButton(def) {
+  const addonsBridge = Object.freeze({
+    version: '1.0.0',
+    register(def) {
       if (!def || typeof def !== 'object') return false;
       const id = typeof def.id === 'string' ? def.id.trim() : '';
       const label = typeof def.label === 'string' ? def.label.trim() : '';
@@ -1166,16 +1168,63 @@ export function inlineStatusbarBootstrap(cfg) {
         id,
         label: label.slice(0, 24),
         title: typeof def.title === 'string' ? def.title : '',
+        description: typeof def.description === 'string' ? def.description.slice(0, 120) : '',
+        order: typeof def.order === 'number' && Number.isFinite(def.order) ? def.order : 100,
+        source: typeof def.source === 'string' && def.source.trim() ? def.source.trim() : 'plugin',
         onClick: def.onClick,
       });
       for (const ctrl of barControllers.values()) ctrl.render();
       return true;
     },
-    removeButton(id) {
+    unregister(id) {
       if (!runtimeButtons.delete(String(id || ''))) return false;
       for (const ctrl of barControllers.values()) ctrl.render();
       return true;
     },
+    list() {
+      return [
+        ...customButtons.map((b) => ({
+          id: b.id,
+          label: b.label,
+          source: b.source || 'agent',
+          enabled: b.enabled !== false,
+          runtime: false,
+        })),
+        ...Array.from(runtimeButtons.values()).map((r) => ({
+          id: r.id,
+          label: r.label,
+          source: r.source || 'plugin',
+          enabled: !disabledRuntimeAddonIds.has(r.id),
+          runtime: true,
+        })),
+      ];
+    },
+    async setEnabled(id, enabled) {
+      const targetId = String(id || '').trim();
+      if (!targetId) return false;
+      const isRuntime = runtimeButtons.has(targetId);
+      try {
+        const updated = await apiPost('/api/addons/toggle', {
+          id: targetId,
+          enabled: Boolean(enabled),
+          runtime: isRuntime,
+        });
+        if (Array.isArray(updated?.customButtons)) customButtons = updated.customButtons;
+        if (Array.isArray(updated?.disabledRuntimeAddonIds)) {
+          disabledRuntimeAddonIds = new Set(updated.disabledRuntimeAddonIds);
+        }
+        for (const ctrl of barControllers.values()) ctrl.render();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+
+  const api = {
+    addons: addonsBridge,
+    addButton: addonsBridge.register,
+    removeButton: addonsBridge.unregister,
     destroy() {
       if (disposed) return;
       disposed = true;
@@ -1195,11 +1244,15 @@ export function inlineStatusbarBootstrap(cfg) {
         if (window.__agyStatusbarInline === api) {
           delete window.__agyStatusbarInline;
         }
+        if (window.statusbarAddons === addonsBridge) {
+          delete window.statusbarAddons;
+        }
       } catch {}
     },
   };
 
   window.__agyStatusbarInline = api;
+  window.statusbarAddons = addonsBridge;
   return api;
 }
 

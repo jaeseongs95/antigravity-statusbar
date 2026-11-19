@@ -10,6 +10,8 @@ const INCLUDE_ENTRIES = [
   'package.json',
   'package-lock.json',
   'sidecars',
+  'skills',
+  'scripts',
   'src',
   'node_modules',
   'LICENSE',

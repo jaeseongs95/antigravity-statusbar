@@ -380,6 +380,25 @@ export function createSidecarServer({
         sendJson(res, 200, result, corsHeaders);
         return;
       }
+      if (pathname === '/api/addons/upsert') {
+        const result = await service.upsertAddon(body);
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
+      if (pathname === '/api/addons/toggle') {
+        const result = await service.setAddonEnabled(
+          body.id,
+          Boolean(body.enabled),
+          Boolean(body.runtime),
+        );
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
+      if (pathname === '/api/addons/remove') {
+        const result = await service.removeAddon(body.id);
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
       sendJson(
         res,
         404,
