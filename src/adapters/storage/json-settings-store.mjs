@@ -238,15 +238,15 @@ export function createJsonSettingsStore({
           movedParsed = null;
         }
         if (movedParsed?.token !== observedToken) {
-          // Unexpectedly moved a different lock; do not silently discard without logging.
-          await fs.unlink(asidePath).catch(() => {});
+          // F3: NEVER unlink another live process's lock on token mismatch.
+          // Attempt to restore the live lock to lockPath so its holder remains protected.
+          await fs.rename(asidePath, lockPath).catch(() => {});
           return false;
         }
       }
       await fs.unlink(asidePath).catch(() => {});
       return true;
     } catch {
-      await fs.unlink(asidePath).catch(() => {});
       return false;
     }
   }

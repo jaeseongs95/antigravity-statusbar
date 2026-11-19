@@ -166,3 +166,48 @@ test('statusbar-service enforces cross-session isolation (D-0033) and releases m
   const secondAccepted = await service.requestCompaction('sess-A');
   assert.equal(secondAccepted.accepted, true);
 });
+
+test('F2: requestCompaction prevents async TOCTOU duplicate execution during concurrent calls', async () => {
+  let compactCallCount = 0;
+  let releaseTelemetry;
+  const telemetryGate = new Promise((resolve) => {
+    releaseTelemetry = resolve;
+  });
+
+  const service = createStatusbarService({
+    clock: () => 2_000_000,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => {
+        await telemetryGate;
+        return { sessionId: 'sess-race', lastCompactedStep: 1 };
+      },
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: 0 }),
+    },
+    compactionPort: {
+      compactSession: async () => {
+        compactCallCount += 1;
+        return { accepted: true, method: 'rpc' };
+      },
+    },
+    settingsPort: {
+      read: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: new Map() }),
+      update: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: new Map() }),
+    },
+  });
+
+  // Launch two concurrent compaction calls before getSessionTelemetry resolves
+  const firstPromise = service.requestCompaction('sess-race');
+  const secondPromise = service.requestCompaction('sess-race');
+
+  // Second call MUST immediately reject with 409 COMPACTION_IN_PROGRESS
+  await assert.rejects(
+    () => secondPromise,
+    (err) => err instanceof DomainError && err.code === ERROR_CODES.COMPACTION_IN_PROGRESS && err.httpStatus === 409,
+  );
+
+  releaseTelemetry();
+  const firstResult = await firstPromise;
+  assert.equal(firstResult.accepted, true);
+  assert.equal(compactCallCount, 1);
+});

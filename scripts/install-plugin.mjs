@@ -15,8 +15,13 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--dry-run') {
       dryRun = true;
-    } else if (arg === '--target' && argv[i + 1]) {
-      targetDir = argv[i + 1];
+    } else if (arg === '--target') {
+      const next = argv[i + 1];
+      // NB4: Reject missing or flag-like --target values
+      if (!next || next.startsWith('--') || next.includes('\0')) {
+        throw new Error('--target requires a valid destination directory path.');
+      }
+      targetDir = next;
       i += 1;
     }
   }

@@ -15,7 +15,7 @@ import { renderUiBridgeScript } from './ui-bridge.mjs';
 
 const MIN_TOKEN_LENGTH = 16;
 const MAX_BODY_BYTES = 16 * 1024; // 16KB hard cap
-const DEFAULT_FRAME_ANCESTORS = "'self' vscode-webview: file:";
+const DEFAULT_FRAME_ANCESTORS = "'self' vscode-webview: vscode-file: file:";
 
 const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -292,9 +292,15 @@ export function createSidecarServer({
     try {
       body = await readJsonBody(req, MAX_BODY_BYTES);
     } catch (err) {
-      sendJson(res, err.httpStatus || 400, {
-        error: { code: err.code || 'BAD_REQUEST', message: err.message },
-      });
+      const status = err.httpStatus || 400;
+      // NB1: Close keep-alive connection on 413 after pausing unread oversized payload
+      const extraHeaders = status === 413 ? { connection: 'close' } : {};
+      sendJson(
+        res,
+        status,
+        { error: { code: err.code || 'BAD_REQUEST', message: err.message } },
+        extraHeaders,
+      );
       return;
     }
 
@@ -375,7 +381,16 @@ export function createSidecarServer({
       return;
     }
 
-    const content = fs.readFileSync(resolved.filePath);
+    let content;
+    try {
+      // NB1: Guard readFileSync against race deletion/permission errors
+      content = fs.readFileSync(resolved.filePath);
+    } catch {
+      sendJson(res, 404, {
+        error: { code: 'STATIC_ERROR', message: 'Asset unavailable.' },
+      });
+      return;
+    }
     applySecurityHeaders(res);
     res.writeHead(200, {
       'content-type': MIME_TYPES[resolved.ext],

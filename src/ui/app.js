@@ -75,12 +75,20 @@ export function createStatusbarApp({
   let snapshotController = null;
   let pollTimer = null;
   let quotaTimer = null;
+  let lastSessionOptionsKey = '';
   const listenerController = new AbortController();
 
   function setTextIfChanged(node, text) {
     if (node && node.textContent !== text) {
       node.textContent = text;
     }
+  }
+
+  function clearTransientFeedback() {
+    setTextIfChanged(el.compactStatus, '');
+    el.compactStatus.classList.add('hidden');
+    setTextIfChanged(el.limitFeedback, '');
+    el.limitFeedback.classList.add('hidden');
   }
 
   function clearChildren(node) {
@@ -153,27 +161,36 @@ export function createStatusbarApp({
 
   function renderSessionSelect() {
     const t = getStrings(state.locale);
-    clearChildren(el.sessionSelect);
+    // NB2: Avoid destroying/recreating <option> nodes on every 3s poll when session list is unchanged
+    const nextKey =
+      state.sessions.length === 0
+        ? `__empty__:${state.locale}`
+        : state.sessions.map((s) => `${s.sessionId}\0${s.title || ''}`).join('\n');
 
-    if (state.sessions.length === 0) {
-      const emptyOpt = doc.createElement('option');
-      emptyOpt.value = '';
-      emptyOpt.textContent = t.noSessions;
-      el.sessionSelect.appendChild(emptyOpt);
-      el.sessionSelect.disabled = true;
-      return;
+    if (nextKey !== lastSessionOptionsKey) {
+      lastSessionOptionsKey = nextKey;
+      clearChildren(el.sessionSelect);
+
+      if (state.sessions.length === 0) {
+        const emptyOpt = doc.createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = t.noSessions;
+        el.sessionSelect.appendChild(emptyOpt);
+        el.sessionSelect.disabled = true;
+        return;
+      }
+
+      el.sessionSelect.disabled = false;
+      for (const s of state.sessions) {
+        const opt = doc.createElement('option');
+        opt.value = s.sessionId;
+        const shortId = s.sessionId.slice(0, 8);
+        opt.textContent = s.title ? `${s.title} (${shortId})` : shortId;
+        el.sessionSelect.appendChild(opt);
+      }
     }
 
-    el.sessionSelect.disabled = false;
-    for (const s of state.sessions) {
-      const opt = doc.createElement('option');
-      opt.value = s.sessionId;
-      const shortId = s.sessionId.slice(0, 8);
-      opt.textContent = s.title ? `${s.title} (${shortId})` : shortId;
-      el.sessionSelect.appendChild(opt);
-    }
-
-    if (state.selectedSessionId) {
+    if (state.selectedSessionId && el.sessionSelect.value !== state.selectedSessionId) {
       el.sessionSelect.value = state.selectedSessionId;
     }
     setTextIfChanged(
@@ -196,6 +213,8 @@ export function createStatusbarApp({
       el.softLimitBanner.classList.add('hidden');
       setTextIfChanged(el.btnCompact, t.compactBtn);
       el.btnCompact.disabled = true;
+      // F5: Clear stale compactStatus & limitFeedback when snapshot is empty
+      clearTransientFeedback();
       setTextIfChanged(el.cachePct, '--%');
       setTextIfChanged(el.cacheDetail, t.cacheUnavailable);
       setTextIfChanged(el.detailModel, t.modelUnavailable);
@@ -237,6 +256,10 @@ export function createStatusbarApp({
     if (snap.compaction?.status === 'completed') {
       setTextIfChanged(el.compactStatus, t.compactCompleted);
       el.compactStatus.classList.remove('hidden');
+    } else if (!isCompacting && snap.compaction?.status === 'idle') {
+      // F5: Clear stale compact status when session is idle
+      setTextIfChanged(el.compactStatus, '');
+      el.compactStatus.classList.add('hidden');
     }
 
     // Prompt cache hit
@@ -388,11 +411,13 @@ export function createStatusbarApp({
       if (state.sessions.length === 0) {
         state.selectedSessionId = null;
         state.snapshot = null;
+        clearTransientFeedback();
       } else if (state.selectionMode === 'auto') {
         const newestId = state.sessions[0].sessionId;
         if (state.selectedSessionId !== newestId) {
           state.selectedSessionId = newestId;
           state.snapshot = null;
+          clearTransientFeedback();
         }
       } else {
         const stillExists = state.sessions.some((s) => s.sessionId === state.selectedSessionId);
@@ -400,6 +425,7 @@ export function createStatusbarApp({
           state.selectionMode = 'auto';
           state.selectedSessionId = state.sessions[0].sessionId;
           state.snapshot = null;
+          clearTransientFeedback();
         }
       }
 
@@ -460,6 +486,8 @@ export function createStatusbarApp({
         state.selectionMode = 'manual';
         state.selectedSessionId = nextId;
         state.snapshot = null;
+        // F5: Clear previous session's compactStatus & limitFeedback immediately on switch
+        clearTransientFeedback();
         renderSessionSelect();
         renderSnapshot();
         await refreshSnapshot(nextId);
@@ -542,7 +570,8 @@ export function createStatusbarApp({
     el.btnCompact.addEventListener(
       'click',
       async () => {
-        if (!state.selectedSessionId) return;
+        const targetSessionId = state.selectedSessionId;
+        if (!targetSessionId) return;
         const t = getStrings(state.locale);
         el.btnCompact.disabled = true;
         setTextIfChanged(el.btnCompact, t.compactingBtn);
@@ -550,12 +579,16 @@ export function createStatusbarApp({
         el.compactStatus.classList.remove('hidden');
 
         try {
-          await bridge.requestCompaction(state.selectedSessionId);
+          await bridge.requestCompaction(targetSessionId);
+          // F5: Guard against session switch during async compaction request
+          if (state.disposed || state.selectedSessionId !== targetSessionId) return;
           state.burstUntil = Date.now() + MAX_BURST_MS;
           state.sawRunningDuringBurst = false;
           scheduleNextPoll();
-          await refreshSnapshot(state.selectedSessionId);
+          await refreshSnapshot(targetSessionId);
         } catch (err) {
+          // F5: Guard against session switch on async failure so target session error never contaminates another session
+          if (state.disposed || state.selectedSessionId !== targetSessionId) return;
           const msg = err?.code === 'COMPACTION_IN_PROGRESS' ? t.compactInProgress : t.compactFailed;
           setTextIfChanged(el.compactStatus, msg);
           el.compactStatus.classList.remove('hidden');

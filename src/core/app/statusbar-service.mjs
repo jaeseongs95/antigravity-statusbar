@@ -32,8 +32,9 @@ export function createStatusbarService({
   assertCompactionPort(compactionPort);
   assertSettingsPort(settingsPort);
 
-  /** @type {Map<string, { startedAt: number, acceptedAt: number | null, method: string | null, baselineCompactedStep: number | null, status: 'pending' | 'accepted' }>} */
+  /** @type {Map<string, { attemptToken: string, startedAt: number, acceptedAt: number | null, method: string | null, baselineCompactedStep: number | null, status: 'pending' | 'accepted' }>} */
   const compactingSessions = new Map();
+  let attemptSeq = 0;
 
   function pruneCompactingSessions(now) {
     for (const [sid, entry] of compactingSessions.entries()) {
@@ -264,6 +265,24 @@ export function createStatusbarService({
         );
       }
 
+      // F2: Synchronously register pending mutex with unique attemptToken BEFORE any await
+      // to eliminate async TOCTOU race and cross-attempt deletion.
+      const attemptToken = `${now}-${++attemptSeq}`;
+      compactingSessions.set(sessionId, {
+        attemptToken,
+        startedAt: now,
+        acceptedAt: null,
+        method: null,
+        baselineCompactedStep: null,
+        status: 'pending',
+      });
+
+      const releaseOwnMutex = () => {
+        if (compactingSessions.get(sessionId)?.attemptToken === attemptToken) {
+          compactingSessions.delete(sessionId);
+        }
+      };
+
       let baselineCompactedStep = null;
       try {
         const currentTelemetry = await telemetryPort.getSessionTelemetry(sessionId);
@@ -277,19 +296,11 @@ export function createStatusbarService({
         // Non-fatal: proceed without baseline step
       }
 
-      compactingSessions.set(sessionId, {
-        startedAt: now,
-        acceptedAt: null,
-        method: null,
-        baselineCompactedStep,
-        status: 'pending',
-      });
-
       try {
         const result = await compactionPort.compactSession(sessionId);
         if (!result || result.accepted !== true) {
-          // F5: Release mutex immediately on failure so user is not locked out with 409
-          compactingSessions.delete(sessionId);
+          // F2 & F5: Release ONLY this attempt's mutex immediately on failure
+          releaseOwnMutex();
           throw new DomainError(
             ERROR_CODES.COMPACTION_FAILED,
             502,
@@ -298,13 +309,16 @@ export function createStatusbarService({
         }
 
         const acceptedAt = clock();
-        compactingSessions.set(sessionId, {
-          startedAt: now,
-          acceptedAt,
-          method: result.method ?? 'unknown',
-          baselineCompactedStep,
-          status: 'accepted',
-        });
+        if (compactingSessions.get(sessionId)?.attemptToken === attemptToken) {
+          compactingSessions.set(sessionId, {
+            attemptToken,
+            startedAt: now,
+            acceptedAt,
+            method: result.method ?? 'unknown',
+            baselineCompactedStep,
+            status: 'accepted',
+          });
+        }
 
         return {
           accepted: true,
@@ -313,8 +327,8 @@ export function createStatusbarService({
           acceptedAt,
         };
       } catch (err) {
-        // F5: Always release mutex if compaction failed/threw
-        compactingSessions.delete(sessionId);
+        // F2 & F5: Always release ONLY this attempt's mutex if compaction failed/threw
+        releaseOwnMutex();
         if (err instanceof DomainError) {
           throw err;
         }

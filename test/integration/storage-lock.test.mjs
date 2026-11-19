@@ -78,5 +78,25 @@ test('json-settings-store recovers stale dead-PID lock via rename-aside and resp
     const elapsed = Date.now() - started;
     assert.equal(res2.defaultCustomLimit, 200_000);
     assert.ok(elapsed >= 200, `Expected 0-byte lock grace wait >= 200ms, got ${elapsed}ms`);
+
+    // 3. F3: Live PID lock is NEVER unlinked during lockTimeoutMs -> throws STORAGE_LOCK_TIMEOUT and preserves lock
+    const livePayload = JSON.stringify({
+      pid: process.pid,
+      token: 'live-holder-token-xyz',
+      createdAt: Date.now(),
+    });
+    await fs.writeFile(store.lockPath, livePayload, 'utf8');
+    const shortStore = createJsonSettingsStore({
+      dataDir: dir,
+      lockTimeoutMs: 180,
+      staleLockMs: 60_000,
+    });
+    await assert.rejects(
+      () => shortStore.update({ locale: 'en' }),
+      (err) => err?.code === 'STORAGE_LOCK_TIMEOUT',
+    );
+    const preserved = JSON.parse(await fs.readFile(store.lockPath, 'utf8'));
+    assert.equal(preserved.token, 'live-holder-token-xyz');
+    await fs.unlink(store.lockPath);
   });
 });

@@ -75,7 +75,43 @@ export function mapTrajectorySummaries(resp) {
 }
 
 /**
- * Finds the most recent generatorMetadata item with chatModel.usage.
+ * Extracts the latest compacted step index from real Antigravity LS fields:
+ * `compactedAtStepIndices` array (primary), or `lastCompactedStepIndex`/`compactedStepIndex` (fallback).
+ *
+ * @param {any} update
+ * @returns {number | null}
+ */
+export function extractLastCompactedStep(update) {
+  const compactionInfo = update?.compactionInfo && typeof update.compactionInfo === 'object'
+    ? update.compactionInfo
+    : {};
+
+  const indices = Array.isArray(compactionInfo.compactedAtStepIndices)
+    ? compactionInfo.compactedAtStepIndices
+    : Array.isArray(update?.compactedAtStepIndices)
+      ? update.compactedAtStepIndices
+      : null;
+
+  if (indices && indices.length > 0) {
+    let maxStep = -1;
+    for (const raw of indices) {
+      const val = toNonNegativeIntOrNull(raw);
+      if (val !== null && val > maxStep) {
+        maxStep = val;
+      }
+    }
+    if (maxStep >= 0) {
+      return maxStep;
+    }
+  }
+
+  return toNonNegativeIntOrNull(
+    compactionInfo.lastCompactedStepIndex ?? compactionInfo.compactedStepIndex,
+  );
+}
+
+/**
+ * Finds the most recent generatorMetadata item with chatModel.usage and optional tokenBreakdown.
  *
  * @param {unknown[]} metadataList
  */
@@ -86,7 +122,10 @@ export function extractLatestUsageMetadata(metadataList) {
   for (let i = metadataList.length - 1; i >= 0; i -= 1) {
     const item = metadataList[i];
     const usage = item?.chatModel?.usage;
-    if (usage && typeof usage === 'object') {
+    const chatStartBreakdown =
+      item?.chatModel?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups;
+
+    if ((usage && typeof usage === 'object') || Array.isArray(chatStartBreakdown)) {
       return {
         modelName:
           typeof item?.chatModel?.model === 'string'
@@ -94,10 +133,11 @@ export function extractLatestUsageMetadata(metadataList) {
             : typeof item?.chatModel?.modelName === 'string'
               ? item.chatModel.modelName
               : null,
-        apiProvider: usage.apiProvider ?? item?.chatModel?.apiProvider ?? null,
-        inputTokens: toNonNegativeIntOrNull(usage.inputTokens),
-        cacheReadTokens: toNonNegativeIntOrNull(usage.cacheReadTokens),
+        apiProvider: usage?.apiProvider ?? item?.chatModel?.apiProvider ?? null,
+        inputTokens: toNonNegativeIntOrNull(usage?.inputTokens),
+        cacheReadTokens: toNonNegativeIntOrNull(usage?.cacheReadTokens),
         stepIndex: toNonNegativeIntOrNull(item?.stepIndex ?? item?.stepIndices?.[0]),
+        tokenBreakdownGroups: Array.isArray(chatStartBreakdown) ? chatStartBreakdown : null,
       };
     }
   }
@@ -109,8 +149,10 @@ export function extractLatestUsageMetadata(metadataList) {
  * into a vendor-neutral ContextTelemetry DTO.
  *
  * Enforces:
- * - Strict conversationId === requested sessionId (D-0033)
- * - F4 post-compaction guard: lastCompactedStep >= 0 && afterCompact > 0 && lastCompactedStep >= max(lastMetaStepIndex, lastStepIndex)
+ * - F1 / D-0033 Fail-Closed: NEVER falls back to requestedSessionId when update.conversationId is missing.
+ * - F1 real LS schema: compactedAtStepIndices[], boolean|number estimatedAfterCompaction,
+ *   chatStartMetadata.contextWindowMetadata.tokenBreakdown.groups[].numTokens.
+ * - F4 post-compaction guard.
  *
  * @param {{
  *   requestedSessionId: string,
@@ -120,53 +162,60 @@ export function extractLatestUsageMetadata(metadataList) {
  * }} input
  */
 export function mapSessionTelemetry({
-  requestedSessionId,
+  requestedSessionId: _requestedSessionId,
   streamFrame,
   trajectorySummary = null,
   generatorMetadata = [],
 }) {
   const update = streamFrame?.update ?? streamFrame ?? {};
+
+  // F1 / D-0033 Fail-Closed: Missing conversationId must NOT fall back to requestedSessionId.
   const reportedId =
     typeof update.conversationId === 'string' && update.conversationId.trim()
       ? update.conversationId.trim()
-      : requestedSessionId;
+      : '';
 
   const cwu = update.contextWindowUsage && typeof update.contextWindowUsage === 'object'
     ? update.contextWindowUsage
     : {};
 
-  const compactionInfo = update.compactionInfo && typeof update.compactionInfo === 'object'
-    ? update.compactionInfo
-    : {};
-
   const estimatedUsed = toNonNegativeIntOrNull(cwu.estimatedTokensUsed);
-  const afterCompact = toNonNegativeIntOrNull(cwu.estimatedAfterCompaction);
+  const rawAfterCompact = cwu.estimatedAfterCompaction;
+  const afterCompactBool = typeof rawAfterCompact === 'boolean' ? rawAfterCompact : null;
+  const afterCompactTokens =
+    afterCompactBool === null ? toNonNegativeIntOrNull(rawAfterCompact) : null;
+
   const maxContextTokens = toNonNegativeIntOrNull(cwu.maxContextTokens);
   const lastStepIndex = toNonNegativeIntOrNull(cwu.lastStepIndex);
-  const lastCompactedStep = toNonNegativeIntOrNull(
-    compactionInfo.lastCompactedStepIndex ?? compactionInfo.compactedStepIndex,
-  );
+  const lastCompactedStep = extractLastCompactedStep(update);
 
   const latestUsage = extractLatestUsageMetadata(generatorMetadata);
   const lastMetaStepIndex = latestUsage ? latestUsage.stepIndex : null;
 
-  // F4: Post-compaction token guard
   const latestActivityStep = Math.max(
     lastMetaStepIndex !== null ? lastMetaStepIndex : -1,
     lastStepIndex !== null ? lastStepIndex : -1,
   );
-  const useAfterCompaction =
-    lastCompactedStep !== null &&
-    lastCompactedStep >= 0 &&
-    afterCompact !== null &&
-    afterCompact > 0 &&
-    lastCompactedStep >= latestActivityStep;
 
+  // F1 & F4: Support both real boolean estimatedAfterCompaction and numeric estimatedAfterCompaction
   let usedTokens = null;
   let usedTokensSource = 'unavailable';
-  if (useAfterCompaction) {
-    usedTokens = afterCompact;
+  let compactionJustCompleted = false;
+
+  if (afterCompactBool === true && estimatedUsed !== null) {
+    usedTokens = estimatedUsed;
     usedTokensSource = 'after_compaction';
+    compactionJustCompleted = lastCompactedStep !== null && lastCompactedStep >= 0;
+  } else if (
+    lastCompactedStep !== null &&
+    lastCompactedStep >= 0 &&
+    afterCompactTokens !== null &&
+    afterCompactTokens > 0 &&
+    lastCompactedStep >= latestActivityStep
+  ) {
+    usedTokens = afterCompactTokens;
+    usedTokensSource = 'after_compaction';
+    compactionJustCompleted = true;
   } else if (estimatedUsed !== null) {
     usedTokens = estimatedUsed;
     usedTokensSource = 'estimated';
@@ -180,12 +229,20 @@ export function mapSessionTelemetry({
       })
     : null;
 
-  const rawGroups = Array.isArray(cwu.tokenGroups) ? cwu.tokenGroups : [];
+  // F1: Prefer real chatStartMetadata.contextWindowMetadata.tokenBreakdown.groups[].numTokens,
+  // with fallback to contextWindowUsage.tokenGroups
+  const rawGroups =
+    Array.isArray(latestUsage?.tokenBreakdownGroups) && latestUsage.tokenBreakdownGroups.length > 0
+      ? latestUsage.tokenBreakdownGroups
+      : Array.isArray(cwu.tokenGroups)
+        ? cwu.tokenGroups
+        : [];
+
   const tokenBreakdown = normalizeTokenGroups(
     rawGroups.map((g) => ({
-      key: g?.groupType ?? g?.type ?? g?.name ?? 'other',
-      label: formatTokenGroupLabel(g?.groupType ?? g?.type ?? g?.name),
-      tokens: g?.estimatedTokens ?? g?.tokens ?? g?.tokenCount,
+      key: g?.groupType ?? g?.type ?? g?.name ?? g?.category ?? 'other',
+      label: formatTokenGroupLabel(g?.displayName ?? g?.groupType ?? g?.type ?? g?.name ?? g?.category),
+      tokens: g?.numTokens ?? g?.estimatedTokens ?? g?.tokens ?? g?.tokenCount,
     })),
   );
 
@@ -200,7 +257,9 @@ export function mapSessionTelemetry({
     title: typeof trajectorySummary?.summary === 'string' ? trajectorySummary.summary : '',
     status,
     modelName: latestUsage?.modelName ?? null,
-    stepCount: toNonNegativeIntOrNull(trajectorySummary?.stepCount) ?? (lastStepIndex !== null ? lastStepIndex + 1 : null),
+    stepCount:
+      toNonNegativeIntOrNull(trajectorySummary?.stepCount) ??
+      (lastStepIndex !== null ? lastStepIndex + 1 : null),
     usedTokens,
     usedTokensSource,
     maxContextTokens,
@@ -208,20 +267,22 @@ export function mapSessionTelemetry({
     cacheReadTokens: latestUsage?.cacheReadTokens ?? null,
     inputTokens: latestUsage?.inputTokens ?? null,
     lastCompactedStep,
-    estimatedAfterCompaction: afterCompact,
-    compactionJustCompleted: useAfterCompaction,
+    estimatedAfterCompaction: afterCompactBool !== null ? afterCompactBool : afterCompactTokens,
+    compactionJustCompleted,
     tokenBreakdown,
   };
 }
 
 /**
  * Maps RetrieveUserQuotaSummary response to vendor-neutral QuotaSummary.
+ * F1: Supports real `data.response.groups`, `displayName`, and `remaining.case === 'remainingFraction'`.
  *
  * @param {{ data: any, stale: boolean, fetchedAt: number }} rawResult
  */
 export function mapQuotaSummary(rawResult) {
-  const groupsRaw = Array.isArray(rawResult?.data?.groups) ? rawResult.data.groups : [];
-  if (!rawResult?.data || groupsRaw.length === 0) {
+  const container = rawResult?.data?.response ?? rawResult?.data ?? null;
+  const groupsRaw = Array.isArray(container?.groups) ? container.groups : [];
+  if (!container || groupsRaw.length === 0) {
     return {
       available: false,
       groups: [],
@@ -232,13 +293,29 @@ export function mapQuotaSummary(rawResult) {
 
   const groups = groupsRaw.map((group) => {
     const bucketsRaw = Array.isArray(group?.buckets) ? group.buckets : [];
-    const buckets = bucketsRaw.map((b) => ({
-      window: typeof b?.window === 'string' ? b.window : 'unknown',
-      remainingPercent: normalizeRemainingPercent(b?.remainingFraction),
-      resetTime: typeof b?.resetTime === 'string' ? b.resetTime : null,
-    }));
+    const buckets = bucketsRaw.map((b) => {
+      const remainingFraction =
+        b?.remaining && b.remaining.case === 'remainingFraction'
+          ? b.remaining.value
+          : b?.remainingFraction;
+      return {
+        window:
+          typeof b?.window === 'string' && b.window.trim()
+            ? b.window.trim()
+            : typeof b?.windowLabel === 'string' && b.windowLabel.trim()
+              ? b.windowLabel.trim()
+              : 'unknown',
+        remainingPercent: normalizeRemainingPercent(remainingFraction),
+        resetTime: typeof b?.resetTime === 'string' ? b.resetTime : null,
+      };
+    });
+    const label =
+      (typeof group?.displayName === 'string' && group.displayName.trim()) ||
+      (typeof group?.label === 'string' && group.label.trim()) ||
+      (typeof group?.name === 'string' && group.name.trim()) ||
+      'Quota';
     return {
-      label: typeof group?.label === 'string' && group.label.trim() ? group.label.trim() : 'Quota',
+      label,
       buckets,
     };
   });
@@ -272,13 +349,20 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
       ]);
 
       const trajectorySummary = trajectoriesResp?.trajectorySummaries?.[sessionId] ?? null;
-      const approxMetaIndex = toNonNegativeIntOrNull(
-        streamFrame?.update?.contextWindowUsage?.generatorMetadataIndex,
+
+      // F1: Read real trajectorySlice.totalGeneratorMetadataLength first to avoid offset=0 4MB overflow
+      const totalMetaLen = toNonNegativeIntOrNull(
+        streamFrame?.update?.trajectorySlice?.totalGeneratorMetadataLength ??
+          streamFrame?.update?.contextWindowUsage?.generatorMetadataIndex ??
+          trajectorySummary?.generatorMetadataLength,
       );
 
-      const generatorMetadata = await lsTransport
-        .getTailGeneratorMetadata(sessionId, approxMetaIndex)
-        .catch(() => []);
+      let generatorMetadata = [];
+      if (totalMetaLen !== null && totalMetaLen > 0) {
+        generatorMetadata = await lsTransport
+          .getTailGeneratorMetadata(sessionId, totalMetaLen)
+          .catch(() => []);
+      }
 
       return mapSessionTelemetry({
         requestedSessionId: sessionId,

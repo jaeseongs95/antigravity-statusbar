@@ -71,7 +71,7 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     });
     assert.equal(badHostStatic.status, 403);
 
-    // 2. Static GET / returns index.html with strict CSP, Referrer-Policy, Cache-Control, nosniff
+    // 2. Static GET / returns index.html with strict CSP (including vscode-file:), Referrer-Policy, Cache-Control, nosniff
     const indexRes = await rawHttpRequest({
       port,
       method: 'GET',
@@ -80,6 +80,7 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     });
     assert.equal(indexRes.status, 200);
     assert.ok(indexRes.headers['content-security-policy']?.includes("default-src 'none'"));
+    assert.ok(indexRes.headers['content-security-policy']?.includes('vscode-file:'));
     assert.equal(indexRes.headers['referrer-policy'], 'no-referrer');
     assert.equal(indexRes.headers['cache-control'], 'no-store');
     assert.equal(indexRes.headers['x-content-type-options'], 'nosniff');
@@ -156,7 +157,7 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     });
     assert.equal(badToken.status, 401);
 
-    // 8. Body > 16KB -> 413 Payload Too Large
+    // 8. Body > 16KB -> 413 Payload Too Large + Connection: close (NB1)
     const hugeBody = JSON.stringify({ pad: 'a'.repeat(20 * 1024) });
     const tooLarge = await rawHttpRequest({
       port,
@@ -171,6 +172,7 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
       body: hugeBody,
     });
     assert.equal(tooLarge.status, 413);
+    assert.equal(String(tooLarge.headers.connection || '').toLowerCase(), 'close');
 
     // 9. Valid authenticated POST /api/sessions -> 200
     const okRes = await rawHttpRequest({

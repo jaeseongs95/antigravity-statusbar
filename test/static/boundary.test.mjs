@@ -91,7 +91,13 @@ test('no runtime source code touches app.asar, hooks.json, or SetMendelFlagOverr
     path.join(REPO_ROOT, 'scripts'),
   ];
 
-  const banned = [/app\.asar/i, /SetMendelFlagOverrides/, /SidecarApp\.sendMessage/, /execFileSync/];
+  const banned = [
+    /app\.asar/i,
+    /hooks\.json/i,
+    /SetMendelFlagOverrides/,
+    /SidecarApp\.sendMessage/,
+    /execFileSync/,
+  ];
   for (const dir of runtimeDirs) {
     for (const file of walkFiles(dir)) {
       const content = fs.readFileSync(file, 'utf8');
