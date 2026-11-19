@@ -1,0 +1,12 @@
+{
+  "name": "statusbar",
+  "displayName": "Statusbar",
+  "description": "Real-time session context usage, prompt cache hit rate, account quota, custom soft context limits, token breakdown, and one-click compaction.",
+  "command": "node",
+  "args": ["main.mjs"],
+  "ui": {
+    "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+    "title": "Statusbar",
+    "icon": "activity"
+  }
+}

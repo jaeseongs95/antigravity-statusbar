@@ -2,7 +2,7 @@
 
 **Languages:** **English ([README.md](./README.md))** | **[한국어 (README.ko.md)](./README.ko.md)**
 
-<One-paragraph formal summary of the software's purpose, supported runtime environments, and core capabilities.>
+<One-paragraph formal summary of the official Antigravity Native Plugin + Sidecar architecture, supported runtime environments, and core capabilities.>
 
 ---
 
@@ -10,12 +10,11 @@
 
 1. [Overview & Key Features](#overview--key-features)
 2. [System Requirements & Compatibility](#system-requirements--compatibility)
-3. [Desktop Application Installation](#desktop-application-installation)
-4. [Remote Web Deployment (Bookmarklet & UserScript)](#remote-web-deployment-bookmarklet--userscript)
-5. [Configuration & Host Adapter Architecture](#configuration--host-adapter-architecture)
-6. [Repository Structure](#repository-structure)
-7. [Verification & Testing](#verification--testing)
-8. [License](#license)
+3. [Native Plugin Installation](#native-plugin-installation)
+4. [Configuration & Ports & Adapters Architecture](#configuration--ports--adapters-architecture)
+5. [Repository Structure](#repository-structure)
+6. [Verification & Testing](#verification--testing)
+7. [License](#license)
 
 ---
 
@@ -28,31 +27,25 @@
 
 ## System Requirements & Compatibility
 
-- **Node.js**: `>= 18.0.0`
-- **Supported Host Versions**: `<Supported Host Version Range>`
+- **Node.js**: `>= 20.0.0`
+- **Supported Host Versions**: `<Supported Antigravity Native Plugin Host Version Range>`
 
 ---
 
-## Desktop Application Installation
+## Native Plugin Installation
 
 ```bash
 git clone https://github.com/<owner>/<repo>.git
 cd <repo>
-npm test
-npm run <install-script>
+npm ci --omit=dev
+npm run install-plugin
 ```
 
 ---
 
-## Remote Web Deployment (Bookmarklet & UserScript)
+## Configuration & Ports & Adapters Architecture
 
-<Formal step-by-step instructions for Bookmarklet and UserScript installation.>
-
----
-
-## Configuration & Host Adapter Architecture
-
-<Description of vendor-neutral core boundaries and configurable `hostConfig` adapter options.>
+<Description of vendor-neutral `src/core/` and `src/ui/` boundaries and isolated host adapters under `src/adapters/`.>
 
 ---
 
@@ -60,10 +53,16 @@ npm run <install-script>
 
 ```text
 <repo>/
+├── plugin.json
+├── sidecars/
 ├── src/
-├── dist/
+│   ├── core/
+│   ├── adapters/
+│   └── ui/
 ├── scripts/
+│   └── install-plugin.mjs
 ├── docs/
+│   ├── ARCHITECTURE_V3.md
 │   ├── TEST_CASES.md
 │   └── templates/
 │       ├── README_TEMPLATE.md
@@ -71,6 +70,7 @@ npm run <install-script>
 ├── test/
 ├── README.md
 ├── README.ko.md
+├── RELEASE_NOTES.md
 ├── LICENSE
 └── package.json
 ```
@@ -80,6 +80,7 @@ npm run <install-script>
 ## Verification & Testing
 
 ```bash
+npm ci
 npm test
 ```
 
