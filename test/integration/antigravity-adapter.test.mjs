@@ -198,6 +198,51 @@ test('compaction-adapter rejects UNC exe paths and runs bounded spawn fallback o
   await adapter.dispose();
 });
 
+test('compaction-adapter appends custom compact prompt to SendUserCascadeMessage items and agentapi fallback', async () => {
+  const rpcCalls = [];
+  let rpcShouldFail = false;
+  const fakeTransport = {
+    callUnaryRpc: async (method, payload) => {
+      rpcCalls.push({ method, payload });
+      if (rpcShouldFail) throw new Error('RPC unavailable');
+      return {};
+    },
+  };
+
+  const spawnArgsList = [];
+  const adapter = createAntigravityCompactionAdapter({
+    lsTransport: fakeTransport,
+    agentApiExePath: process.execPath,
+    spawnFn: (_exe, args, opts) => {
+      spawnArgsList.push(args);
+      return spawn(process.execPath, ['-e', 'process.exit(0)'], {
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        signal: opts.signal,
+      });
+    },
+  });
+
+  // 1. Primary RPC with custom prompt appends { text: ' <prompt>' } after slashCommand
+  const res1 = await adapter.compactSession('sess-p', { prompt: '핵심 결정사항만 유지해줘' });
+  assert.equal(res1.accepted, true);
+  assert.equal(rpcCalls.length, 1);
+  assert.equal(rpcCalls[0].method, 'SendUserCascadeMessage');
+  assert.equal(rpcCalls[0].payload.items.length, 2);
+  assert.equal(rpcCalls[0].payload.items[0].item.slashCommand.info.name, 'compact');
+  assert.deepEqual(rpcCalls[0].payload.items[1], { text: ' 핵심 결정사항만 유지해줘' });
+
+  // 2. Fallback spawn receives `/compact <prompt>`
+  rpcShouldFail = true;
+  const res2 = await adapter.compactSession('sess-p', { prompt: '핵심 결정사항만 유지해줘' });
+  assert.equal(res2.accepted, true);
+  assert.equal(res2.method, 'agentapi');
+  assert.deepEqual(spawnArgsList[0], ['agentapi', 'send-message', 'sess-p', '/compact 핵심 결정사항만 유지해줘']);
+
+  await adapter.dispose();
+});
+
 test('R4-F1 (D-0020): async dispose() terminates live SIGTERM-trapping child via SIGKILL escalation', async () => {
   let spawnedChild = null;
   const adapter = createAntigravityCompactionAdapter({

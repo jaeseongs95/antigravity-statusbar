@@ -4,12 +4,14 @@ import test from 'node:test';
 import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
 import { DomainError, ERROR_CODES } from '../../src/core/i18n/error-codes.mjs';
 import {
+  MAX_COMPACT_PROMPT_LEN,
   MAX_CUSTOM_LIMIT,
   MAX_SESSION_OVERRIDES,
   MIN_CUSTOM_LIMIT,
   evaluateContextThreshold,
   pruneSessionOverrides,
   resolveEffectiveLimit,
+  validateCompactPrompt,
   validateCustomLimit,
   validateSessionId,
 } from '../../src/core/model/context-policy.mjs';
@@ -372,4 +374,63 @@ test('large-session compaction detects completion via significant token drop whe
   const snap2 = await service.getSessionSnapshot('sess-large');
   assert.equal(snap2.compaction.inProgress, false);
   assert.equal(snap2.compaction.status, 'completed');
+});
+
+test('compactPrompt validates bounds, persists via updateSettings, and forwards to compactSession', async () => {
+  assert.equal(validateCompactPrompt(null), '');
+  assert.equal(validateCompactPrompt('  요약해줘  '), '요약해줘');
+  assert.throws(
+    () => validateCompactPrompt('a'.repeat(MAX_COMPACT_PROMPT_LEN + 1)),
+    (err) => err instanceof DomainError && err.code === ERROR_CODES.INVALID_SETTINGS_PATCH,
+  );
+  assert.throws(
+    () => validateCompactPrompt('bad\0null'),
+    (err) => err instanceof DomainError && err.code === ERROR_CODES.INVALID_SETTINGS_PATCH,
+  );
+
+  const settingsState = {
+    locale: 'ko',
+    autoCompact: true,
+    compactPrompt: '',
+    defaultCustomLimit: null,
+    sessions: new Map(),
+  };
+  const receivedPrompts = [];
+
+  const service = createStatusbarService({
+    clock: () => 7_000_000,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => ({
+        sessionId: 'sess-prompt',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        usedTokens: 50_000,
+        maxContextTokens: 512_000,
+        lastCompactedStep: null,
+        tokenBreakdown: [],
+      }),
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: 0 }),
+    },
+    compactionPort: {
+      compactSession: async (_sid, opts) => {
+        receivedPrompts.push(opts?.prompt ?? '');
+        return { accepted: true, method: 'rpc' };
+      },
+    },
+    settingsPort: {
+      read: async () => settingsState,
+      update: async (patch) => {
+        if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
+          settingsState.compactPrompt = patch.compactPrompt;
+        }
+        return settingsState;
+      },
+    },
+  });
+
+  const updated = await service.updateSettings({ compactPrompt: '  수정 중인 파일 위주로 요약  ' });
+  assert.equal(updated.compactPrompt, '수정 중인 파일 위주로 요약');
+
+  await service.requestCompaction('sess-prompt');
+  assert.deepEqual(receivedPrompts, ['수정 중인 파일 위주로 요약']);
 });

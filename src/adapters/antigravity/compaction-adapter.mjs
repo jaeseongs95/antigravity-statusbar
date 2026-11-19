@@ -160,24 +160,30 @@ export function createAntigravityCompactionAdapter({
   }
 
   return {
-    async compactSession(sessionId) {
+    async compactSession(sessionId, options = {}) {
+      const prompt = typeof options?.prompt === 'string' ? options.prompt.trim() : '';
+      const items = [
+        {
+          item: {
+            slashCommand: {
+              info: {
+                name: 'compact',
+                type: 'SLASH_COMMAND_TYPE_SYSTEM',
+                icon: 'collapse_all',
+              },
+            },
+          },
+        },
+      ];
+      if (prompt) {
+        items.push({ text: ` ${prompt}` });
+      }
+
       // 1. Primary path: async SendUserCascadeMessage RPC with structured slashCommand ContextScopeItem (F1)
       try {
         await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
           cascadeId: sessionId,
-          items: [
-            {
-              item: {
-                slashCommand: {
-                  info: {
-                    name: 'compact',
-                    type: 'SLASH_COMMAND_TYPE_SYSTEM',
-                    icon: 'collapse_all',
-                  },
-                },
-              },
-            },
-          ],
+          items,
         });
         return { accepted: true, method: 'rpc' };
       } catch (rpcErr) {
@@ -191,7 +197,8 @@ export function createAntigravityCompactionAdapter({
           };
         }
 
-        const fallbackResult = await runFallbackSpawn(realExe, sessionId, '/compact');
+        const fallbackMsg = prompt ? `/compact ${prompt}` : '/compact';
+        const fallbackResult = await runFallbackSpawn(realExe, sessionId, fallbackMsg);
         if (fallbackResult.accepted) {
           return fallbackResult;
         }
@@ -207,6 +214,9 @@ export function createAntigravityCompactionAdapter({
       const trimmed = String(commandText || '').trim();
       if (trimmed === '/compact') {
         return this.compactSession(sessionId);
+      }
+      if (trimmed.startsWith('/compact ')) {
+        return this.compactSession(sessionId, { prompt: trimmed.slice(9).trim() });
       }
       const realExe = resolveSafeAgentApiExe(agentApiExePath);
       if (realExe) {

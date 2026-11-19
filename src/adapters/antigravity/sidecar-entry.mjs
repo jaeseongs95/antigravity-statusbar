@@ -371,7 +371,10 @@ export function createSidecarServer({
         return;
       }
       if (pathname === '/api/compact') {
-        const result = await service.requestCompaction(body.sessionId);
+        const result = await service.requestCompaction(
+          body.sessionId,
+          body.prompt !== undefined ? { prompt: body.prompt } : undefined,
+        );
         sendJson(res, 200, result, corsHeaders);
         return;
       }

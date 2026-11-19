@@ -7,6 +7,7 @@ import {
   resolveEffectiveLimit,
   validateAddonDescriptor,
   validateAddonId,
+  validateCompactPrompt,
   validateCustomButtons,
   validateCustomLimit,
   validateDisabledAddonIds,
@@ -235,6 +236,7 @@ export function createStatusbarService({
         exceededSoftLimit: threshold.exceededSoftLimit,
         autoCompact: autoCompactEnabled,
         autoCompactTriggered,
+        compactPrompt: typeof settings.compactPrompt === 'string' ? settings.compactPrompt : '',
         cacheHitPercent: telemetry.cacheHitPercent ?? null,
         cacheReadTokens: telemetry.cacheReadTokens ?? null,
         inputTokens: telemetry.inputTokens ?? null,
@@ -268,6 +270,7 @@ export function createStatusbarService({
         locale: settings.locale,
         defaultCustomLimit: settings.defaultCustomLimit,
         autoCompact: settings.autoCompact !== false,
+        compactPrompt: typeof settings.compactPrompt === 'string' ? settings.compactPrompt : '',
         customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
         disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
           ? settings.disabledRuntimeAddonIds
@@ -305,6 +308,11 @@ export function createStatusbarService({
 
       if (Object.prototype.hasOwnProperty.call(patch, 'autoCompact')) {
         normalizedPatch.autoCompact = Boolean(patch.autoCompact);
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
+        normalizedPatch.compactPrompt = validateCompactPrompt(patch.compactPrompt);
         hasChange = true;
       }
 
@@ -349,6 +357,7 @@ export function createStatusbarService({
         locale: updated.locale,
         defaultCustomLimit: updated.defaultCustomLimit,
         autoCompact: updated.autoCompact !== false,
+        compactPrompt: typeof updated.compactPrompt === 'string' ? updated.compactPrompt : '',
         customButtons: Array.isArray(updated.customButtons) ? updated.customButtons : [],
         disabledRuntimeAddonIds: Array.isArray(updated.disabledRuntimeAddonIds)
           ? updated.disabledRuntimeAddonIds
@@ -409,6 +418,9 @@ export function createStatusbarService({
       if (command === '/compact') {
         return this.requestCompaction(sessionId);
       }
+      if (command.startsWith('/compact ')) {
+        return this.requestCompaction(sessionId, { prompt: command.slice(9).trim() });
+      }
       if (typeof compactionPort.sendCommand !== 'function') {
         throw new DomainError(
           ERROR_CODES.COMPACTION_FAILED,
@@ -436,6 +448,8 @@ export function createStatusbarService({
     async requestCompaction(rawSessionId, options = {}) {
       const sessionId = validateSessionId(rawSessionId);
       const trigger = options?.trigger === 'auto' ? 'auto' : 'manual';
+      const explicitPrompt =
+        options?.prompt !== undefined ? validateCompactPrompt(options.prompt) : null;
       const now = clock();
       pruneCompactingSessions(now);
 
@@ -471,6 +485,18 @@ export function createStatusbarService({
 
       let baselineCompactedStep = null;
       let baselineUsedTokens = null;
+      let effectivePrompt = explicitPrompt ?? '';
+      if (explicitPrompt === null) {
+        try {
+          const currentSettings = await settingsPort.read();
+          if (typeof currentSettings?.compactPrompt === 'string') {
+            effectivePrompt = currentSettings.compactPrompt.trim();
+          }
+        } catch {
+          // Non-fatal: fall back to default /compact without custom prompt
+        }
+      }
+
       try {
         const currentTelemetry = await telemetryPort.getSessionTelemetry(sessionId);
         if (currentTelemetry && currentTelemetry.sessionId === sessionId) {
@@ -488,7 +514,10 @@ export function createStatusbarService({
       }
 
       try {
-        const result = await compactionPort.compactSession(sessionId);
+        const result = await compactionPort.compactSession(
+          sessionId,
+          effectivePrompt ? { prompt: effectivePrompt } : undefined,
+        );
         if (!result || result.accepted !== true) {
           // F2 & F5: Release ONLY this attempt's mutex immediately on failure
           releaseOwnMutex();

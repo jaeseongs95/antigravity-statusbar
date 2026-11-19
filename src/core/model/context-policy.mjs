@@ -6,6 +6,7 @@ export const MAX_SESSION_OVERRIDES = 200;
 export const MAX_CUSTOM_BUTTONS = 20;
 export const MAX_BUTTON_LABEL_LEN = 24;
 export const MAX_BUTTON_COMMAND_LEN = 500;
+export const MAX_COMPACT_PROMPT_LEN = 1000;
 
 const CUSTOM_BUTTON_ID_PATTERN = /^[A-Za-z0-9_-]{1,48}$/;
 
@@ -62,6 +63,43 @@ export function validateCustomLimit(limit) {
     );
   }
   return limit;
+}
+
+/**
+ * Validates optional custom instructions appended to `/compact`.
+ * Empty string or null clears the custom prompt (uses default `/compact`).
+ *
+ * @param {unknown} rawPrompt
+ * @returns {string}
+ */
+export function validateCompactPrompt(rawPrompt) {
+  if (rawPrompt === null || rawPrompt === undefined) {
+    return '';
+  }
+  if (typeof rawPrompt !== 'string') {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'compactPrompt must be a string or null.',
+    );
+  }
+  if (rawPrompt.includes('\0')) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'compactPrompt cannot contain null bytes.',
+    );
+  }
+  const trimmed = rawPrompt.trim();
+  if (trimmed.length > MAX_COMPACT_PROMPT_LEN) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      `compactPrompt must be at most ${MAX_COMPACT_PROMPT_LEN} characters.`,
+      { max: MAX_COMPACT_PROMPT_LEN, length: trimmed.length },
+    );
+  }
+  return trimmed;
 }
 
 /**

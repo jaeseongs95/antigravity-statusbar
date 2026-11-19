@@ -8,6 +8,7 @@ import { DEFAULT_LOCALE, DomainError, ERROR_CODES, normalizeLocale } from '../..
 import {
   MAX_SESSION_OVERRIDES,
   pruneSessionOverrides,
+  validateCompactPrompt,
   validateCustomButtons,
   validateCustomLimit,
   validateDisabledAddonIds,
@@ -26,6 +27,7 @@ function createDefaultState() {
     defaultCustomLimit: null,
     defaultCustomLimitUpdatedAt: 0,
     autoCompact: true,
+    compactPrompt: '',
     customButtons: [],
     customButtonsUpdatedAt: 0,
     disabledRuntimeAddonIds: [],
@@ -69,6 +71,14 @@ function parsePersistedState(raw) {
     state.autoCompact = raw.autoCompact;
   }
 
+  if (typeof raw.compactPrompt === 'string') {
+    try {
+      state.compactPrompt = validateCompactPrompt(raw.compactPrompt);
+    } catch {
+      state.compactPrompt = '';
+    }
+  }
+
   if (Array.isArray(raw.customButtons)) {
     try {
       state.customButtons = validateCustomButtons(raw.customButtons);
@@ -107,6 +117,7 @@ function serializeState(state) {
       defaultCustomLimit: state.defaultCustomLimit,
       defaultCustomLimitUpdatedAt: state.defaultCustomLimitUpdatedAt,
       autoCompact: state.autoCompact,
+      compactPrompt: state.compactPrompt,
       customButtons: state.customButtons,
       customButtonsUpdatedAt: state.customButtonsUpdatedAt,
       disabledRuntimeAddonIds: state.disabledRuntimeAddonIds,
@@ -260,6 +271,7 @@ export function createJsonSettingsStore({
         locale: state.locale,
         defaultCustomLimit: state.defaultCustomLimit,
         autoCompact: state.autoCompact,
+        compactPrompt: state.compactPrompt,
         customButtons: state.customButtons.map((b) => ({ ...b })),
         disabledRuntimeAddonIds: [...state.disabledRuntimeAddonIds],
         sessions: new Map(state.sessions),
@@ -284,6 +296,10 @@ export function createJsonSettingsStore({
 
         if (Object.prototype.hasOwnProperty.call(patch, 'autoCompact')) {
           current.autoCompact = Boolean(patch.autoCompact);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
+          current.compactPrompt = validateCompactPrompt(patch.compactPrompt);
         }
 
         if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
@@ -315,6 +331,7 @@ export function createJsonSettingsStore({
           locale: current.locale,
           defaultCustomLimit: current.defaultCustomLimit,
           autoCompact: current.autoCompact,
+          compactPrompt: current.compactPrompt,
           customButtons: current.customButtons.map((b) => ({ ...b })),
           disabledRuntimeAddonIds: [...current.disabledRuntimeAddonIds],
           sessions: new Map(current.sessions),

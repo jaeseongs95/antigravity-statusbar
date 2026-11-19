@@ -356,6 +356,31 @@ const INLINE_STYLES = `
   flex: 1;
   font-variant-numeric: tabular-nums;
 }
+.agy-inline-pop-textarea {
+  width: 100%;
+  min-height: 48px;
+  max-height: 110px;
+  resize: vertical;
+  box-sizing: border-box;
+  background: #131417;
+  color: #e6e7ea;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 8px;
+}
+.agy-inline-pop-textarea:focus-visible {
+  border-color: #4ea1ff;
+  outline: none;
+}
+.agy-inline-pop-actions-end {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .agy-inline-pop-feedback {
   font-size: 11px;
   color: #8cc8ff;
@@ -417,6 +442,10 @@ export function inlineStatusbarBootstrap(cfg) {
       limitTitle: 'Session Context Limit',
       limitHint: 'Saved per session. Runs /compact automatically when the limit is reached.',
       autoCompactLabel: 'Auto /compact on limit',
+      compactPromptTitle: 'Compaction Prompt (/compact …)',
+      compactPromptPlaceholder: 'e.g. Focus on modified files and remaining tasks (blank = default /compact)',
+      save: 'Save',
+      reset: 'Reset',
       limitPlaceholder: 'Custom tokens (32,000 - 980,000)',
       hostDefault: 'Host default',
       scopeSession: 'This session',
@@ -464,6 +493,10 @@ export function inlineStatusbarBootstrap(cfg) {
       limitTitle: '세션 컨텍스트 한도',
       limitHint: '세션마다 따로 저장되며, 한도에 도달하면 자동으로 /compact를 실행합니다.',
       autoCompactLabel: '한도 도달 시 자동 /compact',
+      compactPromptTitle: '컴팩션 요약 문구 (/compact …)',
+      compactPromptPlaceholder: '예: 수정 중인 파일과 남은 작업 위주로 요약해줘 (비우면 기본 /compact)',
+      save: '저장',
+      reset: '초기화',
       limitPlaceholder: '직접 입력 (32,000 ~ 980,000)',
       hostDefault: '호스트 기본값',
       scopeSession: '현재 세션',
@@ -509,6 +542,7 @@ export function inlineStatusbarBootstrap(cfg) {
   let disposed = false;
   let locale = 'ko';
   let autoCompactEnabled = true;
+  let compactPrompt = '';
   let defaultCustomLimit = null;
   const sessionLimits = new Map();
   let customButtons = [];
@@ -781,6 +815,35 @@ export function inlineStatusbarBootstrap(cfg) {
     limitSection.appendChild(limitStatusEl);
     limitSection.appendChild(autoCompactRow);
 
+    const compactPromptSection = document.createElement('div');
+    compactPromptSection.className = 'agy-inline-pop-section';
+    const compactPromptTitle = document.createElement('div');
+    compactPromptTitle.className = 'agy-inline-pop-subtitle';
+    compactPromptTitle.textContent = t().compactPromptTitle;
+
+    const compactPromptInput = document.createElement('textarea');
+    compactPromptInput.className = 'agy-inline-pop-textarea';
+    compactPromptInput.rows = 2;
+    compactPromptInput.maxLength = 1000;
+    compactPromptInput.placeholder = t().compactPromptPlaceholder;
+
+    const compactPromptActions = document.createElement('div');
+    compactPromptActions.className = 'agy-inline-pop-actions-end';
+    const compactPromptResetBtn = document.createElement('button');
+    compactPromptResetBtn.type = 'button';
+    compactPromptResetBtn.className = 'agy-inline-btn';
+    compactPromptResetBtn.textContent = t().reset;
+    const compactPromptSaveBtn = document.createElement('button');
+    compactPromptSaveBtn.type = 'button';
+    compactPromptSaveBtn.className = 'agy-inline-btn agy-inline-btn-primary';
+    compactPromptSaveBtn.textContent = t().save;
+    compactPromptActions.appendChild(compactPromptResetBtn);
+    compactPromptActions.appendChild(compactPromptSaveBtn);
+
+    compactPromptSection.appendChild(compactPromptTitle);
+    compactPromptSection.appendChild(compactPromptInput);
+    compactPromptSection.appendChild(compactPromptActions);
+
     const popFeedback = document.createElement('div');
     popFeedback.className = 'agy-inline-pop-feedback';
 
@@ -828,6 +891,7 @@ export function inlineStatusbarBootstrap(cfg) {
     popEl.appendChild(popMeta);
     popEl.appendChild(breakdownSection);
     popEl.appendChild(limitSection);
+    popEl.appendChild(compactPromptSection);
     popEl.appendChild(addonSection);
     popEl.appendChild(langSection);
     popEl.appendChild(popFeedback);
@@ -852,9 +916,11 @@ export function inlineStatusbarBootstrap(cfg) {
       pendingRefresh: false,
       compacting: false,
       limitDirty: false,
+      promptDirty: false,
       lastPresetsKey: '',
       lastAddonsKey: '',
       syncedLimitKey: '',
+      syncedPromptVal: null,
     };
 
     function formatTemplate(tpl, vars) {
@@ -927,6 +993,17 @@ export function inlineStatusbarBootstrap(cfg) {
       presetSelect.value = savedVal !== null && PRESETS.includes(savedVal) ? strVal : '';
     }
 
+    function syncCompactPrompt(force = false) {
+      if (!force) {
+        if (state.promptDirty) return;
+        if (state.syncedPromptVal === compactPrompt) return;
+        if (document.activeElement === compactPromptInput) return;
+      }
+      state.syncedPromptVal = compactPrompt;
+      state.promptDirty = false;
+      compactPromptInput.value = compactPrompt;
+    }
+
     function setPopoverOpen(open) {
       const nextOpen = Boolean(open);
       const wasOpen = state.popOpen;
@@ -937,6 +1014,7 @@ export function inlineStatusbarBootstrap(cfg) {
       if (nextOpen && !wasOpen) {
         setText(popFeedback, '');
         syncLimitControls(true);
+        syncCompactPrompt(true);
       }
     }
 
@@ -1082,11 +1160,20 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(optSession, tr.scopeSession);
       setText(optDefault, tr.scopeDefault);
       setText(applyBtn, tr.apply);
+      setText(compactPromptTitle, tr.compactPromptTitle);
+      compactPromptInput.placeholder = tr.compactPromptPlaceholder;
+      setText(compactPromptResetBtn, tr.reset);
+      setText(compactPromptSaveBtn, tr.save);
       const snap = state.snapshot;
+      if (snap && typeof snap.compactPrompt === 'string' && !state.promptDirty) {
+        compactPrompt = snap.compactPrompt;
+      }
+      syncCompactPrompt(false);
       const isBackendCompacting = Boolean(snap?.compaction?.inProgress);
       const isCompactingNow = state.compacting || isBackendCompacting;
       compactBtn.disabled = isCompactingNow || !getSessionId();
       setText(compactBtn, isCompactingNow ? tr.compacting : tr.compact);
+      compactBtn.title = compactPrompt ? `/compact ${compactPrompt}` : '/compact';
       setText(addonTitle, tr.addonsTitle);
       setText(langRowLabel, tr.langLabel);
       langSelect.setAttribute('aria-label', tr.langLabel);
@@ -1420,6 +1507,33 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
+    async function saveCompactPromptValue(rawValue) {
+      const nextPrompt = String(rawValue || '').trim();
+      try {
+        const updated = await apiPost('/api/settings/update', { compactPrompt: nextPrompt });
+        applySettingsPayload(updated);
+        compactPrompt = typeof updated?.compactPrompt === 'string' ? updated.compactPrompt : nextPrompt;
+        state.promptDirty = false;
+        state.syncedPromptVal = compactPrompt;
+        compactPromptInput.value = compactPrompt;
+        for (const ctrl of barControllers.values()) ctrl.render();
+        popFeedback.className = 'agy-inline-pop-feedback';
+        setText(popFeedback, t().applied);
+      } catch (err) {
+        popFeedback.className = 'agy-inline-pop-feedback err';
+        setText(popFeedback, err?.message || 'Error');
+      }
+    }
+
+    function handleSaveCompactPrompt() {
+      return saveCompactPromptValue(compactPromptInput.value);
+    }
+
+    function handleResetCompactPrompt() {
+      compactPromptInput.value = '';
+      return saveCompactPromptValue('');
+    }
+
     async function applyLocale(next) {
       if (next !== 'ko' && next !== 'en') return;
       locale = next;
@@ -1470,6 +1584,17 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(popFeedback, '');
       syncLimitControls(true);
     };
+    const onPromptInput = () => {
+      state.promptDirty = true;
+      setText(popFeedback, '');
+    };
+    const onPromptKeyDown = (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleSaveCompactPrompt();
+      }
+    };
     const onLangChange = () => {
       applyLocale(langSelect.value);
     };
@@ -1485,6 +1610,10 @@ export function inlineStatusbarBootstrap(cfg) {
     compactBtn.addEventListener('click', handleCompact);
     applyBtn.addEventListener('click', handleApplyLimit);
     autoCompactBtn.addEventListener('click', handleToggleAutoCompact);
+    compactPromptSaveBtn.addEventListener('click', handleSaveCompactPrompt);
+    compactPromptResetBtn.addEventListener('click', handleResetCompactPrompt);
+    compactPromptInput.addEventListener('input', onPromptInput);
+    compactPromptInput.addEventListener('keydown', onPromptKeyDown);
     langSelect.addEventListener('change', onLangChange);
     scopeSelect.addEventListener('change', onScopeChange);
     presetSelect.addEventListener('change', onPresetChange);
@@ -1590,6 +1719,9 @@ export function inlineStatusbarBootstrap(cfg) {
     }
     if (typeof settings.autoCompact === 'boolean') {
       autoCompactEnabled = settings.autoCompact;
+    }
+    if (typeof settings.compactPrompt === 'string') {
+      compactPrompt = settings.compactPrompt;
     }
     if (settings.defaultCustomLimit === null || typeof settings.defaultCustomLimit === 'number') {
       defaultCustomLimit = settings.defaultCustomLimit;
