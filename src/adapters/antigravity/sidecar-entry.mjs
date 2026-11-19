@@ -44,7 +44,8 @@ function timingSafeTokenMatch(expectedDigest, candidate) {
 }
 
 const LOOPBACK_HOST_RE = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::(\d{1,5}))?$/;
-const LOOPBACK_ORIGIN_RE = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::(\d{1,5}))?$/;
+const ALLOWED_ORIGIN_RE =
+  /^(?:https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])|https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google\.com)(?::(\d{1,5}))?$/;
 
 function isValidPortString(portStr) {
   if (portStr === undefined) return true;
@@ -68,7 +69,7 @@ function isAllowedLoopbackOrigin(originHeader) {
   if (normalized === 'null') {
     return false;
   }
-  const match = LOOPBACK_ORIGIN_RE.exec(normalized);
+  const match = ALLOWED_ORIGIN_RE.exec(normalized);
   return Boolean(match && isValidPortString(match[1]));
 }
 
@@ -284,6 +285,7 @@ export function createSidecarServer({
         vary: 'Origin',
         'access-control-allow-methods': 'POST, OPTIONS',
         'access-control-allow-headers': 'content-type, x-statusbar-token',
+        'access-control-allow-private-network': 'true',
         'access-control-max-age': '600',
       });
       res.end();

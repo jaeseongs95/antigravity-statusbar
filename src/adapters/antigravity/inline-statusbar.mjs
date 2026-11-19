@@ -565,37 +565,41 @@ export function inlineStatusbarBootstrap(cfg) {
         const usedStr = formatTokens(snap.usedTokens);
         const limitStr = formatTokens(snap.effectiveLimit);
         setText(ctxTextEl, `${tr.ctx} ${pct.toFixed(0)}% (${usedStr} / ${limitStr})`);
+        const isSoftExceeded = Boolean(snap.exceededSoftLimit || snap.softLimitExceeded);
         fillEl.style.width = `${pct}%`;
         fillEl.className =
           'agy-inline-bar-fill' +
-          (snap.softLimitExceeded || pct >= 90 ? ' danger' : pct >= 75 ? ' warn' : '');
+          (isSoftExceeded || pct >= 90 ? ' danger' : pct >= 75 ? ' warn' : '');
 
-        if (snap.softLimitExceeded) {
+        if (isSoftExceeded) {
           softBadgeEl.style.display = '';
           setText(softBadgeEl, tr.softLimit);
         } else {
           softBadgeEl.style.display = 'none';
         }
 
-        const cachePct =
-          snap.cache && typeof snap.cache.hitRatePercent === 'number'
-            ? `${snap.cache.hitRatePercent.toFixed(0)}%`
-            : '--';
+        const rawCachePct =
+          typeof snap.cacheHitPercent === 'number'
+            ? snap.cacheHitPercent
+            : snap.cache && typeof snap.cache.hitRatePercent === 'number'
+              ? snap.cache.hitRatePercent
+              : null;
+        const cachePct = rawCachePct !== null ? `${rawCachePct.toFixed(0)}%` : '--';
         setText(cacheEl, `${tr.cache} ${cachePct}`);
 
         setText(popModel, `${tr.model}: ${snap.modelName || '--'}`);
         setText(popSteps, `${tr.steps}: ${snap.stepCount ?? '--'}`);
 
         clearChildren(breakdownList);
-        const bd = snap.breakdown || {};
-        for (const [k, v] of Object.entries(bd)) {
-          if (typeof v !== 'number' || v <= 0) continue;
+        const bdList = Array.isArray(snap.tokenBreakdown) ? snap.tokenBreakdown : [];
+        for (const item of bdList) {
+          if (!item || typeof item.tokens !== 'number' || item.tokens <= 0) continue;
           const li = document.createElement('li');
           li.className = 'agy-inline-pop-row';
           const lbl = document.createElement('span');
-          lbl.textContent = k;
+          lbl.textContent = item.label || item.key || 'Other';
           const val = document.createElement('span');
-          val.textContent = formatTokens(v);
+          val.textContent = formatTokens(item.tokens);
           li.appendChild(lbl);
           li.appendChild(val);
           breakdownList.appendChild(li);
@@ -612,14 +616,30 @@ export function inlineStatusbarBootstrap(cfg) {
       }
 
       if (quotaState && quotaState.available && Array.isArray(quotaState.groups) && quotaState.groups.length > 0) {
-        const minPct = Math.min(
-          ...quotaState.groups.map((g) => (typeof g.remainingPercent === 'number' ? g.remainingPercent : 100)),
-        );
-        const staleTag = quotaState.stale ? ` (${tr.stale})` : '';
-        setText(quotaEl, `${tr.quota} ${Math.round(minPct)}%${staleTag}`);
-        quotaEl.title = quotaState.groups
-          .map((g) => `${g.label || g.groupId}: ${Math.round(g.remainingPercent ?? 0)}%`)
-          .join('\n');
+        const allBuckets = [];
+        for (const g of quotaState.groups) {
+          const buckets = Array.isArray(g.buckets) ? g.buckets : [];
+          for (const b of buckets) {
+            if (typeof b.remainingPercent === 'number') {
+              allBuckets.push({
+                label: g.label || 'Quota',
+                window: b.window || '',
+                pct: b.remainingPercent,
+              });
+            }
+          }
+        }
+        if (allBuckets.length > 0) {
+          const minPct = Math.min(...allBuckets.map((b) => b.pct));
+          const staleTag = quotaState.stale ? ` (${tr.stale})` : '';
+          setText(quotaEl, `${tr.quota} ${Math.round(minPct)}%${staleTag}`);
+          quotaEl.title = allBuckets
+            .map((b) => `${b.label}${b.window ? ` (${b.window})` : ''}: ${Math.round(b.pct)}%`)
+            .join('\n');
+        } else {
+          setText(quotaEl, `${tr.quota} --`);
+          quotaEl.title = '';
+        }
       } else {
         setText(quotaEl, `${tr.quota} --`);
         quotaEl.title = '';

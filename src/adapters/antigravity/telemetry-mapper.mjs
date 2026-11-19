@@ -472,14 +472,34 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
     },
 
     async getSessionTelemetry(sessionId) {
-      const [streamFrame, trajectoriesResp] = await Promise.all([
-        lsTransport.readFirstStreamFrame('StreamAgentStateUpdates', {
-          conversationId: sessionId,
-        }),
+      const [streamOutcome, trajectoriesResp] = await Promise.all([
+        lsTransport
+          .readFirstStreamFrame('StreamAgentStateUpdates', {
+            conversationId: sessionId,
+          })
+          .then((frame) => ({ ok: true, frame }))
+          .catch((error) => ({ ok: false, error })),
         lsTransport.callUnaryRpc('GetAllCascadeTrajectories', {}).catch(() => null),
       ]);
 
       const trajectorySummary = trajectoriesResp?.trajectorySummaries?.[sessionId] ?? null;
+
+      let streamFrame;
+      if (streamOutcome.ok) {
+        streamFrame = streamOutcome.frame;
+      } else if (trajectorySummary) {
+        // Large trajectories can exceed StreamAgentStateUpdates frame cap (e.g., >4MB).
+        // Fall back to verified trajectorySummary + bounded tail generatorMetadata while
+        // preserving strict sessionId verification (D-0033).
+        streamFrame = {
+          update: {
+            conversationId: sessionId,
+            status: trajectorySummary.status,
+          },
+        };
+      } else {
+        throw streamOutcome.error;
+      }
 
       // F4: Read trajectorySlice.totalGeneratorMetadataLength first; fall back to bounded tail probe if absent
       const totalMetaLen = toNonNegativeIntOrNull(
