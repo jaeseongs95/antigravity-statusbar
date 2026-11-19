@@ -5,12 +5,14 @@ import {
   PRESET_LIMITS,
   evaluateContextThreshold,
   resolveEffectiveLimit,
+  resolveModelCustomLimit,
   validateAddonDescriptor,
   validateAddonId,
   validateCompactPrompt,
   validateCustomButtons,
   validateCustomLimit,
   validateDisabledAddonIds,
+  validateModelName,
   validateSessionId,
 } from '../model/context-policy.mjs';
 import {
@@ -44,7 +46,18 @@ export function createStatusbarService({
   const compactingSessions = new Map();
   /** @type {Map<string, { cooldownUntil: number, waitingForDrop: boolean, lastTriggeredTokens: number | null, lastTriggeredStep: number | null }>} */
   const autoCompactState = new Map();
+  /** @type {Map<string, { code: string, message: string, at: number }>} */
+  const lastAutoCompactErrors = new Map();
   let attemptSeq = 0;
+
+  function formatModelLimits(modelLimitsMap) {
+    if (!(modelLimitsMap instanceof Map)) return [];
+    return Array.from(modelLimitsMap.entries()).map(([model, entry]) => ({
+      model,
+      limit: entry.limit,
+      updatedAt: entry.updatedAt,
+    }));
+  }
 
   function pruneCompactingSessions(now) {
     for (const [sid, entry] of compactingSessions.entries()) {
@@ -62,6 +75,7 @@ export function createStatusbarService({
   function getCompactionState(sessionId, telemetry, now) {
     pruneCompactingSessions(now);
     const entry = compactingSessions.get(sessionId);
+    const lastError = lastAutoCompactErrors.get(sessionId) ?? null;
     if (!entry) {
       return {
         inProgress: false,
@@ -69,6 +83,7 @@ export function createStatusbarService({
         startedAt: null,
         method: null,
         trigger: null,
+        lastError,
       };
     }
 
@@ -95,12 +110,14 @@ export function createStatusbarService({
 
       if (stepAdvanced || tokenDroppedSignificantly) {
         compactingSessions.delete(sessionId);
+        lastAutoCompactErrors.delete(sessionId);
         return {
           inProgress: false,
           status: 'completed',
           startedAt: entry.startedAt,
           method: entry.method,
           trigger: entry.trigger,
+          lastError: null,
         };
       }
     }
@@ -111,6 +128,7 @@ export function createStatusbarService({
       startedAt: entry.startedAt,
       method: entry.method,
       trigger: entry.trigger,
+      lastError,
     };
   }
 
@@ -145,9 +163,11 @@ export function createStatusbarService({
       }
 
       const sessionOverrideEntry = settings.sessions.get(sessionId) ?? null;
+      const modelCustomLimit = resolveModelCustomLimit(settings.modelLimits, telemetry.modelName);
       const limitInfo = resolveEffectiveLimit({
         hostMaxTokens: telemetry.maxContextTokens,
         sessionCustomLimit: sessionOverrideEntry ? sessionOverrideEntry.limit : null,
+        modelCustomLimit,
         defaultCustomLimit: settings.defaultCustomLimit,
       });
 
@@ -158,7 +178,8 @@ export function createStatusbarService({
 
       const now = clock();
       const compaction = getCompactionState(sessionId, telemetry, now);
-      const autoCompactEnabled = settings.autoCompact === true;
+      // A-4: Keep autoCompact default consistent with getSettings() (enabled unless explicitly false)
+      const autoCompactEnabled = settings.autoCompact !== false;
       let autoCompactTriggered = false;
 
       const prevAuto = autoCompactState.get(sessionId) || {
@@ -172,6 +193,10 @@ export function createStatusbarService({
         if (prevAuto.waitingForDrop) {
           prevAuto.waitingForDrop = false;
           autoCompactState.set(sessionId, prevAuto);
+        }
+        if (lastAutoCompactErrors.has(sessionId)) {
+          lastAutoCompactErrors.delete(sessionId);
+          compaction.lastError = null;
         }
       } else {
         const isRunning =
@@ -196,23 +221,41 @@ export function createStatusbarService({
           cooldownExpired &&
           canTriggerAgain
         ) {
-          autoCompactState.set(sessionId, {
+          const triggerRecord = {
             cooldownUntil: now + AUTO_COMPACT_COOLDOWN_MS,
             waitingForDrop: true,
             lastTriggeredTokens:
               typeof telemetry.usedTokens === 'number' ? telemetry.usedTokens : null,
             lastTriggeredStep:
               typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null,
-          });
+          };
+          autoCompactState.set(sessionId, triggerRecord);
           while (autoCompactState.size > MAX_SESSION_OVERRIDES) {
             const oldest = autoCompactState.keys().next().value;
             if (oldest === undefined) break;
             autoCompactState.delete(oldest);
           }
+          lastAutoCompactErrors.delete(sessionId);
+          compaction.lastError = null;
           autoCompactTriggered = true;
           // Fire-and-forget guarded auto-compaction for this session
-          this.requestCompaction(sessionId, { trigger: 'auto' }).catch(() => {
-            // Keep cooldown active on failure to prevent retry storms
+          this.requestCompaction(sessionId, { trigger: 'auto' }).catch((err) => {
+            // A-1 & A-3: Keep cooldown active to prevent retry storms, but release waitingForDrop
+            // so auto-compact can retry once cooldown expires, and surface the failure reason.
+            const cur = autoCompactState.get(sessionId);
+            if (cur === triggerRecord) {
+              cur.waitingForDrop = false;
+            }
+            lastAutoCompactErrors.set(sessionId, {
+              code: err?.code || ERROR_CODES.COMPACTION_FAILED,
+              message: err?.message || 'Auto-compaction failed.',
+              at: clock(),
+            });
+            while (lastAutoCompactErrors.size > MAX_SESSION_OVERRIDES) {
+              const oldestErr = lastAutoCompactErrors.keys().next().value;
+              if (oldestErr === undefined) break;
+              lastAutoCompactErrors.delete(oldestErr);
+            }
           });
         }
       }
@@ -275,6 +318,7 @@ export function createStatusbarService({
         disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
           ? settings.disabledRuntimeAddonIds
           : [],
+        modelLimits: formatModelLimits(settings.modelLimits),
         sessions: Array.from(settings.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -328,6 +372,22 @@ export function createStatusbarService({
         hasChange = true;
       }
 
+      if (Object.prototype.hasOwnProperty.call(patch, 'modelLimit')) {
+        const ml = patch.modelLimit;
+        if (!ml || typeof ml !== 'object' || Array.isArray(ml)) {
+          throw new DomainError(
+            ERROR_CODES.INVALID_SETTINGS_PATCH,
+            400,
+            'modelLimit must be an object with model and limit.',
+          );
+        }
+        normalizedPatch.modelLimit = {
+          model: validateModelName(ml.model),
+          limit: validateCustomLimit(ml.limit),
+        };
+        hasChange = true;
+      }
+
       if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit')) {
         const sl = patch.sessionLimit;
         if (!sl || typeof sl !== 'object' || Array.isArray(sl)) {
@@ -353,6 +413,20 @@ export function createStatusbarService({
       }
 
       const updated = await settingsPort.update(normalizedPatch);
+
+      // A-2: Reset auto-compact cooldown/wait state when limits change or autoCompact is re-enabled
+      if (
+        Object.prototype.hasOwnProperty.call(normalizedPatch, 'defaultCustomLimit') ||
+        Object.prototype.hasOwnProperty.call(normalizedPatch, 'modelLimit') ||
+        normalizedPatch.autoCompact === true
+      ) {
+        autoCompactState.clear();
+        lastAutoCompactErrors.clear();
+      } else if (normalizedPatch.sessionLimit) {
+        autoCompactState.delete(normalizedPatch.sessionLimit.sessionId);
+        lastAutoCompactErrors.delete(normalizedPatch.sessionLimit.sessionId);
+      }
+
       return {
         locale: updated.locale,
         defaultCustomLimit: updated.defaultCustomLimit,
@@ -362,6 +436,7 @@ export function createStatusbarService({
         disabledRuntimeAddonIds: Array.isArray(updated.disabledRuntimeAddonIds)
           ? updated.disabledRuntimeAddonIds
           : [],
+        modelLimits: formatModelLimits(updated.modelLimits),
         sessions: Array.from(updated.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -529,6 +604,7 @@ export function createStatusbarService({
         }
 
         const acceptedAt = clock();
+        lastAutoCompactErrors.delete(sessionId);
         if (compactingSessions.get(sessionId)?.attemptToken === attemptToken) {
           compactingSessions.set(sessionId, {
             attemptToken,

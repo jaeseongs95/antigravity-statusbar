@@ -12,6 +12,7 @@ export function startAddonStatusbar({
   addons,
   createBarViewFn,
   createPopoverViewFn,
+  createGlobalLimitModalViewFn = null,
   createBarControllerFn,
   doc,
   win,
@@ -38,6 +39,7 @@ export function startAddonStatusbar({
     autoCompactEnabled: true,
     compactPrompt: '',
     defaultCustomLimit: null,
+    modelLimits: [],
     sessionLimits: new Map(),
     quotaState: null,
     fallbackSessionId: '',
@@ -47,6 +49,10 @@ export function startAddonStatusbar({
 
   const barView = createBarViewFn({ doc, i18n });
   const popoverView = createPopoverViewFn({ doc, i18n });
+  const globalModalView =
+    typeof createGlobalLimitModalViewFn === 'function'
+      ? createGlobalLimitModalViewFn({ doc, i18n })
+      : null;
 
   function applySettingsPayload(settings) {
     if (!settings || typeof settings !== 'object') return;
@@ -61,6 +67,11 @@ export function startAddonStatusbar({
     }
     if (settings.defaultCustomLimit === null || typeof settings.defaultCustomLimit === 'number') {
       sharedState.defaultCustomLimit = settings.defaultCustomLimit;
+    }
+    if (Array.isArray(settings.modelLimits)) {
+      sharedState.modelLimits = settings.modelLimits.filter(
+        (m) => m && typeof m.model === 'string' && typeof m.limit === 'number',
+      );
     }
     if (Array.isArray(settings.sessions)) {
       sharedState.sessionLimits.clear();
@@ -90,6 +101,7 @@ export function startAddonStatusbar({
     addons,
     barView,
     popoverView,
+    globalModalView,
     sharedState,
     onSettingsChanged(updated) {
       applySettingsPayload(updated);

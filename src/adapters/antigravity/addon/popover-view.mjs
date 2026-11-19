@@ -85,9 +85,18 @@ export function createPopoverView({ doc, i18n, presets }) {
 
   const limitSection = doc.createElement('div');
   limitSection.className = 'agy-inline-card';
+  const limitHeadRow = doc.createElement('div');
+  limitHeadRow.className = 'agy-inline-pop-row';
   const limitTitle = doc.createElement('div');
   limitTitle.className = 'agy-inline-pop-subtitle';
   limitTitle.textContent = i18n.t().limitTitle;
+  const openGlobalModalBtn = doc.createElement('button');
+  openGlobalModalBtn.type = 'button';
+  openGlobalModalBtn.className = 'agy-inline-btn';
+  openGlobalModalBtn.textContent = i18n.t().globalLimitBtn;
+  limitHeadRow.appendChild(limitTitle);
+  limitHeadRow.appendChild(openGlobalModalBtn);
+
   const limitHint = doc.createElement('div');
   limitHint.className = 'agy-inline-pop-hint';
   limitHint.textContent = i18n.t().limitHint;
@@ -134,7 +143,7 @@ export function createPopoverView({ doc, i18n, presets }) {
   const limitStatusEl = doc.createElement('div');
   limitStatusEl.className = 'agy-inline-pop-hint';
 
-  limitSection.appendChild(limitTitle);
+  limitSection.appendChild(limitHeadRow);
   limitSection.appendChild(limitHint);
   limitSection.appendChild(limitRow1);
   limitSection.appendChild(limitRow2);
@@ -263,6 +272,22 @@ export function createPopoverView({ doc, i18n, presets }) {
   langRow.appendChild(langSelect);
   langSection.appendChild(langRow);
 
+  const globalLimitCard = doc.createElement('div');
+  globalLimitCard.className = 'agy-inline-card';
+  const globalLimitRow = doc.createElement('div');
+  globalLimitRow.className = 'agy-inline-pop-row';
+  const globalLimitTitle = doc.createElement('div');
+  globalLimitTitle.className = 'agy-inline-pop-subtitle';
+  globalLimitTitle.textContent = i18n.t().globalModalTitle;
+  const openGlobalModalSettingsBtn = doc.createElement('button');
+  openGlobalModalSettingsBtn.type = 'button';
+  openGlobalModalSettingsBtn.className = 'agy-inline-btn';
+  openGlobalModalSettingsBtn.textContent = i18n.t().globalLimitBtn;
+  globalLimitRow.appendChild(globalLimitTitle);
+  globalLimitRow.appendChild(openGlobalModalSettingsBtn);
+  globalLimitCard.appendChild(globalLimitRow);
+
+  panelSettings.appendChild(globalLimitCard);
   panelSettings.appendChild(compactionCard);
   panelSettings.appendChild(addonSection);
   panelSettings.appendChild(langSection);
@@ -342,6 +367,9 @@ export function createPopoverView({ doc, i18n, presets }) {
     setText(compactionCardTitle, tr.compactionSettingsTitle);
     setText(breakdownTitle, tr.breakdownTitle);
     setText(limitTitle, tr.limitTitle);
+    setText(openGlobalModalBtn, tr.globalLimitBtn);
+    setText(globalLimitTitle, tr.globalModalTitle);
+    setText(openGlobalModalSettingsBtn, tr.globalLimitBtn);
     setText(limitHint, tr.limitHint);
     setText(autoCompactLbl, tr.autoCompactLabel);
     autoCompactBtn.setAttribute('aria-checked', String(Boolean(autoCompactEnabled)));
@@ -380,9 +408,11 @@ export function createPopoverView({ doc, i18n, presets }) {
     const sourceName =
       snap.limitSource === 'session'
         ? tr.sourceSession
-        : snap.limitSource === 'default'
-          ? tr.sourceDefault
-          : tr.sourceHost;
+        : snap.limitSource === 'model'
+          ? tr.sourceModel
+          : snap.limitSource === 'default'
+            ? tr.sourceDefault
+            : tr.sourceHost;
     const hostMaxStr = i18n.formatTokens(snap.maxContextTokens);
     if (snap.isClampedByHost && typeof snap.customLimit === 'number') {
       setText(
@@ -502,6 +532,8 @@ export function createPopoverView({ doc, i18n, presets }) {
     closeBtn,
     tabContextBtn,
     tabSettingsBtn,
+    openGlobalModalBtn,
+    openGlobalModalSettingsBtn,
     scopeSelect,
     presetSelect,
     customInput,

@@ -16,6 +16,7 @@ import { createSidecarApiClient } from './api-client.mjs';
 import { createBarController } from './bar-controller.mjs';
 import { createBarView } from './bar-view.mjs';
 import { startAddonStatusbar, startStandbyStatusbar } from './bootstrap.mjs';
+import { createGlobalLimitModalView } from './global-limit-modal-view.mjs';
 import { createInlineI18n } from './i18n.mjs';
 import { createPopoverView } from './popover-view.mjs';
 import {
@@ -76,6 +77,7 @@ export function renderAddonRendererBundle({ baseUrl, token }) {
     `  ${createAddonRegistry.toString()}`,
     `  ${createBarView.toString()}`,
     `  ${createPopoverView.toString()}`,
+    `  ${createGlobalLimitModalView.toString()}`,
     `  ${createBarController.toString()}`,
     `  ${startAddonStatusbar.toString()}`,
     '  const hostPort = assertRendererHostPort(createAddonHostAdapter(hostHandle, cfg.slotId));',
@@ -95,6 +97,7 @@ export function renderAddonRendererBundle({ baseUrl, token }) {
     '    addons,',
     '    createBarViewFn: createBarView,',
     '    createPopoverViewFn: createPopoverView,',
+    '    createGlobalLimitModalViewFn: createGlobalLimitModalView,',
     '    createBarControllerFn: createBarController,',
     '    doc: document,',
     '    win: window,',

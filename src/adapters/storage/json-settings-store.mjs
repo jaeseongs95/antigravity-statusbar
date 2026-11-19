@@ -6,12 +6,15 @@ import writeFileAtomic from 'write-file-atomic';
 
 import { DEFAULT_LOCALE, DomainError, ERROR_CODES, normalizeLocale } from '../../core/i18n/error-codes.mjs';
 import {
+  MAX_MODEL_LIMITS,
   MAX_SESSION_OVERRIDES,
+  pruneModelLimits,
   pruneSessionOverrides,
   validateCompactPrompt,
   validateCustomButtons,
   validateCustomLimit,
   validateDisabledAddonIds,
+  validateModelName,
   validateSessionId,
 } from '../../core/model/context-policy.mjs';
 
@@ -31,6 +34,7 @@ function createDefaultState() {
     customButtons: [],
     customButtonsUpdatedAt: 0,
     disabledRuntimeAddonIds: [],
+    modelLimits: new Map(),
     sessions: new Map(),
   };
 }
@@ -101,6 +105,10 @@ function parsePersistedState(raw) {
     }
   }
 
+  if (Array.isArray(raw.modelLimits)) {
+    state.modelLimits = pruneModelLimits(raw.modelLimits, MAX_MODEL_LIMITS);
+  }
+
   if (Array.isArray(raw.sessions)) {
     state.sessions = pruneSessionOverrides(raw.sessions, MAX_SESSION_OVERRIDES);
   }
@@ -121,6 +129,7 @@ function serializeState(state) {
       customButtons: state.customButtons,
       customButtonsUpdatedAt: state.customButtonsUpdatedAt,
       disabledRuntimeAddonIds: state.disabledRuntimeAddonIds,
+      modelLimits: Array.from(state.modelLimits.entries()),
       sessions: Array.from(state.sessions.entries()),
     },
     null,
@@ -274,6 +283,7 @@ export function createJsonSettingsStore({
         compactPrompt: state.compactPrompt,
         customButtons: state.customButtons.map((b) => ({ ...b })),
         disabledRuntimeAddonIds: [...state.disabledRuntimeAddonIds],
+        modelLimits: new Map(state.modelLimits),
         sessions: new Map(state.sessions),
       };
     },
@@ -312,6 +322,24 @@ export function createJsonSettingsStore({
           current.disabledRuntimeAddonIds = validateDisabledAddonIds(patch.disabledRuntimeAddonIds);
         }
 
+        if (Object.prototype.hasOwnProperty.call(patch, 'modelLimit') && patch.modelLimit) {
+          const model = validateModelName(patch.modelLimit.model);
+          const limit = validateCustomLimit(patch.modelLimit.limit);
+          const lower = model.toLowerCase();
+          let prevUpdatedAt = 0;
+          for (const [k, v] of Array.from(current.modelLimits.entries())) {
+            if (k.toLowerCase() === lower) {
+              prevUpdatedAt = Math.max(prevUpdatedAt, v?.updatedAt || 0);
+              current.modelLimits.delete(k);
+            }
+          }
+          if (limit !== null) {
+            const ts = nextTimestamp(prevUpdatedAt);
+            current.modelLimits.set(model, { limit, updatedAt: ts });
+          }
+          current.modelLimits = pruneModelLimits(current.modelLimits, MAX_MODEL_LIMITS);
+        }
+
         if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit') && patch.sessionLimit) {
           const sid = validateSessionId(patch.sessionLimit.sessionId);
           const limit = validateCustomLimit(patch.sessionLimit.limit);
@@ -334,6 +362,7 @@ export function createJsonSettingsStore({
           compactPrompt: current.compactPrompt,
           customButtons: current.customButtons.map((b) => ({ ...b })),
           disabledRuntimeAddonIds: [...current.disabledRuntimeAddonIds],
+          modelLimits: new Map(current.modelLimits),
           sessions: new Map(current.sessions),
         };
       });

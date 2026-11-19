@@ -60,6 +60,7 @@ export function createStatusbarApp({
     selectedSessionId: null,
     sessions: [],
     snapshot: null,
+    defaultCustomLimit: null,
     quota: null,
     detailExpanded: false,
     burstUntil: 0,
@@ -94,11 +95,20 @@ export function createStatusbarApp({
   }
 
   function syncLimitInputs(snap) {
-    // NB2: Sync limit preset/input to the current session's active custom limit (or clear on host default)
-    const val = snap && typeof snap.customLimit === 'number' ? String(snap.customLimit) : '';
+    // G-2: Sync limit preset/input to the active scope (global default vs current session)
+    const scope = el.limitScopeSelect?.value === 'default' ? 'default' : 'session';
+    const rawLimit =
+      scope === 'default'
+        ? state.defaultCustomLimit
+        : snap && snap.limitSource === 'session' && typeof snap.customLimit === 'number'
+          ? snap.customLimit
+          : snap && typeof snap.customLimit === 'number' && snap.limitSource !== 'default'
+            ? snap.customLimit
+            : null;
+    const val = typeof rawLimit === 'number' ? String(rawLimit) : '';
     if (el.limitCustomInput) el.limitCustomInput.value = val;
     if (el.limitPresetSelect) {
-      el.limitPresetSelect.value = PRESETS.includes(snap?.customLimit) ? val : '';
+      el.limitPresetSelect.value = typeof rawLimit === 'number' && PRESETS.includes(rawLimit) ? val : '';
     }
   }
 
@@ -250,9 +260,11 @@ export function createStatusbarApp({
     const sourceLabel =
       snap.limitSource === 'session'
         ? t.sourceSession
-        : snap.limitSource === 'default'
-          ? t.sourceDefault
-          : t.sourceHost;
+        : snap.limitSource === 'model'
+          ? t.sourceModel
+          : snap.limitSource === 'default'
+            ? t.sourceDefault
+            : t.sourceHost;
     setTextIfChanged(el.contextLimitTag, sourceLabel);
 
     const clampedPct = typeof snap.usagePercent === 'number' ? Math.max(0, Math.min(100, snap.usagePercent)) : 0;
@@ -552,6 +564,16 @@ export function createStatusbarApp({
       { signal: sig },
     );
 
+    if (el.limitScopeSelect) {
+      el.limitScopeSelect.addEventListener(
+        'change',
+        () => {
+          syncLimitInputs(state.snapshot);
+        },
+        { signal: sig },
+      );
+    }
+
     el.limitPresetSelect.addEventListener(
       'change',
       () => {
@@ -597,13 +619,23 @@ export function createStatusbarApp({
               : { defaultCustomLimit: limit };
 
         try {
-          await bridge.updateSettings(patch);
+          const updatedSettings = await bridge.updateSettings(patch);
+          if (
+            updatedSettings &&
+            (updatedSettings.defaultCustomLimit === null ||
+              typeof updatedSettings.defaultCustomLimit === 'number')
+          ) {
+            state.defaultCustomLimit = updatedSettings.defaultCustomLimit;
+          } else if (scope === 'default') {
+            state.defaultCustomLimit = limit;
+          }
           // F3: Guard against session switch during async settings update
           if (state.disposed || (scope !== 'default' && state.selectedSessionId !== targetSessionId)) {
             return;
           }
           setTextIfChanged(el.limitFeedback, getStrings(state.locale).limitSaved);
           el.limitFeedback.classList.remove('hidden');
+          syncLimitInputs(state.snapshot);
           if (state.selectedSessionId) {
             await refreshSnapshot(state.selectedSessionId);
           }
@@ -689,10 +721,17 @@ export function createStatusbarApp({
     applyLocaleStrings();
     try {
       const settings = await bridge.getSettings();
+      if (
+        settings &&
+        (settings.defaultCustomLimit === null || typeof settings.defaultCustomLimit === 'number')
+      ) {
+        state.defaultCustomLimit = settings.defaultCustomLimit;
+      }
       if (settings?.locale) {
         state.locale = settings.locale;
         applyLocaleStrings();
       }
+      syncLimitInputs(state.snapshot);
     } catch {
       // Proceed with default locale
     }

@@ -10,6 +10,7 @@ export function createBarController({
   addons,
   barView,
   popoverView,
+  globalModalView = null,
   sharedState,
   onSettingsChanged,
   onBurstRequested,
@@ -20,20 +21,27 @@ export function createBarController({
     : [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
 
   barView.barEl.appendChild(popoverView.popEl);
+  if (globalModalView && globalModalView.backdropEl) {
+    barView.barEl.appendChild(globalModalView.backdropEl);
+  }
 
   const state = {
     disposed: false,
     viewEl: null,
     popOpen: false,
+    modalOpen: false,
     activeTab: 'context',
     lastTriggerEl: barView.settingsBtn,
+    modalTriggerEl: barView.settingsBtn,
     feedbackTimer: null,
+    modalFeedbackTimer: null,
     noteTimer: null,
     lastSessionId: '',
     snapshot: null,
     epoch: 0,
     abortCtrl: null,
     inFlight: false,
+    inFlightPromise: null,
     pendingRefresh: false,
     compacting: false,
     limitDirty: false,
@@ -41,6 +49,7 @@ export function createBarController({
     lastAddonsKey: '',
     syncedLimitKey: '',
     syncedPromptVal: null,
+    lastAutoErrAt: 0,
   };
 
   function getSessionId() {
@@ -77,6 +86,36 @@ export function createBarController({
         if (!state.disposed) popoverView.setFeedback('', false);
       }, 3500);
     }
+  }
+
+  function showModalFeedback(text, isErr = false) {
+    if (!globalModalView) return;
+    if (state.modalFeedbackTimer) {
+      clearTimeout(state.modalFeedbackTimer);
+      state.modalFeedbackTimer = null;
+    }
+    globalModalView.setFeedback(text, isErr);
+    if (text) {
+      state.modalFeedbackTimer = setTimeout(() => {
+        state.modalFeedbackTimer = null;
+        if (!state.disposed) globalModalView.setFeedback('', false);
+      }, 4000);
+    }
+  }
+
+  function parseStrictLimitInput(rawStr, { allowBlank = true } = {}) {
+    const raw = String(rawStr || '').replace(/[\s,]/g, '').trim();
+    if (raw === '') {
+      return allowBlank ? { ok: true, value: null } : { ok: false, value: null };
+    }
+    if (!/^\d+$/.test(raw)) {
+      return { ok: false, value: null };
+    }
+    const parsed = Number(raw);
+    if (!Number.isSafeInteger(parsed) || parsed < 32000 || parsed > 980000) {
+      return { ok: false, value: null };
+    }
+    return { ok: true, value: parsed };
   }
 
   function getSavedLimitForScope(scope) {
@@ -280,11 +319,75 @@ export function createBarController({
     popoverView.renderSnapshotDetails(snap);
     if (snap) {
       syncLimitControls(false);
+      // A-3: Surface newly observed auto-compaction failure instead of hiding it silently
+      const autoErr = snap.compaction?.lastError;
+      if (autoErr && typeof autoErr.at === 'number' && autoErr.at > state.lastAutoErrAt) {
+        state.lastAutoErrAt = autoErr.at;
+        showNote(
+          i18n.formatTemplate(i18n.t().autoCompactError, {
+            msg: autoErr.message || autoErr.code || 'Error',
+          }),
+          6000,
+        );
+      }
     }
     barView.renderQuota(sharedState.quotaState);
+    if (globalModalView && state.modalOpen) {
+      renderGlobalModal(false);
+    }
   }
 
-  async function refreshSnapshot() {
+  function renderGlobalModal(syncDefaultInputs = false) {
+    if (!globalModalView) return;
+    const sessionOverrideLimit = getSavedLimitForScope('session');
+    globalModalView.render({
+      defaultCustomLimit:
+        typeof sharedState.defaultCustomLimit === 'number' ? sharedState.defaultCustomLimit : null,
+      modelLimits: Array.isArray(sharedState.modelLimits) ? sharedState.modelLimits : [],
+      currentModelName: state.snapshot?.modelName || '',
+      sessionOverrideLimit,
+      syncDefaultInputs,
+      onEditModel(item) {
+        globalModalView.modelNameInput.value = item.model;
+        globalModalView.modelLimitInput.value = String(item.limit);
+        globalModalView.modelPresetSelect.value = PRESETS.includes(item.limit)
+          ? String(item.limit)
+          : '';
+        try {
+          globalModalView.modelLimitInput.focus();
+        } catch {}
+      },
+      onRemoveModel(modelName) {
+        handleSaveModelLimit(modelName, null);
+      },
+    });
+  }
+
+  function openGlobalModal(triggerEl) {
+    if (!globalModalView) return;
+    state.modalTriggerEl = triggerEl || barView.settingsBtn;
+    setPopoverOpen(false);
+    state.modalOpen = true;
+    showModalFeedback('', false);
+    renderGlobalModal(true);
+    globalModalView.setVisible(true);
+    try {
+      globalModalView.defaultInput.focus();
+    } catch {}
+  }
+
+  function closeGlobalModal(returnFocus = true) {
+    if (!globalModalView || !state.modalOpen) return;
+    state.modalOpen = false;
+    globalModalView.setVisible(false);
+    if (returnFocus) {
+      try {
+        (state.modalTriggerEl || barView.settingsBtn).focus();
+      } catch {}
+    }
+  }
+
+  async function refreshSnapshot({ waitForFresh = false } = {}) {
     if (state.disposed) return;
     const sid = getSessionId();
     if (!sid) return;
@@ -297,6 +400,13 @@ export function createBarController({
       if (state.abortCtrl) state.abortCtrl.abort();
     } else if (state.inFlight) {
       state.pendingRefresh = true;
+      if (waitForFresh && state.inFlightPromise) {
+        // G-1: Wait for the in-flight poll to finish AND await the fresh post-update snapshot
+        await state.inFlightPromise;
+        if (!state.disposed && state.inFlightPromise) {
+          await state.inFlightPromise;
+        }
+      }
       return;
     }
     state.lastSessionId = sid;
@@ -304,25 +414,30 @@ export function createBarController({
     state.pendingRefresh = false;
     const reqEpoch = ++state.epoch;
     state.abortCtrl = new AbortController();
-    try {
-      const snap = await api.post('/api/snapshot', { sessionId: sid }, state.abortCtrl.signal);
-      if (state.disposed || reqEpoch !== state.epoch) return;
-      state.snapshot = snap;
-      render();
-    } catch (err) {
-      if (state.disposed || err?.name === 'AbortError' || err?.message === 'aborted') return;
-      if (!state.snapshot) {
-        barView.setReconnecting();
-      }
-    } finally {
-      if (reqEpoch === state.epoch) {
-        state.inFlight = false;
-        if (state.pendingRefresh && !state.disposed) {
-          state.pendingRefresh = false;
-          refreshSnapshot();
+    const runPromise = (async () => {
+      try {
+        const snap = await api.post('/api/snapshot', { sessionId: sid }, state.abortCtrl.signal);
+        if (state.disposed || reqEpoch !== state.epoch) return;
+        state.snapshot = snap;
+        render();
+      } catch (err) {
+        if (state.disposed || err?.name === 'AbortError' || err?.message === 'aborted') return;
+        if (!state.snapshot) {
+          barView.setReconnecting();
+        }
+      } finally {
+        if (reqEpoch === state.epoch) {
+          state.inFlight = false;
+          state.inFlightPromise = null;
+          if (state.pendingRefresh && !state.disposed) {
+            state.pendingRefresh = false;
+            refreshSnapshot();
+          }
         }
       }
-    }
+    })();
+    state.inFlightPromise = runPromise;
+    await runPromise;
   }
 
   async function handleCompact() {
@@ -348,20 +463,12 @@ export function createBarController({
 
   async function handleApplyLimit() {
     const tr = i18n.t();
-    const raw = popoverView.customInput.value.replace(/[\s,]/g, '').trim();
-    let limitVal = null;
-    if (raw !== '') {
-      if (!/^\d+$/.test(raw)) {
-        showFeedback(tr.invalidLimit, true);
-        return;
-      }
-      const parsed = Number(raw);
-      if (!Number.isSafeInteger(parsed) || parsed < 32000 || parsed > 980000) {
-        showFeedback(tr.invalidLimit, true);
-        return;
-      }
-      limitVal = parsed;
+    const parsedLimit = parseStrictLimitInput(popoverView.customInput.value, { allowBlank: true });
+    if (!parsedLimit.ok) {
+      showFeedback(tr.invalidLimit, true);
+      return;
     }
+    const limitVal = parsedLimit.value;
     const scope = popoverView.scopeSelect.value === 'default' ? 'default' : 'session';
     const sid = getSessionId();
     if (scope === 'session' && !sid) {
@@ -377,10 +484,19 @@ export function createBarController({
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
       state.limitDirty = false;
       state.syncedLimitKey = '';
-      await refreshSnapshot();
+      await refreshSnapshot({ waitForFresh: true });
       syncLimitControls(true);
       const hostMax = state.snapshot?.maxContextTokens || 0;
-      if (limitVal !== null && hostMax > 0 && limitVal > hostMax) {
+      const sessionOverrideVal = getSavedLimitForScope('session');
+      if (scope === 'default' && limitVal !== null && typeof sessionOverrideVal === 'number') {
+        showFeedback(
+          i18n.formatTemplate(tr.appliedMaskedBySession, {
+            val: i18n.formatTokens(limitVal),
+            sessionVal: i18n.formatTokens(sessionOverrideVal),
+          }),
+          false,
+        );
+      } else if (limitVal !== null && hostMax > 0 && limitVal > hostMax) {
         showFeedback(
           i18n.formatTemplate(tr.appliedClamped, {
             val: i18n.formatTokens(limitVal),
@@ -393,6 +509,99 @@ export function createBarController({
       }
     } catch (err) {
       showFeedback(err?.message || 'Error', true);
+    }
+  }
+
+  async function handleSaveGlobalDefault(rawInputValue) {
+    const tr = i18n.t();
+    const parsedLimit = parseStrictLimitInput(rawInputValue, { allowBlank: true });
+    if (!parsedLimit.ok) {
+      showModalFeedback(tr.invalidLimit, true);
+      return;
+    }
+    const limitVal = parsedLimit.value;
+    try {
+      const updated = await api.post('/api/settings/update', { defaultCustomLimit: limitVal });
+      if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
+      state.limitDirty = false;
+      state.syncedLimitKey = '';
+      await refreshSnapshot({ waitForFresh: true });
+      syncLimitControls(true);
+      renderGlobalModal(true);
+      const sessionOverrideVal = getSavedLimitForScope('session');
+      if (limitVal !== null && typeof sessionOverrideVal === 'number') {
+        showModalFeedback(
+          i18n.formatTemplate(tr.appliedMaskedBySession, {
+            val: i18n.formatTokens(limitVal),
+            sessionVal: i18n.formatTokens(sessionOverrideVal),
+          }),
+          false,
+        );
+      } else {
+        showModalFeedback(tr.applied, false);
+      }
+    } catch (err) {
+      showModalFeedback(err?.message || 'Error', true);
+    }
+  }
+
+  async function handleSaveModelLimit(rawModelName, rawLimitValue) {
+    const tr = i18n.t();
+    const model = String(rawModelName || '').trim();
+    if (!model || model.length > 128) {
+      showModalFeedback(tr.invalidModelName, true);
+      return;
+    }
+    let limitVal = null;
+    if (rawLimitValue !== null) {
+      const parsedLimit = parseStrictLimitInput(rawLimitValue, { allowBlank: false });
+      if (!parsedLimit.ok) {
+        showModalFeedback(tr.invalidLimit, true);
+        return;
+      }
+      limitVal = parsedLimit.value;
+    }
+    try {
+      const updated = await api.post('/api/settings/update', {
+        modelLimit: { model, limit: limitVal },
+      });
+      if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
+      state.limitDirty = false;
+      state.syncedLimitKey = '';
+      await refreshSnapshot({ waitForFresh: true });
+      syncLimitControls(true);
+      if (globalModalView && limitVal !== null) {
+        globalModalView.modelNameInput.value = '';
+        globalModalView.modelLimitInput.value = '';
+        globalModalView.modelPresetSelect.value = '';
+      }
+      renderGlobalModal(false);
+      showModalFeedback(tr.applied, false);
+    } catch (err) {
+      showModalFeedback(err?.message || 'Error', true);
+    }
+  }
+
+  async function handleClearCurrentSessionLimit() {
+    const tr = i18n.t();
+    const sid = getSessionId();
+    if (!sid) {
+      showModalFeedback(tr.noActiveSession, true);
+      return;
+    }
+    try {
+      const updated = await api.post('/api/settings/update', {
+        sessionLimit: { sessionId: sid, limit: null },
+      });
+      if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
+      state.limitDirty = false;
+      state.syncedLimitKey = '';
+      await refreshSnapshot({ waitForFresh: true });
+      syncLimitControls(true);
+      renderGlobalModal(false);
+      showModalFeedback(tr.applied, false);
+    } catch (err) {
+      showModalFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -440,11 +649,17 @@ export function createBarController({
   }
 
   const onKeyDown = (e) => {
-    if (e.key === 'Escape' && state.popOpen) {
-      setPopoverOpen(false);
-      try {
-        (state.lastTriggerEl || barView.settingsBtn).focus();
-      } catch {}
+    if (e.key === 'Escape') {
+      if (state.modalOpen) {
+        closeGlobalModal(true);
+        return;
+      }
+      if (state.popOpen) {
+        setPopoverOpen(false);
+        try {
+          (state.lastTriggerEl || barView.settingsBtn).focus();
+        } catch {}
+      }
     }
   };
   const onDocPointerDown = (e) => {
@@ -479,6 +694,11 @@ export function createBarController({
     showFeedback('', false);
   };
   const onScopeChange = () => {
+    // G-1: Preserve user's in-progress numeric entry when switching scope before clicking Apply
+    if (state.limitDirty && popoverView.customInput.value.trim() !== '') {
+      showFeedback('', false);
+      return;
+    }
     state.limitDirty = false;
     state.syncedLimitKey = '';
     showFeedback('', false);
@@ -550,6 +770,83 @@ export function createBarController({
   popoverView.presetSelect.addEventListener('change', onPresetChange);
   popoverView.customInput.addEventListener('input', onCustomInput);
   popoverView.customInput.addEventListener('keydown', onInputKeyDown);
+  if (popoverView.openGlobalModalBtn) {
+    popoverView.openGlobalModalBtn.addEventListener('click', () =>
+      openGlobalModal(popoverView.openGlobalModalBtn),
+    );
+  }
+  if (popoverView.openGlobalModalSettingsBtn) {
+    popoverView.openGlobalModalSettingsBtn.addEventListener('click', () =>
+      openGlobalModal(popoverView.openGlobalModalSettingsBtn),
+    );
+  }
+  if (globalModalView) {
+    globalModalView.closeBtn.addEventListener('click', () => closeGlobalModal(true));
+    globalModalView.backdropEl.addEventListener('click', (e) => {
+      if (e.target === globalModalView.backdropEl) closeGlobalModal(true);
+    });
+    globalModalView.clearSessionLimitBtn.addEventListener('click', handleClearCurrentSessionLimit);
+    globalModalView.defaultPresetSelect.addEventListener('change', () => {
+      globalModalView.defaultInput.value = globalModalView.defaultPresetSelect.value;
+      showModalFeedback('', false);
+    });
+    globalModalView.defaultInput.addEventListener('input', () => {
+      const raw = globalModalView.defaultInput.value.replace(/[\s,]/g, '').trim();
+      const parsed = raw ? Number(raw) : NaN;
+      globalModalView.defaultPresetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
+      showModalFeedback('', false);
+    });
+    globalModalView.defaultInput.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSaveGlobalDefault(globalModalView.defaultInput.value);
+      }
+    });
+    globalModalView.defaultApplyBtn.addEventListener('click', () =>
+      handleSaveGlobalDefault(globalModalView.defaultInput.value),
+    );
+    globalModalView.defaultResetBtn.addEventListener('click', () => {
+      globalModalView.defaultInput.value = '';
+      globalModalView.defaultPresetSelect.value = '';
+      handleSaveGlobalDefault('');
+    });
+    globalModalView.useCurrentModelBtn.addEventListener('click', () => {
+      const curModel = state.snapshot?.modelName || '';
+      if (curModel) {
+        globalModalView.modelNameInput.value = curModel;
+        try {
+          globalModalView.modelLimitInput.focus();
+        } catch {}
+      }
+    });
+    globalModalView.modelPresetSelect.addEventListener('change', () => {
+      globalModalView.modelLimitInput.value = globalModalView.modelPresetSelect.value;
+      showModalFeedback('', false);
+    });
+    globalModalView.modelLimitInput.addEventListener('input', () => {
+      const raw = globalModalView.modelLimitInput.value.replace(/[\s,]/g, '').trim();
+      const parsed = raw ? Number(raw) : NaN;
+      globalModalView.modelPresetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
+      showModalFeedback('', false);
+    });
+    globalModalView.modelLimitInput.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSaveModelLimit(
+          globalModalView.modelNameInput.value,
+          globalModalView.modelLimitInput.value,
+        );
+      }
+    });
+    globalModalView.modelSaveBtn.addEventListener('click', () =>
+      handleSaveModelLimit(
+        globalModalView.modelNameInput.value,
+        globalModalView.modelLimitInput.value,
+      ),
+    );
+  }
   doc.addEventListener('keydown', onKeyDown);
   doc.addEventListener('pointerdown', onDocPointerDown);
 
@@ -563,6 +860,7 @@ export function createBarController({
     if (state.disposed) return;
     state.disposed = true;
     if (state.feedbackTimer) clearTimeout(state.feedbackTimer);
+    if (state.modalFeedbackTimer) clearTimeout(state.modalFeedbackTimer);
     if (state.noteTimer) clearTimeout(state.noteTimer);
     if (state.abortCtrl) state.abortCtrl.abort();
     doc.removeEventListener('keydown', onKeyDown);

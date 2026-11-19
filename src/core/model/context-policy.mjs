@@ -3,6 +3,8 @@ import { DomainError, ERROR_CODES } from '../i18n/error-codes.mjs';
 export const MIN_CUSTOM_LIMIT = 32_000;
 export const MAX_CUSTOM_LIMIT = 980_000;
 export const MAX_SESSION_OVERRIDES = 200;
+export const MAX_MODEL_LIMITS = 64;
+export const MAX_MODEL_NAME_LEN = 128;
 export const MAX_CUSTOM_BUTTONS = 20;
 export const MAX_BUTTON_LABEL_LEN = 24;
 export const MAX_BUTTON_COMMAND_LEN = 500;
@@ -231,14 +233,83 @@ export function validateDisabledAddonIds(rawIds) {
 }
 
 /**
+ * Validates a model identifier used for per-model global context limits.
+ *
+ * @param {unknown} rawModelName
+ * @returns {string}
+ */
+export function validateModelName(rawModelName) {
+  if (typeof rawModelName !== 'string') {
+    throw new DomainError(ERROR_CODES.INVALID_SETTINGS_PATCH, 400, 'Model name must be a string.');
+  }
+  if (rawModelName.includes('\0') || /[\r\n\t]/.test(rawModelName)) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'Model name cannot contain control characters.',
+    );
+  }
+  const trimmed = rawModelName.trim();
+  if (
+    !trimmed ||
+    trimmed.length > MAX_MODEL_NAME_LEN ||
+    FORBIDDEN_KEYS.has(trimmed.toLowerCase())
+  ) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      `Model name must be 1-${MAX_MODEL_NAME_LEN} characters.`,
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Looks up a per-model global custom limit (exact match first, case-insensitive fallback).
+ *
+ * @param {Map<string, { limit: number, updatedAt: number }> | null | undefined} modelLimits
+ * @param {string | null | undefined} modelName
+ * @returns {number | null}
+ */
+export function resolveModelCustomLimit(modelLimits, modelName) {
+  if (!(modelLimits instanceof Map) || typeof modelName !== 'string') {
+    return null;
+  }
+  const trimmed = modelName.trim();
+  if (!trimmed) return null;
+  const exact = modelLimits.get(trimmed);
+  if (exact && typeof exact.limit === 'number') {
+    return exact.limit;
+  }
+  const needle = trimmed.toLowerCase();
+  for (const [key, entry] of modelLimits.entries()) {
+    if (key.toLowerCase() === needle && entry && typeof entry.limit === 'number') {
+      return entry.limit;
+    }
+  }
+  return null;
+}
+
+/**
  * Resolves the effective soft context limit for a session.
+ * Precedence (Option A): session > per-model global > all-models default > host default.
  * Never mutates host global settings; when hostMaxTokens is known (> 0),
  * clamps custom soft limit to hostMaxTokens to avoid misleading >100% ceilings
  * while preventing division by zero when hostMaxTokens is 0 or unavailable (F4).
  *
- * @param {{ hostMaxTokens: number | null | undefined, sessionCustomLimit: number | null | undefined, defaultCustomLimit: number | null | undefined }} input
+ * @param {{
+ *   hostMaxTokens: number | null | undefined,
+ *   sessionCustomLimit: number | null | undefined,
+ *   modelCustomLimit?: number | null | undefined,
+ *   defaultCustomLimit: number | null | undefined,
+ * }} input
  */
-export function resolveEffectiveLimit({ hostMaxTokens, sessionCustomLimit, defaultCustomLimit }) {
+export function resolveEffectiveLimit({
+  hostMaxTokens,
+  sessionCustomLimit,
+  modelCustomLimit = null,
+  defaultCustomLimit,
+}) {
   const hostMax =
     typeof hostMaxTokens === 'number' && Number.isFinite(hostMaxTokens) && hostMaxTokens > 0
       ? Math.floor(hostMaxTokens)
@@ -247,16 +318,20 @@ export function resolveEffectiveLimit({ hostMaxTokens, sessionCustomLimit, defau
   const customSource =
     typeof sessionCustomLimit === 'number'
       ? 'session'
-      : typeof defaultCustomLimit === 'number'
-        ? 'default'
-        : 'host';
+      : typeof modelCustomLimit === 'number'
+        ? 'model'
+        : typeof defaultCustomLimit === 'number'
+          ? 'default'
+          : 'host';
 
   const customLimit =
     customSource === 'session'
       ? sessionCustomLimit
-      : customSource === 'default'
-        ? defaultCustomLimit
-        : null;
+      : customSource === 'model'
+        ? modelCustomLimit
+        : customSource === 'default'
+          ? defaultCustomLimit
+          : null;
 
   if (customLimit !== null) {
     const effectiveLimit = hostMax > 0 ? Math.min(hostMax, customLimit) : customLimit;
@@ -350,6 +425,47 @@ export function pruneSessionOverrides(entries, maxEntries = MAX_SESSION_OVERRIDE
     list.push([sessionId, { limit, updatedAt }]);
   }
 
+  list.sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+  const sliced = list.length > maxEntries ? list.slice(list.length - maxEntries) : list;
+  return new Map(sliced);
+}
+
+/**
+ * Builds a bounded LRU Map of per-model global limits (max 64 entries, case-insensitive dedup).
+ *
+ * @param {Array<[string, { limit: number, updatedAt: number }]> | Map<string, { limit: number, updatedAt: number }>} entries
+ * @param {number} [maxEntries=64]
+ * @returns {Map<string, { limit: number, updatedAt: number }>}
+ */
+export function pruneModelLimits(entries, maxEntries = MAX_MODEL_LIMITS) {
+  const byLower = new Map();
+  const iterable = entries instanceof Map ? entries.entries() : Array.isArray(entries) ? entries : [];
+
+  for (const pair of iterable) {
+    if (!Array.isArray(pair) || pair.length !== 2) continue;
+    const [rawModel, value] = pair;
+    if (!value || typeof value !== 'object') continue;
+    let model;
+    let limit;
+    try {
+      model = validateModelName(rawModel);
+      limit = validateCustomLimit(value.limit);
+    } catch {
+      continue;
+    }
+    if (limit === null) continue;
+    const updatedAt =
+      typeof value.updatedAt === 'number' && Number.isFinite(value.updatedAt)
+        ? Math.floor(value.updatedAt)
+        : 0;
+    const lower = model.toLowerCase();
+    const prev = byLower.get(lower);
+    if (!prev || updatedAt >= prev[1].updatedAt) {
+      byLower.set(lower, [model, { limit, updatedAt }]);
+    }
+  }
+
+  const list = Array.from(byLower.values());
   list.sort((a, b) => a[1].updatedAt - b[1].updatedAt);
   const sliced = list.length > maxEntries ? list.slice(list.length - maxEntries) : list;
   return new Map(sliced);

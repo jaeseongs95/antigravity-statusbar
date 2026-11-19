@@ -493,6 +493,72 @@ export const STATUSBAR_STYLES = `
   background: rgba(240, 101, 101, 0.12);
   border-color: rgba(240, 101, 101, 0.28);
 }
+.agy-inline-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(2px);
+  z-index: 2147483100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+}
+.agy-inline-modal-backdrop.hidden {
+  display: none;
+}
+.agy-inline-modal {
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: #1a1b1f;
+  color: #e6e7ea;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 14px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(0, 0, 0, 0.35);
+  padding: 14px 16px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: keep-all;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.agy-inline-priority-bar {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.66);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 6px 9px;
+}
+.agy-inline-override-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(245, 185, 66, 0.12);
+  border: 1px solid rgba(245, 185, 66, 0.32);
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #ffd98a;
+  font-size: 11px;
+}
+.agy-inline-override-banner.hidden {
+  display: none;
+}
+.agy-inline-override-text {
+  min-width: 0;
+  flex: 1;
+}
+.agy-inline-btn.hidden {
+  display: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .agy-inline-bar-fill,
   .agy-inline-tab,
