@@ -57,7 +57,8 @@ const INLINE_STYLES = `
   outline: none;
 }
 .agy-inline-bar-track {
-  width: 44px;
+  display: inline-block;
+  width: 48px;
   height: 5px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.14);
@@ -65,6 +66,7 @@ const INLINE_STYLES = `
   flex-shrink: 0;
 }
 .agy-inline-bar-fill {
+  display: block;
   height: 100%;
   width: 0%;
   border-radius: 999px;
@@ -632,19 +634,6 @@ export function inlineStatusbarBootstrap(cfg) {
     compactBtn.className = 'agy-inline-btn';
     compactBtn.textContent = t().compact;
 
-    const langSelect = document.createElement('select');
-    langSelect.className = 'agy-inline-lang-select';
-    langSelect.setAttribute('aria-label', t().langLabel);
-    const optKo = document.createElement('option');
-    optKo.value = 'ko';
-    optKo.textContent = '한국어';
-    const optEn = document.createElement('option');
-    optEn.value = 'en';
-    optEn.textContent = 'English';
-    langSelect.appendChild(optKo);
-    langSelect.appendChild(optEn);
-    langSelect.value = locale;
-
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
     settingsBtn.className = 'agy-inline-btn';
@@ -655,7 +644,6 @@ export function inlineStatusbarBootstrap(cfg) {
     rightEl.appendChild(noteEl);
     rightEl.appendChild(customBtnsContainer);
     rightEl.appendChild(compactBtn);
-    rightEl.appendChild(langSelect);
     rightEl.appendChild(settingsBtn);
 
     // Popover for breakdown + soft context limit + locale
@@ -766,11 +754,38 @@ export function inlineStatusbarBootstrap(cfg) {
     addonSection.appendChild(addonTitle);
     addonSection.appendChild(addonListEl);
 
+    // Language selector inside settings popover
+    const langSection = document.createElement('div');
+    langSection.className = 'agy-inline-pop-section';
+    const langRow = document.createElement('div');
+    langRow.className = 'agy-inline-pop-row';
+    const langRowLabel = document.createElement('label');
+    langRowLabel.className = 'agy-inline-pop-subtitle';
+    langRowLabel.textContent = t().langLabel;
+
+    const langSelect = document.createElement('select');
+    langSelect.className = 'agy-inline-pop-select';
+    langSelect.setAttribute('aria-label', t().langLabel);
+    const optKo = document.createElement('option');
+    optKo.value = 'ko';
+    optKo.textContent = '한국어';
+    const optEn = document.createElement('option');
+    optEn.value = 'en';
+    optEn.textContent = 'English';
+    langSelect.appendChild(optKo);
+    langSelect.appendChild(optEn);
+    langSelect.value = locale;
+
+    langRow.appendChild(langRowLabel);
+    langRow.appendChild(langSelect);
+    langSection.appendChild(langRow);
+
     popEl.appendChild(popHead);
     popEl.appendChild(popMeta);
     popEl.appendChild(breakdownSection);
     popEl.appendChild(limitSection);
     popEl.appendChild(addonSection);
+    popEl.appendChild(langSection);
     popEl.appendChild(popFeedback);
 
     barEl.appendChild(leftEl);
@@ -945,6 +960,7 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(applyBtn, tr.apply);
       setText(compactBtn, state.compacting ? tr.compacting : tr.compact);
       setText(addonTitle, tr.addonsTitle);
+      setText(langRowLabel, tr.langLabel);
       langSelect.setAttribute('aria-label', tr.langLabel);
       if (langSelect.value !== locale) langSelect.value = locale;
       rebuildPresets();
