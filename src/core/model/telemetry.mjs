@@ -43,7 +43,8 @@ export function computeCacheHitPercent({ cacheReadTokens, inputTokens, inputIncl
 }
 
 /**
- * Normalizes a token breakdown group array.
+ * Normalizes a token breakdown group array, aggregating duplicate labels
+ * and sorting descending by token count for clean visual hierarchy.
  *
  * @param {unknown} groups
  * @returns {Array<{ key: string, label: string, tokens: number }>}
@@ -52,16 +53,21 @@ export function normalizeTokenGroups(groups) {
   if (!Array.isArray(groups)) {
     return [];
   }
-  const result = [];
+  const byLabel = new Map();
   for (const item of groups) {
     if (!item || typeof item !== 'object') continue;
     const tokens = toNonNegativeIntOrNull(item.tokens);
-    if (tokens === null) continue;
+    if (tokens === null || tokens <= 0) continue;
     const key = typeof item.key === 'string' && item.key.trim() ? item.key.trim() : 'unknown';
     const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : key;
-    result.push({ key, label, tokens });
+    const existing = byLabel.get(label);
+    if (existing) {
+      existing.tokens += tokens;
+    } else {
+      byLabel.set(label, { key, label, tokens });
+    }
   }
-  return result;
+  return Array.from(byLabel.values()).sort((a, b) => b.tokens - a.tokens);
 }
 
 /**

@@ -14,6 +14,18 @@ const TOKEN_GROUP_LABELS = Object.freeze({
   TOKEN_GROUP_THOUGHTS: 'Thoughts',
   TOKEN_GROUP_FILES: 'Files / Context',
   TOKEN_GROUP_OTHER: 'Other',
+  TOKEN_SOURCE_SYSTEM: 'System',
+  TOKEN_SOURCE_USER: 'User Messages',
+  TOKEN_SOURCE_ASSISTANT: 'Assistant Messages',
+  TOKEN_SOURCE_TOOLS: 'Tools',
+  TOKEN_SOURCE_TOOL_RESULTS: 'Tool Results',
+  TOKEN_SOURCE_FILES: 'Files / Context',
+  TOKEN_SOURCE_THOUGHTS: 'Thoughts',
+  TOKEN_TYPE_CHAT_MESSAGES: 'Chat Messages',
+  TOKEN_TYPE_SYSTEM: 'System',
+  TOKEN_TYPE_TOOLS: 'Tools',
+  TOKEN_TYPE_FILES: 'Files / Context',
+  TOKEN_TYPE_THOUGHTS: 'Thoughts',
 });
 
 function formatTokenGroupLabel(rawType) {
@@ -21,11 +33,11 @@ function formatTokenGroupLabel(rawType) {
   const trimmed = rawType.trim();
   if (Object.hasOwn(TOKEN_GROUP_LABELS, trimmed)) return TOKEN_GROUP_LABELS[trimmed];
   // NB2: Preserve human-readable displayName containing spaces or mixed case verbatim
-  if (!/^TOKEN_GROUP_|^[A-Z0-9_]+$/.test(trimmed)) {
+  if (!/^(?:TOKEN_GROUP_|TOKEN_SOURCE_|TOKEN_TYPE_)|^[A-Z0-9_]+$/.test(trimmed)) {
     return trimmed;
   }
   return trimmed
-    .replace(/^TOKEN_GROUP_/, '')
+    .replace(/^(?:TOKEN_GROUP_|TOKEN_SOURCE_|TOKEN_TYPE_)/, '')
     .toLowerCase()
     .split('_')
     .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ''))

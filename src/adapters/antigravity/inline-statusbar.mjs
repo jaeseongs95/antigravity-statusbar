@@ -130,32 +130,133 @@ const INLINE_STYLES = `
   flex-wrap: wrap;
 }
 .agy-inline-pop-section {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding-top: 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 .agy-inline-pop-subtitle {
   font-size: 11px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.86);
+  color: rgba(255, 255, 255, 0.9);
+  letter-spacing: -0.01em;
+}
+.agy-inline-pop-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.56);
+  word-break: keep-all;
+}
+.agy-inline-pop-meta-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.agy-inline-pop-meta-model {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agy-inline-pop-meta-steps {
+  color: rgba(255, 255, 255, 0.6);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.agy-inline-bd-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.agy-inline-bd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+.agy-inline-bd-label {
+  color: rgba(255, 255, 255, 0.82);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agy-inline-bd-val {
+  color: rgba(255, 255, 255, 0.9);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.agy-inline-bd-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.agy-inline-bd-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #4ea1ff;
+}
+.agy-inline-pop-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.agy-inline-pop-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .agy-inline-pop-btn-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
   font-size: 11px;
   background: rgba(255, 255, 255, 0.04);
-  border-radius: 5px;
-  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 7px;
+  padding: 5px 8px;
 }
 .agy-inline-pop-btn-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+.agy-inline-source-pill {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.62);
+}
+.agy-inline-btn-primary {
+  background: #2f7cf6;
+  border-color: #3f88ff;
+  color: #ffffff;
+  font-weight: 500;
+}
+.agy-inline-btn-primary:hover:not(:disabled),
+.agy-inline-btn-primary:focus-visible:not(:disabled) {
+  background: #3d87fb;
+}
+.agy-inline-btn-on {
+  background: rgba(78, 161, 255, 0.2);
+  border-color: rgba(78, 161, 255, 0.45);
+  color: #9dceff;
 }
 .agy-inline-status-note {
   font-size: 10px;
@@ -163,20 +264,21 @@ const INLINE_STYLES = `
 }
 .agy-inline-popover {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   right: 8px;
-  width: 290px;
+  width: 336px;
   max-width: calc(100vw - 24px);
-  background: #1e1f22;
+  background: #1b1c20;
   color: #e6e7ea;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 10px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  padding: 14px;
   z-index: 2147483000;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 11px;
+  word-break: keep-all;
 }
 .agy-inline-popover.hidden {
   display: none;
@@ -187,7 +289,28 @@ const INLINE_STYLES = `
   justify-content: space-between;
   gap: 8px;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
+  color: #f3f4f6;
+}
+.agy-inline-pop-close {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 15px;
+  line-height: 1;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.agy-inline-pop-close:hover,
+.agy-inline-pop-close:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  outline: none;
 }
 .agy-inline-pop-row {
   display: flex;
@@ -202,7 +325,7 @@ const INLINE_STYLES = `
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 6px;
   font-size: 11px;
   color: rgba(255, 255, 255, 0.78);
 }
@@ -214,22 +337,37 @@ const INLINE_STYLES = `
 }
 .agy-inline-pop-select,
 .agy-inline-pop-input {
-  background: #141517;
+  background: #131417;
   color: #e6e7ea;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
   font-size: 11px;
-  padding: 3px 6px;
+  padding: 5px 8px;
+  min-width: 0;
+}
+.agy-inline-pop-select:focus-visible,
+.agy-inline-pop-input:focus-visible {
+  border-color: #4ea1ff;
+  outline: none;
 }
 .agy-inline-pop-input {
-  width: 84px;
+  flex: 1;
+  font-variant-numeric: tabular-nums;
 }
 .agy-inline-pop-feedback {
-  font-size: 10px;
+  font-size: 11px;
   color: #8cc8ff;
+}
+.agy-inline-pop-feedback:empty {
+  display: none;
 }
 .agy-inline-pop-feedback.err {
   color: #ff9c9c;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agy-inline-bar-fill {
+    transition: none;
+  }
 }
 `;
 
@@ -268,17 +406,20 @@ export function inlineStatusbarBootstrap(cfg) {
       compacting: '…',
       compactSent: 'Compaction requested',
       compactFail: 'Compaction failed',
-      settingsTitle: 'Statusbar Details & Limit',
+      settingsTitle: 'Statusbar Settings',
+      breakdownTitle: 'Token Breakdown',
+      limitTitle: 'Soft Context Limit',
+      limitHint: 'Shows a warning badge on the bar when usage exceeds this limit.',
+      limitPlaceholder: 'Custom tokens (32,000 - 980,000)',
       hostDefault: 'Host default',
       scopeSession: 'This session',
       scopeDefault: 'Default',
       apply: 'Apply',
       applied: 'Saved',
-      invalidLimit: 'Enter 32000-980000 or empty',
+      invalidLimit: 'Enter 32,000–980,000 or leave blank for host default.',
       steps: 'Steps',
       model: 'Model',
       close: 'Close',
-      localeBtn: 'KO',
       langLabel: 'Language',
       stale: 'stale',
       addonsTitle: 'Attached Add-ons',
@@ -301,19 +442,22 @@ export function inlineStatusbarBootstrap(cfg) {
       compactSent: '컴팩션 요청됨',
       compactFail: '컴팩션 실패',
       settingsTitle: '상태바 상세 · 설정',
+      breakdownTitle: '토큰 구성',
+      limitTitle: '소프트 컨텍스트 한도',
+      limitHint: '설정한 한도를 넘으면 상태바에 경고를 표시합니다.',
+      limitPlaceholder: '직접 입력 (32,000 ~ 980,000)',
       hostDefault: '호스트 기본값',
       scopeSession: '현재 세션',
       scopeDefault: '기본값',
       apply: '적용',
-      applied: '저장됨',
-      invalidLimit: '32000~980000 또는 비움',
+      applied: '저장되었습니다.',
+      invalidLimit: '32,000~980,000 사이 숫자 또는 비움(기본값)을 입력하세요.',
       steps: '스텝',
       model: '모델',
       close: '닫기',
-      localeBtn: 'EN',
       langLabel: '언어 선택',
       stale: '오래됨',
-      addonsTitle: '연결된 애드온 관리',
+      addonsTitle: '연결된 애드온',
       addonEmpty: '연결된 애드온이 없습니다. 에이전트에게 버튼 추가를 요청하세요.',
       addonOn: '켜짐',
       addonOff: '꺼짐',
@@ -321,6 +465,19 @@ export function inlineStatusbarBootstrap(cfg) {
       cmdSent: '전송됨',
       cmdFail: '전송 실패',
     },
+  };
+
+  const KO_BREAKDOWN_LABELS = {
+    System: '시스템',
+    'System Prompt': '시스템 프롬프트',
+    'Chat Messages': '대화 메시지',
+    'User Messages': '사용자 메시지',
+    'Assistant Messages': '응답 메시지',
+    Tools: '도구',
+    'Tool Results': '도구 결과',
+    'Files / Context': '파일 · 컨텍스트',
+    Thoughts: '사고 과정',
+    Other: '기타',
   };
 
   let disposed = false;
@@ -512,34 +669,44 @@ export function inlineStatusbarBootstrap(cfg) {
     const popTitle = document.createElement('span');
     popTitle.textContent = t().settingsTitle;
 
-    const popHeadActions = document.createElement('div');
-    popHeadActions.className = 'agy-inline-pop-controls';
-    const localeBtn = document.createElement('button');
-    localeBtn.type = 'button';
-    localeBtn.className = 'agy-inline-btn';
-    localeBtn.textContent = t().localeBtn;
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
-    closeBtn.className = 'agy-inline-btn';
+    closeBtn.className = 'agy-inline-pop-close';
     closeBtn.textContent = '×';
     closeBtn.setAttribute('aria-label', t().close);
-    popHeadActions.appendChild(localeBtn);
-    popHeadActions.appendChild(closeBtn);
     popHead.appendChild(popTitle);
-    popHead.appendChild(popHeadActions);
+    popHead.appendChild(closeBtn);
 
     const popMeta = document.createElement('div');
-    popMeta.className = 'agy-inline-pop-row';
+    popMeta.className = 'agy-inline-pop-meta-card';
     const popModel = document.createElement('span');
+    popModel.className = 'agy-inline-pop-meta-model';
     const popSteps = document.createElement('span');
+    popSteps.className = 'agy-inline-pop-meta-steps';
     popMeta.appendChild(popModel);
     popMeta.appendChild(popSteps);
 
+    const breakdownSection = document.createElement('div');
+    breakdownSection.className = 'agy-inline-pop-section';
+    const breakdownTitle = document.createElement('div');
+    breakdownTitle.className = 'agy-inline-pop-subtitle';
+    breakdownTitle.textContent = t().breakdownTitle;
     const breakdownList = document.createElement('ul');
     breakdownList.className = 'agy-inline-pop-list';
+    breakdownSection.appendChild(breakdownTitle);
+    breakdownSection.appendChild(breakdownList);
 
-    const limitControls = document.createElement('div');
-    limitControls.className = 'agy-inline-pop-controls';
+    const limitSection = document.createElement('div');
+    limitSection.className = 'agy-inline-pop-section';
+    const limitTitle = document.createElement('div');
+    limitTitle.className = 'agy-inline-pop-subtitle';
+    limitTitle.textContent = t().limitTitle;
+    const limitHint = document.createElement('div');
+    limitHint.className = 'agy-inline-pop-hint';
+    limitHint.textContent = t().limitHint;
+
+    const limitRow1 = document.createElement('div');
+    limitRow1.className = 'agy-inline-pop-grid2';
 
     const scopeSelect = document.createElement('select');
     scopeSelect.className = 'agy-inline-pop-select';
@@ -555,23 +722,32 @@ export function inlineStatusbarBootstrap(cfg) {
     const presetSelect = document.createElement('select');
     presetSelect.className = 'agy-inline-pop-select';
 
+    limitRow1.appendChild(scopeSelect);
+    limitRow1.appendChild(presetSelect);
+
+    const limitRow2 = document.createElement('div');
+    limitRow2.className = 'agy-inline-pop-input-row';
+
     const customInput = document.createElement('input');
     customInput.className = 'agy-inline-pop-input';
     customInput.type = 'number';
     customInput.min = '32000';
     customInput.max = '980000';
     customInput.step = '1000';
-    customInput.placeholder = '32000-980000';
+    customInput.placeholder = t().limitPlaceholder;
 
     const applyBtn = document.createElement('button');
     applyBtn.type = 'button';
-    applyBtn.className = 'agy-inline-btn';
+    applyBtn.className = 'agy-inline-btn agy-inline-btn-primary';
     applyBtn.textContent = t().apply;
 
-    limitControls.appendChild(scopeSelect);
-    limitControls.appendChild(presetSelect);
-    limitControls.appendChild(customInput);
-    limitControls.appendChild(applyBtn);
+    limitRow2.appendChild(customInput);
+    limitRow2.appendChild(applyBtn);
+
+    limitSection.appendChild(limitTitle);
+    limitSection.appendChild(limitHint);
+    limitSection.appendChild(limitRow1);
+    limitSection.appendChild(limitRow2);
 
     const popFeedback = document.createElement('div');
     popFeedback.className = 'agy-inline-pop-feedback';
@@ -592,8 +768,8 @@ export function inlineStatusbarBootstrap(cfg) {
 
     popEl.appendChild(popHead);
     popEl.appendChild(popMeta);
-    popEl.appendChild(breakdownList);
-    popEl.appendChild(limitControls);
+    popEl.appendChild(breakdownSection);
+    popEl.appendChild(limitSection);
     popEl.appendChild(addonSection);
     popEl.appendChild(popFeedback);
 
@@ -703,7 +879,7 @@ export function inlineStatusbarBootstrap(cfg) {
 
       if (combined.length === 0) {
         const emptyEl = document.createElement('div');
-        emptyEl.className = 'agy-inline-status-note';
+        emptyEl.className = 'agy-inline-pop-hint';
         emptyEl.textContent = tr.addonEmpty;
         addonListEl.appendChild(emptyEl);
       } else {
@@ -713,7 +889,13 @@ export function inlineStatusbarBootstrap(cfg) {
 
           const meta = document.createElement('span');
           meta.className = 'agy-inline-pop-btn-meta';
-          meta.textContent = `${item.label} · ${item.source}`;
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = item.label;
+          const pillSpan = document.createElement('span');
+          pillSpan.className = 'agy-inline-source-pill';
+          pillSpan.textContent = item.source;
+          meta.appendChild(nameSpan);
+          meta.appendChild(pillSpan);
           meta.title = item.detail;
 
           const actions = document.createElement('div');
@@ -721,7 +903,9 @@ export function inlineStatusbarBootstrap(cfg) {
 
           const toggleBtn = document.createElement('button');
           toggleBtn.type = 'button';
-          toggleBtn.className = 'agy-inline-btn';
+          toggleBtn.className = item.enabled
+            ? 'agy-inline-btn agy-inline-btn-on'
+            : 'agy-inline-btn';
           toggleBtn.textContent = item.enabled ? tr.addonOn : tr.addonOff;
           toggleBtn.addEventListener('click', () =>
             handleToggleAddon(item.id, !item.enabled, item.runtime),
@@ -742,10 +926,20 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
+    function localizeBreakdownLabel(rawLabel) {
+      if (locale === 'ko' && Object.prototype.hasOwnProperty.call(KO_BREAKDOWN_LABELS, rawLabel)) {
+        return KO_BREAKDOWN_LABELS[rawLabel];
+      }
+      return rawLabel;
+    }
+
     function render() {
       const tr = t();
       setText(popTitle, tr.settingsTitle);
-      setText(localeBtn, tr.localeBtn);
+      setText(breakdownTitle, tr.breakdownTitle);
+      setText(limitTitle, tr.limitTitle);
+      setText(limitHint, tr.limitHint);
+      customInput.placeholder = tr.limitPlaceholder;
       setText(optSession, tr.scopeSession);
       setText(optDefault, tr.scopeDefault);
       setText(applyBtn, tr.apply);
@@ -790,21 +984,41 @@ export function inlineStatusbarBootstrap(cfg) {
         const cachePct = rawCachePct !== null ? `${rawCachePct.toFixed(0)}%` : '--';
         setText(cacheEl, `${tr.cache} ${cachePct}`);
 
-        setText(popModel, `${tr.model}: ${snap.modelName || '--'}`);
-        setText(popSteps, `${tr.steps}: ${snap.stepCount ?? '--'}`);
+        setText(popModel, snap.modelName || '--');
+        const stepStr =
+          typeof snap.stepCount === 'number' ? snap.stepCount.toLocaleString() : '--';
+        setText(popSteps, `${tr.steps} ${stepStr}`);
 
         clearChildren(breakdownList);
         const bdList = Array.isArray(snap.tokenBreakdown) ? snap.tokenBreakdown : [];
+        const bdTotal = bdList.reduce((sum, it) => sum + (typeof it?.tokens === 'number' ? it.tokens : 0), 0);
+        breakdownSection.style.display = bdList.length > 0 ? '' : 'none';
         for (const item of bdList) {
           if (!item || typeof item.tokens !== 'number' || item.tokens <= 0) continue;
+          const sharePct = bdTotal > 0 ? Math.min(100, (item.tokens / bdTotal) * 100) : 0;
           const li = document.createElement('li');
-          li.className = 'agy-inline-pop-row';
+          li.className = 'agy-inline-bd-item';
+
+          const head = document.createElement('div');
+          head.className = 'agy-inline-bd-head';
           const lbl = document.createElement('span');
-          lbl.textContent = item.label || item.key || 'Other';
+          lbl.className = 'agy-inline-bd-label';
+          lbl.textContent = localizeBreakdownLabel(item.label || item.key || 'Other');
           const val = document.createElement('span');
-          val.textContent = formatTokens(item.tokens);
-          li.appendChild(lbl);
-          li.appendChild(val);
+          val.className = 'agy-inline-bd-val';
+          val.textContent = `${formatTokens(item.tokens)} (${Math.round(sharePct)}%)`;
+          head.appendChild(lbl);
+          head.appendChild(val);
+
+          const track = document.createElement('div');
+          track.className = 'agy-inline-bd-track';
+          const bar = document.createElement('div');
+          bar.className = 'agy-inline-bd-fill';
+          bar.style.width = `${Math.max(2, sharePct).toFixed(1)}%`;
+          track.appendChild(bar);
+
+          li.appendChild(head);
+          li.appendChild(track);
           breakdownList.appendChild(li);
         }
 
@@ -982,14 +1196,21 @@ export function inlineStatusbarBootstrap(cfg) {
       } catch {}
     }
 
-    async function handleToggleLocale() {
-      await applyLocale(locale === 'ko' ? 'en' : 'ko');
-    }
-
     const onKeyDown = (e) => {
       if (e.key === 'Escape' && state.popOpen) {
         setPopoverOpen(false);
+        try {
+          settingsBtn.focus();
+        } catch {}
       }
+    };
+    const onDocPointerDown = (e) => {
+      if (!state.popOpen) return;
+      const target = e.target;
+      if (popEl.contains(target) || settingsBtn.contains(target) || ctxBtn.contains(target)) {
+        return;
+      }
+      setPopoverOpen(false);
     };
     const onInputKeyDown = (e) => {
       if (e.isComposing || e.keyCode === 229) return;
@@ -1007,14 +1228,19 @@ export function inlineStatusbarBootstrap(cfg) {
 
     ctxBtn.addEventListener('click', () => setPopoverOpen(!state.popOpen));
     settingsBtn.addEventListener('click', () => setPopoverOpen(!state.popOpen));
-    closeBtn.addEventListener('click', () => setPopoverOpen(false));
+    closeBtn.addEventListener('click', () => {
+      setPopoverOpen(false);
+      try {
+        settingsBtn.focus();
+      } catch {}
+    });
     compactBtn.addEventListener('click', handleCompact);
     applyBtn.addEventListener('click', handleApplyLimit);
-    localeBtn.addEventListener('click', handleToggleLocale);
     langSelect.addEventListener('change', onLangChange);
     presetSelect.addEventListener('change', onPresetChange);
     customInput.addEventListener('keydown', onInputKeyDown);
     document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onDocPointerDown);
 
     rebuildPresets();
     render();
@@ -1025,6 +1251,7 @@ export function inlineStatusbarBootstrap(cfg) {
       destroy() {
         if (state.abortCtrl) state.abortCtrl.abort();
         document.removeEventListener('keydown', onKeyDown);
+        document.removeEventListener('pointerdown', onDocPointerDown);
         try {
           barEl.remove();
         } catch {}
