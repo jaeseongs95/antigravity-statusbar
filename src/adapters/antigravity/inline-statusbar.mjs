@@ -391,10 +391,10 @@ export function inlineStatusbarBootstrap(cfg) {
   const TOKEN = cfg.token;
   const STYLE_ID = 'agy-inline-statusbar-style';
   const PRESETS = [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
-  const NORMAL_POLL_MS = 3000;
-  const BURST_POLL_MS = 1000;
+  const NORMAL_POLL_MS = 1500;
+  const BURST_POLL_MS = 750;
   const QUOTA_POLL_MS = 15000;
-  const MAX_BURST_MS = 30000;
+  const MAX_BURST_MS = 20000;
 
   const STRINGS = {
     en: {
@@ -403,15 +403,17 @@ export function inlineStatusbarBootstrap(cfg) {
       ctx: 'Ctx',
       cache: 'Cache',
       quota: 'Quota',
-      softLimit: 'Soft Limit',
+      softLimit: 'Limit Reached',
+      autoCompacting: 'Auto-compacting…',
       compact: 'compact',
       compacting: '…',
       compactSent: 'Compaction requested',
       compactFail: 'Compaction failed',
       settingsTitle: 'Statusbar Settings',
       breakdownTitle: 'Token Breakdown',
-      limitTitle: 'Soft Context Limit',
-      limitHint: 'Shows a warning badge on the bar when usage exceeds this limit.',
+      limitTitle: 'Session Context Limit',
+      limitHint: 'Saved per session. Runs /compact automatically when the limit is reached.',
+      autoCompactLabel: 'Auto /compact on limit',
       limitPlaceholder: 'Custom tokens (32,000 - 980,000)',
       hostDefault: 'Host default',
       scopeSession: 'This session',
@@ -438,15 +440,17 @@ export function inlineStatusbarBootstrap(cfg) {
       ctx: '컨텍스트',
       cache: '캐시',
       quota: '할당량',
-      softLimit: '소프트 한도 초과',
+      softLimit: '한도 도달',
+      autoCompacting: '자동 컴팩션 중…',
       compact: 'compact',
       compacting: '…',
       compactSent: '컴팩션 요청됨',
       compactFail: '컴팩션 실패',
       settingsTitle: '상태바 상세 · 설정',
       breakdownTitle: '토큰 구성',
-      limitTitle: '소프트 컨텍스트 한도',
-      limitHint: '설정한 한도를 넘으면 상태바에 경고를 표시합니다.',
+      limitTitle: '세션 컨텍스트 한도',
+      limitHint: '세션마다 따로 저장되며, 한도에 도달하면 자동으로 /compact를 실행합니다.',
+      autoCompactLabel: '한도 도달 시 자동 /compact',
       limitPlaceholder: '직접 입력 (32,000 ~ 980,000)',
       hostDefault: '호스트 기본값',
       scopeSession: '현재 세션',
@@ -484,6 +488,7 @@ export function inlineStatusbarBootstrap(cfg) {
 
   let disposed = false;
   let locale = 'ko';
+  let autoCompactEnabled = true;
   let customButtons = [];
   let disabledRuntimeAddonIds = new Set();
   const runtimeButtons = new Map();
@@ -732,10 +737,23 @@ export function inlineStatusbarBootstrap(cfg) {
     limitRow2.appendChild(customInput);
     limitRow2.appendChild(applyBtn);
 
+    const autoCompactRow = document.createElement('div');
+    autoCompactRow.className = 'agy-inline-pop-row';
+    const autoCompactLbl = document.createElement('span');
+    autoCompactLbl.className = 'agy-inline-pop-hint';
+    autoCompactLbl.textContent = t().autoCompactLabel;
+    const autoCompactBtn = document.createElement('button');
+    autoCompactBtn.type = 'button';
+    autoCompactBtn.className = 'agy-inline-btn agy-inline-btn-on';
+    autoCompactBtn.textContent = t().addonOn;
+    autoCompactRow.appendChild(autoCompactLbl);
+    autoCompactRow.appendChild(autoCompactBtn);
+
     limitSection.appendChild(limitTitle);
     limitSection.appendChild(limitHint);
     limitSection.appendChild(limitRow1);
     limitSection.appendChild(limitRow2);
+    limitSection.appendChild(autoCompactRow);
 
     const popFeedback = document.createElement('div');
     popFeedback.className = 'agy-inline-pop-feedback';
@@ -800,6 +818,7 @@ export function inlineStatusbarBootstrap(cfg) {
       barEl,
       popEl,
       popOpen: false,
+      lastSessionId: '',
       snapshot: null,
       epoch: 0,
       abortCtrl: null,
@@ -954,6 +973,11 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(breakdownTitle, tr.breakdownTitle);
       setText(limitTitle, tr.limitTitle);
       setText(limitHint, tr.limitHint);
+      setText(autoCompactLbl, tr.autoCompactLabel);
+      autoCompactBtn.className = autoCompactEnabled
+        ? 'agy-inline-btn agy-inline-btn-on'
+        : 'agy-inline-btn';
+      setText(autoCompactBtn, autoCompactEnabled ? tr.addonOn : tr.addonOff);
       customInput.placeholder = tr.limitPlaceholder;
       setText(optSession, tr.scopeSession);
       setText(optDefault, tr.scopeDefault);
@@ -984,7 +1008,10 @@ export function inlineStatusbarBootstrap(cfg) {
           'agy-inline-bar-fill' +
           (isSoftExceeded || pct >= 90 ? ' danger' : pct >= 75 ? ' warn' : '');
 
-        if (isSoftExceeded) {
+        if (snap.autoCompactTriggered || snap.compaction?.inProgress) {
+          softBadgeEl.style.display = '';
+          setText(softBadgeEl, tr.autoCompacting);
+        } else if (isSoftExceeded) {
           softBadgeEl.style.display = '';
           setText(softBadgeEl, tr.softLimit);
         } else {
@@ -1085,6 +1112,11 @@ export function inlineStatusbarBootstrap(cfg) {
       if (disposed) return;
       const sid = getSessionId();
       if (!sid) return;
+      if (state.lastSessionId && state.lastSessionId !== sid) {
+        state.snapshot = null;
+        render();
+      }
+      state.lastSessionId = sid;
       const reqEpoch = ++state.epoch;
       if (state.abortCtrl) state.abortCtrl.abort();
       state.abortCtrl = new AbortController();
@@ -1205,6 +1237,20 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
+    async function handleToggleAutoCompact() {
+      const next = !autoCompactEnabled;
+      autoCompactEnabled = next;
+      for (const ctrl of barControllers.values()) ctrl.render();
+      try {
+        await apiPost('/api/settings/update', { autoCompact: next });
+        popFeedback.className = 'agy-inline-pop-feedback';
+        setText(popFeedback, t().applied);
+      } catch (err) {
+        popFeedback.className = 'agy-inline-pop-feedback err';
+        setText(popFeedback, err?.message || 'Error');
+      }
+    }
+
     async function applyLocale(next) {
       if (next !== 'ko' && next !== 'en') return;
       locale = next;
@@ -1254,6 +1300,7 @@ export function inlineStatusbarBootstrap(cfg) {
     });
     compactBtn.addEventListener('click', handleCompact);
     applyBtn.addEventListener('click', handleApplyLimit);
+    autoCompactBtn.addEventListener('click', handleToggleAutoCompact);
     langSelect.addEventListener('change', onLangChange);
     presetSelect.addEventListener('change', onPresetChange);
     customInput.addEventListener('keydown', onInputKeyDown);
@@ -1314,18 +1361,40 @@ export function inlineStatusbarBootstrap(cfg) {
     }
   }
 
+  let domActivityTimer = null;
+  function triggerImmediateActivityRefresh() {
+    if (disposed) return;
+    burstUntil = Math.max(burstUntil, Date.now() + 8000);
+    if (domActivityTimer) return;
+    domActivityTimer = setTimeout(() => {
+      domActivityTimer = null;
+      if (disposed) return;
+      scanAndMount();
+      for (const ctrl of barControllers.values()) {
+        ctrl.refreshSnapshot();
+      }
+    }, 350);
+  }
+
   async function pollSessionsAndSnapshots() {
     if (disposed) return;
-    try {
-      const sessRes = await apiPost('/api/sessions', {});
-      if (Array.isArray(sessRes?.sessions) && sessRes.sessions.length > 0) {
-        fallbackSessionId = sessRes.sessions[0].sessionId || '';
-      }
-    } catch {}
     scanAndMount();
+    const snapshotPromises = [];
     for (const ctrl of barControllers.values()) {
-      ctrl.refreshSnapshot();
+      snapshotPromises.push(ctrl.refreshSnapshot());
     }
+    const sessionsPromise = apiPost('/api/sessions', {})
+      .then((sessRes) => {
+        if (Array.isArray(sessRes?.sessions) && sessRes.sessions.length > 0) {
+          const topSid = sessRes.sessions[0].sessionId || '';
+          if (topSid && topSid !== fallbackSessionId) {
+            fallbackSessionId = topSid;
+            for (const ctrl of barControllers.values()) ctrl.refreshSnapshot();
+          }
+        }
+      })
+      .catch(() => {});
+    await Promise.all([...snapshotPromises, sessionsPromise]);
   }
 
   async function pollQuotaAndSettings() {
@@ -1334,6 +1403,9 @@ export function inlineStatusbarBootstrap(cfg) {
       const settings = await apiPost('/api/settings/get', {});
       if (settings && (settings.locale === 'ko' || settings.locale === 'en')) {
         locale = settings.locale;
+      }
+      if (typeof settings?.autoCompact === 'boolean') {
+        autoCompactEnabled = settings.autoCompact;
       }
       if (Array.isArray(settings?.customButtons)) {
         customButtons = settings.customButtons;
@@ -1379,11 +1451,21 @@ export function inlineStatusbarBootstrap(cfg) {
   if (typeof MutationObserver !== 'undefined' && document.body) {
     observer = new MutationObserver((mutations) => {
       if (disposed) return;
+      let sawCascadeAttr = false;
+      let sawExternalChange = false;
       for (const m of mutations) {
-        if (!isOwnNode(m.target)) {
-          scanAndMount();
-          return;
+        if (isOwnNode(m.target)) continue;
+        sawExternalChange = true;
+        if (m.type === 'attributes' && m.attributeName === 'data-cascade-id') {
+          sawCascadeAttr = true;
         }
+      }
+      if (sawCascadeAttr) {
+        scanAndMount();
+        for (const ctrl of barControllers.values()) ctrl.refreshSnapshot();
+      } else if (sawExternalChange) {
+        scanAndMount();
+        triggerImmediateActivityRefresh();
       }
     });
     observer.observe(document.body, {
@@ -1474,6 +1556,7 @@ export function inlineStatusbarBootstrap(cfg) {
       if (disposed) return;
       disposed = true;
       if (snapshotPollTimer) clearTimeout(snapshotPollTimer);
+      if (domActivityTimer) clearTimeout(domActivityTimer);
       if (quotaPollTimer) clearInterval(quotaPollTimer);
       if (observer) observer.disconnect();
       for (const c of activeControllers) c.abort();

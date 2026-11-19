@@ -433,11 +433,25 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     });
   }
 
+  const MAX_TAIL_CACHE = 64;
+  const tailOffsetCache = new Map();
+
+  function rememberTailEnd(cascadeId, endOffset) {
+    if (!cascadeId || !Number.isFinite(endOffset) || endOffset <= 0) return;
+    if (tailOffsetCache.has(cascadeId)) tailOffsetCache.delete(cascadeId);
+    tailOffsetCache.set(cascadeId, Math.floor(endOffset));
+    while (tailOffsetCache.size > MAX_TAIL_CACHE) {
+      const oldest = tailOffsetCache.keys().next().value;
+      if (oldest === undefined) break;
+      tailOffsetCache.delete(oldest);
+    }
+  }
+
   /**
    * Bounded overshoot tail reader for GetCascadeTrajectoryGeneratorMetadata (-20/-60/-180).
-   * F2: When approxIndex is missing/<=0, probes offset=0 first. If offset=0 exceeds the 4MB
-   * response cap on an ultra-long trajectory (e.g. >10k steps), performs bounded exponential
-   * + binary search to land cleanly on the final <4MB tail window in O(log N) calls.
+   * F2: When approxIndex is missing/<=0, uses cached tail offset for O(1) subsequent polls;
+   * on cache miss, probes offset=0 first and falls back to bounded exponential + binary
+   * search to land cleanly on the final <4MB tail window in O(log N) calls.
    *
    * @param {string} cascadeId
    * @param {number | null} approxIndex
@@ -468,10 +482,12 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
       return Array.isArray(resp?.generatorMetadata) ? resp.generatorMetadata : [];
     }
 
-    const base =
+    const explicitBase =
       typeof approxIndex === 'number' && Number.isFinite(approxIndex) && approxIndex > 0
         ? Math.floor(approxIndex)
         : 0;
+    const cachedBase = explicitBase === 0 ? tailOffsetCache.get(cascadeId) || 0 : 0;
+    const base = explicitBase > 0 ? explicitBase : cachedBase;
 
     if (base > 0) {
       const offsets = [Math.max(0, base - 20), Math.max(0, base - 60), Math.max(0, base - 180)];
@@ -486,16 +502,22 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
           continue;
         }
         if (list.length > 0 && (hasUsefulChatModel(list) || offset === 0)) {
+          rememberTailEnd(cascadeId, offset + list.length);
           return list;
         }
       }
-      return [];
+      if (cachedBase > 0) {
+        tailOffsetCache.delete(cascadeId);
+      } else {
+        return [];
+      }
     }
 
     // Fast path for normal trajectories: offset = 0
     try {
       const list = await fetchOffset(0);
       if (list.length > 0) {
+        rememberTailEnd(cascadeId, list.length);
         return list;
       }
       return [];
@@ -513,14 +535,19 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
         const list = await fetchOffset(probe);
         if (list.length > 0) {
           if (hasUsefulChatModel(list)) {
+            rememberTailEnd(cascadeId, probe + list.length);
             return list;
           }
           // Step back slightly if tail slice only had non-chatModel entries
           const backOffset = Math.max(lowOverflow + 1, probe - 64);
           try {
             const wider = await fetchOffset(backOffset);
-            if (wider.length > 0) return wider;
+            if (wider.length > 0) {
+              rememberTailEnd(cascadeId, backOffset + wider.length);
+              return wider;
+            }
           } catch {}
+          rememberTailEnd(cascadeId, probe + list.length);
           return list;
         }
         highEmpty = probe;
@@ -543,6 +570,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
       try {
         const list = await fetchOffset(mid);
         if (list.length > 0) {
+          rememberTailEnd(cascadeId, mid + list.length);
           return list;
         }
         hi = mid;

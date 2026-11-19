@@ -19,6 +19,7 @@ import {
 } from '../ports/contracts.mjs';
 
 const DEFAULT_COMPACT_COOLDOWN_MS = 15_000;
+const AUTO_COMPACT_COOLDOWN_MS = 60_000;
 
 /**
  * Core application service orchestrating session telemetry, quota, settings,
@@ -39,6 +40,8 @@ export function createStatusbarService({
 
   /** @type {Map<string, { attemptToken: string, startedAt: number, acceptedAt: number | null, method: string | null, baselineCompactedStep: number | null, status: 'pending' | 'accepted' }>} */
   const compactingSessions = new Map();
+  /** @type {Map<string, number>} */
+  const autoCompactCooldownUntil = new Map();
   let attemptSeq = 0;
 
   function pruneCompactingSessions(now) {
@@ -141,6 +144,26 @@ export function createStatusbarService({
 
       const now = clock();
       const compaction = getCompactionState(sessionId, telemetry, now);
+      const autoCompactEnabled = settings.autoCompact === true;
+      let autoCompactTriggered = false;
+
+      if (
+        autoCompactEnabled &&
+        limitInfo.isCustomActive &&
+        threshold.exceededSoftLimit &&
+        !compaction.inProgress &&
+        (autoCompactCooldownUntil.get(sessionId) || 0) <= now
+      ) {
+        autoCompactCooldownUntil.set(sessionId, now + AUTO_COMPACT_COOLDOWN_MS);
+        while (autoCompactCooldownUntil.size > MAX_SESSION_OVERRIDES) {
+          const oldest = autoCompactCooldownUntil.keys().next().value;
+          if (oldest === undefined) break;
+          autoCompactCooldownUntil.delete(oldest);
+        }
+        autoCompactTriggered = true;
+        // Fire-and-forget guarded auto-compaction for this session
+        this.requestCompaction(sessionId).catch(() => {});
+      }
 
       return {
         sessionId,
@@ -159,6 +182,8 @@ export function createStatusbarService({
         usagePercent: threshold.usagePercent,
         thresholdLevel: threshold.thresholdLevel,
         exceededSoftLimit: threshold.exceededSoftLimit,
+        autoCompact: autoCompactEnabled,
+        autoCompactTriggered,
         cacheHitPercent: telemetry.cacheHitPercent ?? null,
         cacheReadTokens: telemetry.cacheReadTokens ?? null,
         inputTokens: telemetry.inputTokens ?? null,
@@ -191,6 +216,7 @@ export function createStatusbarService({
       return {
         locale: settings.locale,
         defaultCustomLimit: settings.defaultCustomLimit,
+        autoCompact: settings.autoCompact !== false,
         customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
         disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
           ? settings.disabledRuntimeAddonIds
@@ -223,6 +249,11 @@ export function createStatusbarService({
 
       if (Object.prototype.hasOwnProperty.call(patch, 'defaultCustomLimit')) {
         normalizedPatch.defaultCustomLimit = validateCustomLimit(patch.defaultCustomLimit);
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'autoCompact')) {
+        normalizedPatch.autoCompact = Boolean(patch.autoCompact);
         hasChange = true;
       }
 
@@ -266,6 +297,7 @@ export function createStatusbarService({
       return {
         locale: updated.locale,
         defaultCustomLimit: updated.defaultCustomLimit,
+        autoCompact: updated.autoCompact !== false,
         customButtons: Array.isArray(updated.customButtons) ? updated.customButtons : [],
         disabledRuntimeAddonIds: Array.isArray(updated.disabledRuntimeAddonIds)
           ? updated.disabledRuntimeAddonIds

@@ -477,6 +477,9 @@ export function mapQuotaSummary(rawResult) {
  * @param {ReturnType<import('./ls-transport.mjs').createLsTransport>} lsTransport
  */
 export function createAntigravityTelemetryAdapter(lsTransport) {
+  const OVERSIZED_STREAM_SKIP_MS = 30_000;
+  const oversizedStreamUntil = new Map();
+
   return {
     async listSessions() {
       const resp = await lsTransport.callUnaryRpc('GetAllCascadeTrajectories', {});
@@ -484,13 +487,28 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
     },
 
     async getSessionTelemetry(sessionId) {
+      const now = Date.now();
+      const skipStream = (oversizedStreamUntil.get(sessionId) || 0) > now;
+
       const [streamOutcome, trajectoriesResp] = await Promise.all([
-        lsTransport
-          .readFirstStreamFrame('StreamAgentStateUpdates', {
-            conversationId: sessionId,
-          })
-          .then((frame) => ({ ok: true, frame }))
-          .catch((error) => ({ ok: false, error })),
+        skipStream
+          ? Promise.resolve({ ok: false, error: new Error('Skipped oversized stream') })
+          : lsTransport
+              .readFirstStreamFrame('StreamAgentStateUpdates', {
+                conversationId: sessionId,
+              })
+              .then((frame) => ({ ok: true, frame }))
+              .catch((error) => {
+                if (typeof error?.message === 'string' && error.message.includes('exceeds 4MB cap')) {
+                  oversizedStreamUntil.set(sessionId, now + OVERSIZED_STREAM_SKIP_MS);
+                  while (oversizedStreamUntil.size > 64) {
+                    const oldest = oversizedStreamUntil.keys().next().value;
+                    if (oldest === undefined) break;
+                    oversizedStreamUntil.delete(oldest);
+                  }
+                }
+                return { ok: false, error };
+              }),
         lsTransport.callUnaryRpc('GetAllCascadeTrajectories', {}).catch(() => null),
       ]);
 

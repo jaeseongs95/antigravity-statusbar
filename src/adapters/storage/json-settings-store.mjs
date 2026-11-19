@@ -25,6 +25,7 @@ function createDefaultState() {
     localeUpdatedAt: 0,
     defaultCustomLimit: null,
     defaultCustomLimitUpdatedAt: 0,
+    autoCompact: true,
     customButtons: [],
     customButtonsUpdatedAt: 0,
     disabledRuntimeAddonIds: [],
@@ -64,6 +65,10 @@ function parsePersistedState(raw) {
     state.defaultCustomLimitUpdatedAt = Math.floor(raw.defaultCustomLimitUpdatedAt);
   }
 
+  if (typeof raw.autoCompact === 'boolean') {
+    state.autoCompact = raw.autoCompact;
+  }
+
   if (Array.isArray(raw.customButtons)) {
     try {
       state.customButtons = validateCustomButtons(raw.customButtons);
@@ -101,6 +106,7 @@ function serializeState(state) {
       localeUpdatedAt: state.localeUpdatedAt,
       defaultCustomLimit: state.defaultCustomLimit,
       defaultCustomLimitUpdatedAt: state.defaultCustomLimitUpdatedAt,
+      autoCompact: state.autoCompact,
       customButtons: state.customButtons,
       customButtonsUpdatedAt: state.customButtonsUpdatedAt,
       disabledRuntimeAddonIds: state.disabledRuntimeAddonIds,
@@ -253,6 +259,7 @@ export function createJsonSettingsStore({
       return {
         locale: state.locale,
         defaultCustomLimit: state.defaultCustomLimit,
+        autoCompact: state.autoCompact,
         customButtons: state.customButtons.map((b) => ({ ...b })),
         disabledRuntimeAddonIds: [...state.disabledRuntimeAddonIds],
         sessions: new Map(state.sessions),
@@ -273,6 +280,10 @@ export function createJsonSettingsStore({
           const ts = nextTimestamp(current.defaultCustomLimitUpdatedAt);
           current.defaultCustomLimit = validateCustomLimit(patch.defaultCustomLimit);
           current.defaultCustomLimitUpdatedAt = ts;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'autoCompact')) {
+          current.autoCompact = Boolean(patch.autoCompact);
         }
 
         if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
@@ -303,6 +314,7 @@ export function createJsonSettingsStore({
         return {
           locale: current.locale,
           defaultCustomLimit: current.defaultCustomLimit,
+          autoCompact: current.autoCompact,
           customButtons: current.customButtons.map((b) => ({ ...b })),
           disabledRuntimeAddonIds: [...current.disabledRuntimeAddonIds],
           sessions: new Map(current.sessions),
