@@ -108,6 +108,55 @@ const INLINE_STYLES = `
   opacity: 0.45;
   cursor: not-allowed;
 }
+.agy-inline-lang-select {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.88);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 5px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+.agy-inline-lang-select option {
+  background: #1e1f22;
+  color: #e6e7ea;
+}
+.agy-inline-custom-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.agy-inline-pop-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agy-inline-pop-subtitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.86);
+}
+.agy-inline-pop-btn-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+.agy-inline-pop-btn-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .agy-inline-status-note {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.6);
@@ -230,7 +279,17 @@ export function inlineStatusbarBootstrap(cfg) {
       model: 'Model',
       close: 'Close',
       localeBtn: 'KO',
+      langLabel: 'Language',
       stale: 'stale',
+      customBtnsTitle: 'Custom Buttons',
+      btnLabelPlaceholder: 'Label (e.g. plan)',
+      btnCmdPlaceholder: 'Command (e.g. /plan)',
+      addBtn: '+ Add',
+      delBtn: 'Delete',
+      btnEmpty: 'No custom buttons yet.',
+      btnInvalid: 'Enter label (1-24) and command (1-500).',
+      cmdSent: 'Sent',
+      cmdFail: 'Failed',
     },
     ko: {
       connecting: '상태바: 연결 중…',
@@ -243,7 +302,7 @@ export function inlineStatusbarBootstrap(cfg) {
       compacting: '…',
       compactSent: '컴팩션 요청됨',
       compactFail: '컴팩션 실패',
-      settingsTitle: '상태바 상세 · 한도 설정',
+      settingsTitle: '상태바 상세 · 설정',
       hostDefault: '호스트 기본값',
       scopeSession: '현재 세션',
       scopeDefault: '기본값',
@@ -254,12 +313,24 @@ export function inlineStatusbarBootstrap(cfg) {
       model: '모델',
       close: '닫기',
       localeBtn: 'EN',
+      langLabel: '언어 선택',
       stale: '오래됨',
+      customBtnsTitle: '커스텀 버튼 (추가 / 삭제)',
+      btnLabelPlaceholder: '버튼 이름 (예: plan)',
+      btnCmdPlaceholder: '명령어 (예: /plan)',
+      addBtn: '+ 추가',
+      delBtn: '삭제',
+      btnEmpty: '등록된 커스텀 버튼이 없습니다.',
+      btnInvalid: '이름(1~24자)과 명령어(1~500자)를 입력하세요.',
+      cmdSent: '전송됨',
+      cmdFail: '전송 실패',
     },
   };
 
   let disposed = false;
   let locale = 'ko';
+  let customButtons = [];
+  const runtimeButtons = new Map();
   let quotaState = null;
   let quotaPollTimer = null;
   let snapshotPollTimer = null;
@@ -399,10 +470,26 @@ export function inlineStatusbarBootstrap(cfg) {
     const noteEl = document.createElement('span');
     noteEl.className = 'agy-inline-status-note';
 
+    const customBtnsContainer = document.createElement('div');
+    customBtnsContainer.className = 'agy-inline-custom-btns';
+
     const compactBtn = document.createElement('button');
     compactBtn.type = 'button';
     compactBtn.className = 'agy-inline-btn';
     compactBtn.textContent = t().compact;
+
+    const langSelect = document.createElement('select');
+    langSelect.className = 'agy-inline-lang-select';
+    langSelect.setAttribute('aria-label', t().langLabel);
+    const optKo = document.createElement('option');
+    optKo.value = 'ko';
+    optKo.textContent = '한국어';
+    const optEn = document.createElement('option');
+    optEn.value = 'en';
+    optEn.textContent = 'English';
+    langSelect.appendChild(optKo);
+    langSelect.appendChild(optEn);
+    langSelect.value = locale;
 
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
@@ -412,7 +499,9 @@ export function inlineStatusbarBootstrap(cfg) {
     settingsBtn.setAttribute('aria-expanded', 'false');
 
     rightEl.appendChild(noteEl);
+    rightEl.appendChild(customBtnsContainer);
     rightEl.appendChild(compactBtn);
+    rightEl.appendChild(langSelect);
     rightEl.appendChild(settingsBtn);
 
     // Popover for breakdown + soft context limit + locale
@@ -490,10 +579,51 @@ export function inlineStatusbarBootstrap(cfg) {
     const popFeedback = document.createElement('div');
     popFeedback.className = 'agy-inline-pop-feedback';
 
+    // Custom buttons management section (add / delete persisted buttons)
+    const customBtnSection = document.createElement('div');
+    customBtnSection.className = 'agy-inline-pop-section';
+
+    const customBtnTitle = document.createElement('div');
+    customBtnTitle.className = 'agy-inline-pop-subtitle';
+    customBtnTitle.textContent = t().customBtnsTitle;
+
+    const customBtnList = document.createElement('div');
+    customBtnList.className = 'agy-inline-pop-list';
+
+    const customBtnForm = document.createElement('div');
+    customBtnForm.className = 'agy-inline-pop-controls';
+
+    const newBtnLabelInput = document.createElement('input');
+    newBtnLabelInput.className = 'agy-inline-pop-input';
+    newBtnLabelInput.type = 'text';
+    newBtnLabelInput.maxLength = 24;
+    newBtnLabelInput.placeholder = t().btnLabelPlaceholder;
+
+    const newBtnCmdInput = document.createElement('input');
+    newBtnCmdInput.className = 'agy-inline-pop-input';
+    newBtnCmdInput.style.flex = '1';
+    newBtnCmdInput.type = 'text';
+    newBtnCmdInput.maxLength = 500;
+    newBtnCmdInput.placeholder = t().btnCmdPlaceholder;
+
+    const addCustomBtn = document.createElement('button');
+    addCustomBtn.type = 'button';
+    addCustomBtn.className = 'agy-inline-btn';
+    addCustomBtn.textContent = t().addBtn;
+
+    customBtnForm.appendChild(newBtnLabelInput);
+    customBtnForm.appendChild(newBtnCmdInput);
+    customBtnForm.appendChild(addCustomBtn);
+
+    customBtnSection.appendChild(customBtnTitle);
+    customBtnSection.appendChild(customBtnList);
+    customBtnSection.appendChild(customBtnForm);
+
     popEl.appendChild(popHead);
     popEl.appendChild(popMeta);
     popEl.appendChild(breakdownList);
     popEl.appendChild(limitControls);
+    popEl.appendChild(customBtnSection);
     popEl.appendChild(popFeedback);
 
     barEl.appendChild(leftEl);
@@ -543,6 +673,60 @@ export function inlineStatusbarBootstrap(cfg) {
       return fallbackSessionId;
     }
 
+    function renderCustomButtons() {
+      const tr = t();
+      clearChildren(customBtnsContainer);
+
+      for (const btnDef of customButtons) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'agy-inline-btn';
+        b.textContent = btnDef.label;
+        b.title = btnDef.command;
+        b.addEventListener('click', () => handleCustomCommand(btnDef, b));
+        customBtnsContainer.appendChild(b);
+      }
+
+      for (const rtDef of runtimeButtons.values()) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'agy-inline-btn';
+        b.textContent = rtDef.label;
+        if (rtDef.title) b.title = rtDef.title;
+        b.addEventListener('click', () => {
+          try {
+            rtDef.onClick({ sessionId: getSessionId(), barEl, buttonEl: b });
+          } catch {}
+        });
+        customBtnsContainer.appendChild(b);
+      }
+
+      clearChildren(customBtnList);
+      if (customButtons.length === 0) {
+        const emptyEl = document.createElement('div');
+        emptyEl.className = 'agy-inline-status-note';
+        emptyEl.textContent = tr.btnEmpty;
+        customBtnList.appendChild(emptyEl);
+      } else {
+        for (const btnDef of customButtons) {
+          const row = document.createElement('div');
+          row.className = 'agy-inline-pop-btn-item';
+          const meta = document.createElement('span');
+          meta.className = 'agy-inline-pop-btn-meta';
+          meta.textContent = `${btnDef.label} (${btnDef.command})`;
+          meta.title = `${btnDef.label}: ${btnDef.command}`;
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'agy-inline-btn';
+          del.textContent = tr.delBtn;
+          del.addEventListener('click', () => handleDeleteCustomButton(btnDef.id));
+          row.appendChild(meta);
+          row.appendChild(del);
+          customBtnList.appendChild(row);
+        }
+      }
+    }
+
     function render() {
       const tr = t();
       setText(popTitle, tr.settingsTitle);
@@ -551,7 +735,14 @@ export function inlineStatusbarBootstrap(cfg) {
       setText(optDefault, tr.scopeDefault);
       setText(applyBtn, tr.apply);
       setText(compactBtn, state.compacting ? tr.compacting : tr.compact);
+      setText(customBtnTitle, tr.customBtnsTitle);
+      setText(addCustomBtn, tr.addBtn);
+      newBtnLabelInput.placeholder = tr.btnLabelPlaceholder;
+      newBtnCmdInput.placeholder = tr.btnCmdPlaceholder;
+      langSelect.setAttribute('aria-label', tr.langLabel);
+      if (langSelect.value !== locale) langSelect.value = locale;
       rebuildPresets();
+      renderCustomButtons();
 
       const snap = state.snapshot;
       if (!snap) {
@@ -689,6 +880,63 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
+    async function handleCustomCommand(btnDef, btnEl) {
+      const sid = getSessionId();
+      if (!sid || !btnDef?.command) return;
+      if (btnEl) btnEl.disabled = true;
+      try {
+        await apiPost('/api/command', { sessionId: sid, command: btnDef.command });
+        setText(noteEl, `${btnDef.label}: ${t().cmdSent}`);
+        burstUntil = Date.now() + MAX_BURST_MS;
+        scheduleSnapshotPoll();
+      } catch {
+        setText(noteEl, `${btnDef.label}: ${t().cmdFail}`);
+      } finally {
+        if (btnEl) btnEl.disabled = false;
+        setTimeout(() => {
+          if (!disposed) setText(noteEl, '');
+        }, 4000);
+      }
+    }
+
+    async function handleAddCustomButton() {
+      const label = newBtnLabelInput.value.trim();
+      const command = newBtnCmdInput.value.trim();
+      if (!label || label.length > 24 || !command || command.length > 500) {
+        popFeedback.className = 'agy-inline-pop-feedback err';
+        setText(popFeedback, t().btnInvalid);
+        return;
+      }
+      const id = `btn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      const nextList = [...customButtons, { id, label, command }];
+      try {
+        const updated = await apiPost('/api/settings/update', { customButtons: nextList });
+        customButtons = Array.isArray(updated?.customButtons) ? updated.customButtons : nextList;
+        newBtnLabelInput.value = '';
+        newBtnCmdInput.value = '';
+        popFeedback.className = 'agy-inline-pop-feedback';
+        setText(popFeedback, t().applied);
+        for (const ctrl of barControllers.values()) ctrl.render();
+      } catch (err) {
+        popFeedback.className = 'agy-inline-pop-feedback err';
+        setText(popFeedback, err?.message || 'Error');
+      }
+    }
+
+    async function handleDeleteCustomButton(id) {
+      const nextList = customButtons.filter((b) => b.id !== id);
+      try {
+        const updated = await apiPost('/api/settings/update', { customButtons: nextList });
+        customButtons = Array.isArray(updated?.customButtons) ? updated.customButtons : nextList;
+        popFeedback.className = 'agy-inline-pop-feedback';
+        setText(popFeedback, t().applied);
+        for (const ctrl of barControllers.values()) ctrl.render();
+      } catch (err) {
+        popFeedback.className = 'agy-inline-pop-feedback err';
+        setText(popFeedback, err?.message || 'Error');
+      }
+    }
+
     async function handleApplyLimit() {
       const raw = customInput.value.trim();
       let limitVal = null;
@@ -705,7 +953,7 @@ export function inlineStatusbarBootstrap(cfg) {
       const payload =
         scope === 'default'
           ? { defaultCustomLimit: limitVal }
-          : { sessionId: getSessionId(), customLimit: limitVal };
+          : { sessionLimit: { sessionId: getSessionId(), limit: limitVal } };
       try {
         await apiPost('/api/settings/update', payload);
         popFeedback.className = 'agy-inline-pop-feedback';
@@ -717,13 +965,17 @@ export function inlineStatusbarBootstrap(cfg) {
       }
     }
 
-    async function handleToggleLocale() {
-      const next = locale === 'ko' ? 'en' : 'ko';
+    async function applyLocale(next) {
+      if (next !== 'ko' && next !== 'en') return;
       locale = next;
       for (const ctrl of barControllers.values()) ctrl.render();
       try {
         await apiPost('/api/settings/update', { locale: next });
       } catch {}
+    }
+
+    async function handleToggleLocale() {
+      await applyLocale(locale === 'ko' ? 'en' : 'ko');
     }
 
     const onKeyDown = (e) => {
@@ -738,8 +990,18 @@ export function inlineStatusbarBootstrap(cfg) {
         handleApplyLimit();
       }
     };
+    const onCustomBtnInputKeyDown = (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleAddCustomButton();
+      }
+    };
     const onPresetChange = () => {
       customInput.value = presetSelect.value;
+    };
+    const onLangChange = () => {
+      applyLocale(langSelect.value);
     };
 
     ctxBtn.addEventListener('click', () => setPopoverOpen(!state.popOpen));
@@ -747,9 +1009,13 @@ export function inlineStatusbarBootstrap(cfg) {
     closeBtn.addEventListener('click', () => setPopoverOpen(false));
     compactBtn.addEventListener('click', handleCompact);
     applyBtn.addEventListener('click', handleApplyLimit);
+    addCustomBtn.addEventListener('click', handleAddCustomButton);
     localeBtn.addEventListener('click', handleToggleLocale);
+    langSelect.addEventListener('change', onLangChange);
     presetSelect.addEventListener('change', onPresetChange);
     customInput.addEventListener('keydown', onInputKeyDown);
+    newBtnLabelInput.addEventListener('keydown', onCustomBtnInputKeyDown);
+    newBtnCmdInput.addEventListener('keydown', onCustomBtnInputKeyDown);
     document.addEventListener('keydown', onKeyDown);
 
     rebuildPresets();
@@ -826,6 +1092,10 @@ export function inlineStatusbarBootstrap(cfg) {
       if (settings && (settings.locale === 'ko' || settings.locale === 'en')) {
         locale = settings.locale;
       }
+      if (Array.isArray(settings?.customButtons)) {
+        customButtons = settings.customButtons;
+      }
+      for (const ctrl of barControllers.values()) ctrl.render();
     } catch {}
     try {
       quotaState = await apiPost('/api/quota', {});
@@ -885,6 +1155,27 @@ export function inlineStatusbarBootstrap(cfg) {
   quotaPollTimer = setInterval(pollQuotaAndSettings, QUOTA_POLL_MS);
 
   const api = {
+    addButton(def) {
+      if (!def || typeof def !== 'object') return false;
+      const id = typeof def.id === 'string' ? def.id.trim() : '';
+      const label = typeof def.label === 'string' ? def.label.trim() : '';
+      if (!id || !/^[A-Za-z0-9_-]{1,48}$/.test(id) || !label || typeof def.onClick !== 'function') {
+        return false;
+      }
+      runtimeButtons.set(id, {
+        id,
+        label: label.slice(0, 24),
+        title: typeof def.title === 'string' ? def.title : '',
+        onClick: def.onClick,
+      });
+      for (const ctrl of barControllers.values()) ctrl.render();
+      return true;
+    },
+    removeButton(id) {
+      if (!runtimeButtons.delete(String(id || ''))) return false;
+      for (const ctrl of barControllers.values()) ctrl.render();
+      return true;
+    },
     destroy() {
       if (disposed) return;
       disposed = true;
@@ -893,6 +1184,7 @@ export function inlineStatusbarBootstrap(cfg) {
       if (observer) observer.disconnect();
       for (const c of activeControllers) c.abort();
       activeControllers.clear();
+      runtimeButtons.clear();
       for (const ctrl of barControllers.values()) ctrl.destroy();
       barControllers.clear();
       try {

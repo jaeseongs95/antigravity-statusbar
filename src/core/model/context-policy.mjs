@@ -3,6 +3,11 @@ import { DomainError, ERROR_CODES } from '../i18n/error-codes.mjs';
 export const MIN_CUSTOM_LIMIT = 32_000;
 export const MAX_CUSTOM_LIMIT = 980_000;
 export const MAX_SESSION_OVERRIDES = 200;
+export const MAX_CUSTOM_BUTTONS = 20;
+export const MAX_BUTTON_LABEL_LEN = 24;
+export const MAX_BUTTON_COMMAND_LEN = 500;
+
+const CUSTOM_BUTTON_ID_PATTERN = /^[A-Za-z0-9_-]{1,48}$/;
 
 export const PRESET_LIMITS = Object.freeze([
   32_000,
@@ -57,6 +62,75 @@ export function validateCustomLimit(limit) {
     );
   }
   return limit;
+}
+
+/**
+ * Validates and normalizes user-configured custom action buttons.
+ *
+ * @param {unknown} rawButtons
+ * @returns {Array<{ id: string, label: string, command: string }>}
+ */
+export function validateCustomButtons(rawButtons) {
+  if (!Array.isArray(rawButtons)) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'customButtons must be an array.',
+    );
+  }
+  if (rawButtons.length > MAX_CUSTOM_BUTTONS) {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      `customButtons cannot exceed ${MAX_CUSTOM_BUTTONS} items.`,
+    );
+  }
+
+  const seen = new Set();
+  const result = [];
+  for (const raw of rawButtons) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new DomainError(
+        ERROR_CODES.INVALID_SETTINGS_PATCH,
+        400,
+        'Each custom button must be an object with id, label, and command.',
+      );
+    }
+    const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+    const label = typeof raw.label === 'string' ? raw.label.trim() : '';
+    const command = typeof raw.command === 'string' ? raw.command.trim() : '';
+    if (!id || FORBIDDEN_KEYS.has(id) || !CUSTOM_BUTTON_ID_PATTERN.test(id)) {
+      throw new DomainError(
+        ERROR_CODES.INVALID_SETTINGS_PATCH,
+        400,
+        'Custom button id must match [A-Za-z0-9_-]{1,48}.',
+      );
+    }
+    if (seen.has(id)) {
+      throw new DomainError(
+        ERROR_CODES.INVALID_SETTINGS_PATCH,
+        400,
+        `Duplicate custom button id: ${id}`,
+      );
+    }
+    if (!label || label.length > MAX_BUTTON_LABEL_LEN) {
+      throw new DomainError(
+        ERROR_CODES.INVALID_SETTINGS_PATCH,
+        400,
+        `Custom button label must be 1-${MAX_BUTTON_LABEL_LEN} characters.`,
+      );
+    }
+    if (!command || command.length > MAX_BUTTON_COMMAND_LEN || command.includes('\0')) {
+      throw new DomainError(
+        ERROR_CODES.INVALID_SETTINGS_PATCH,
+        400,
+        `Custom button command must be 1-${MAX_BUTTON_COMMAND_LEN} characters.`,
+      );
+    }
+    seen.add(id);
+    result.push({ id, label, command });
+  }
+  return result;
 }
 
 /**

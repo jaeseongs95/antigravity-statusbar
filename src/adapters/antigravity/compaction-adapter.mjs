@@ -96,7 +96,7 @@ export function createAntigravityCompactionAdapter({
   /** @type {Set<import('node:child_process').ChildProcess>} */
   const activeChildren = new Set();
 
-  function runFallbackSpawn(realExe, sessionId) {
+  function runFallbackSpawn(realExe, sessionId, messageText = '/compact') {
     return new Promise((resolve) => {
       const controller = new AbortController();
       const timer = setTimeout(() => {
@@ -106,10 +106,10 @@ export function createAntigravityCompactionAdapter({
       let child;
       try {
         // F6: shell: false, windowsHide: true, ignore stdin, pipe stdout/stderr, AbortSignal
-        // Matches official sidecar_sdk invocation: `<ANTIGRAVITY_AGENTAPI_EXE> agentapi send-message <cid> /compact`
+        // Matches official sidecar_sdk invocation: `<ANTIGRAVITY_AGENTAPI_EXE> agentapi send-message <cid> <msg>`
         child = spawnFn(
           realExe,
-          ['agentapi', 'send-message', sessionId, '/compact'],
+          ['agentapi', 'send-message', sessionId, messageText],
           {
             shell: false,
             windowsHide: true,
@@ -191,7 +191,7 @@ export function createAntigravityCompactionAdapter({
           };
         }
 
-        const fallbackResult = await runFallbackSpawn(realExe, sessionId);
+        const fallbackResult = await runFallbackSpawn(realExe, sessionId, '/compact');
         if (fallbackResult.accepted) {
           return fallbackResult;
         }
@@ -199,6 +199,33 @@ export function createAntigravityCompactionAdapter({
           accepted: false,
           method: 'agentapi',
           reason: `${rpcErr?.message || 'RPC failed'}; fallback: ${fallbackResult.reason}`,
+        };
+      }
+    },
+
+    async sendCommand(sessionId, commandText) {
+      const trimmed = String(commandText || '').trim();
+      if (trimmed === '/compact') {
+        return this.compactSession(sessionId);
+      }
+      const realExe = resolveSafeAgentApiExe(agentApiExePath);
+      if (realExe) {
+        const res = await runFallbackSpawn(realExe, sessionId, trimmed);
+        if (res.accepted) {
+          return res;
+        }
+      }
+      try {
+        await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
+          cascadeId: sessionId,
+          items: [{ text: trimmed }],
+        });
+        return { accepted: true, method: 'rpc' };
+      } catch (rpcErr) {
+        return {
+          accepted: false,
+          method: 'rpc',
+          reason: rpcErr?.message || 'Failed to send custom command.',
         };
       }
     },

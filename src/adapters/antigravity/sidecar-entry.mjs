@@ -375,6 +375,11 @@ export function createSidecarServer({
         sendJson(res, 200, result, corsHeaders);
         return;
       }
+      if (pathname === '/api/command') {
+        const result = await service.runCustomCommand(body.sessionId, body.command);
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
       sendJson(
         res,
         404,

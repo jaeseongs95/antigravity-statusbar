@@ -8,6 +8,7 @@ import { DEFAULT_LOCALE, DomainError, ERROR_CODES, normalizeLocale } from '../..
 import {
   MAX_SESSION_OVERRIDES,
   pruneSessionOverrides,
+  validateCustomButtons,
   validateCustomLimit,
   validateSessionId,
 } from '../../core/model/context-policy.mjs';
@@ -23,6 +24,8 @@ function createDefaultState() {
     localeUpdatedAt: 0,
     defaultCustomLimit: null,
     defaultCustomLimitUpdatedAt: 0,
+    customButtons: [],
+    customButtonsUpdatedAt: 0,
     sessions: new Map(),
   };
 }
@@ -59,6 +62,20 @@ function parsePersistedState(raw) {
     state.defaultCustomLimitUpdatedAt = Math.floor(raw.defaultCustomLimitUpdatedAt);
   }
 
+  if (Array.isArray(raw.customButtons)) {
+    try {
+      state.customButtons = validateCustomButtons(raw.customButtons);
+    } catch {
+      state.customButtons = [];
+    }
+  }
+  if (
+    typeof raw.customButtonsUpdatedAt === 'number' &&
+    Number.isFinite(raw.customButtonsUpdatedAt)
+  ) {
+    state.customButtonsUpdatedAt = Math.floor(raw.customButtonsUpdatedAt);
+  }
+
   if (Array.isArray(raw.sessions)) {
     state.sessions = pruneSessionOverrides(raw.sessions, MAX_SESSION_OVERRIDES);
   }
@@ -74,6 +91,8 @@ function serializeState(state) {
       localeUpdatedAt: state.localeUpdatedAt,
       defaultCustomLimit: state.defaultCustomLimit,
       defaultCustomLimitUpdatedAt: state.defaultCustomLimitUpdatedAt,
+      customButtons: state.customButtons,
+      customButtonsUpdatedAt: state.customButtonsUpdatedAt,
       sessions: Array.from(state.sessions.entries()),
     },
     null,
@@ -223,6 +242,7 @@ export function createJsonSettingsStore({
       return {
         locale: state.locale,
         defaultCustomLimit: state.defaultCustomLimit,
+        customButtons: state.customButtons.map((b) => ({ ...b })),
         sessions: new Map(state.sessions),
       };
     },
@@ -243,6 +263,12 @@ export function createJsonSettingsStore({
           current.defaultCustomLimitUpdatedAt = ts;
         }
 
+        if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
+          const ts = nextTimestamp(current.customButtonsUpdatedAt);
+          current.customButtons = validateCustomButtons(patch.customButtons);
+          current.customButtonsUpdatedAt = ts;
+        }
+
         if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit') && patch.sessionLimit) {
           const sid = validateSessionId(patch.sessionLimit.sessionId);
           const limit = validateCustomLimit(patch.sessionLimit.limit);
@@ -261,6 +287,7 @@ export function createJsonSettingsStore({
         return {
           locale: current.locale,
           defaultCustomLimit: current.defaultCustomLimit,
+          customButtons: current.customButtons.map((b) => ({ ...b })),
           sessions: new Map(current.sessions),
         };
       });

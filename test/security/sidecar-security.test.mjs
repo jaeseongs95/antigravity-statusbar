@@ -48,6 +48,7 @@ function createFakeService() {
     getSettings: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: [] }),
     updateSettings: async (p) => ({ locale: p.locale || 'en', defaultCustomLimit: null, sessions: [] }),
     requestCompaction: async (sid) => ({ accepted: true, sessionId: sid, method: 'rpc' }),
+    runCustomCommand: async (sid, cmd) => ({ accepted: true, sessionId: sid, command: cmd, method: 'agentapi' }),
   };
 }
 
@@ -156,7 +157,17 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     });
     assert.equal(okPreflight.status, 204);
     assert.equal(okPreflight.headers['access-control-allow-origin'], loopbackCrossPortOrigin);
+    assert.equal(okPreflight.headers['access-control-allow-private-network'], 'true');
     assert.equal(okPreflight.headers.vary, 'Origin');
+
+    const httpsPreflight = await rawHttpRequest({
+      port,
+      method: 'OPTIONS',
+      path: '/api/command',
+      headers: { host: validHost, origin: 'https://app.antigravity.google.com' },
+    });
+    assert.equal(httpsPreflight.status, 204);
+    assert.equal(httpsPreflight.headers['access-control-allow-origin'], 'https://app.antigravity.google.com');
 
     // 6. Missing or null or foreign Origin on API POST -> 403
     for (const badOrigin of [undefined, 'null', 'https://evil.example']) {
@@ -225,6 +236,22 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
     assert.equal(okRes.headers['access-control-allow-origin'], loopbackCrossPortOrigin);
     const parsed = JSON.parse(okRes.body);
     assert.equal(parsed.sessions[0].sessionId, 'sess-1');
+
+    // 10. Authenticated POST /api/command -> 200
+    const cmdRes = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api/command',
+      headers: {
+        host: validHost,
+        origin: 'https://localhost:54321',
+        'x-statusbar-token': TEST_TOKEN,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ sessionId: 'sess-1', command: '/plan' }),
+    });
+    assert.equal(cmdRes.status, 200);
+    assert.equal(JSON.parse(cmdRes.body).command, '/plan');
   } finally {
     await sidecar.close();
   }

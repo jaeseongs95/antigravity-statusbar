@@ -1,9 +1,11 @@
 import { DomainError, ERROR_CODES, normalizeLocale } from '../i18n/error-codes.mjs';
 import {
+  MAX_BUTTON_COMMAND_LEN,
   MAX_SESSION_OVERRIDES,
   PRESET_LIMITS,
   evaluateContextThreshold,
   resolveEffectiveLimit,
+  validateCustomButtons,
   validateCustomLimit,
   validateSessionId,
 } from '../model/context-policy.mjs';
@@ -162,6 +164,7 @@ export function createStatusbarService({
         tokenBreakdown: Array.isArray(telemetry.tokenBreakdown) ? telemetry.tokenBreakdown : [],
         compaction,
         locale: settings.locale,
+        customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
         presets: PRESET_LIMITS,
         fetchedAt: now,
       };
@@ -182,6 +185,7 @@ export function createStatusbarService({
       return {
         locale: settings.locale,
         defaultCustomLimit: settings.defaultCustomLimit,
+        customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
         sessions: Array.from(settings.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -213,6 +217,11 @@ export function createStatusbarService({
         hasChange = true;
       }
 
+      if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
+        normalizedPatch.customButtons = validateCustomButtons(patch.customButtons);
+        hasChange = true;
+      }
+
       if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit')) {
         const sl = patch.sessionLimit;
         if (!sl || typeof sl !== 'object' || Array.isArray(sl)) {
@@ -241,12 +250,50 @@ export function createStatusbarService({
       return {
         locale: updated.locale,
         defaultCustomLimit: updated.defaultCustomLimit,
+        customButtons: Array.isArray(updated.customButtons) ? updated.customButtons : [],
         sessions: Array.from(updated.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
           updatedAt: entry.updatedAt,
         })),
         presets: PRESET_LIMITS,
+      };
+    },
+
+    async runCustomCommand(rawSessionId, rawCommand) {
+      const sessionId = validateSessionId(rawSessionId);
+      const command = typeof rawCommand === 'string' ? rawCommand.trim() : '';
+      if (!command || command.length > MAX_BUTTON_COMMAND_LEN || command.includes('\0')) {
+        throw new DomainError(
+          ERROR_CODES.INVALID_SETTINGS_PATCH,
+          400,
+          `Command must be 1-${MAX_BUTTON_COMMAND_LEN} characters.`,
+        );
+      }
+      if (command === '/compact') {
+        return this.requestCompaction(sessionId);
+      }
+      if (typeof compactionPort.sendCommand !== 'function') {
+        throw new DomainError(
+          ERROR_CODES.COMPACTION_FAILED,
+          501,
+          'Custom command execution is not supported by the active adapter.',
+        );
+      }
+      const result = await compactionPort.sendCommand(sessionId, command);
+      if (!result || result.accepted !== true) {
+        throw new DomainError(
+          ERROR_CODES.COMPACTION_FAILED,
+          502,
+          result?.reason || 'Custom command was not accepted.',
+        );
+      }
+      return {
+        accepted: true,
+        sessionId,
+        command,
+        method: result.method ?? 'unknown',
+        acceptedAt: clock(),
       };
     },
 
