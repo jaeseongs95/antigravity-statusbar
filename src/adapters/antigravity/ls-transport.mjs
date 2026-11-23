@@ -623,7 +623,8 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     }
 
     const candidateOffsets = [
-      Math.max(0, total - 12),
+      Math.max(0, total - 40),
+      Math.max(0, total - 16),
       Math.max(0, total - 4),
       Math.max(0, total - 1),
     ];

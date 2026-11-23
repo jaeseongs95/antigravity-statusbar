@@ -547,7 +547,10 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
   assert.equal(h.commandCalls.length, 1);
   assert.equal(h.commandCalls[0].sid, 'sess-b9bf40a9');
 
-  // 2. Negative guard: genuine host self-resume (sustained RUNNING >12s grace OR stepCount +2) cancels pendingAutoResume
+  // 2. Negative guard: genuine host self-resume cancels pendingAutoResume:
+  //    - sess-self-steps: known stepCount advancing >=2 steps while RUNNING cancels immediately
+  //    - sess-self-time: unavailable stepCount (null) falls back to the 12s grace window
+  //    (When stepCount is known with 0 step delta, TC-P0-12d verifies pendingAutoResume survives >12s.)
   const hSelfResume = createServiceHarness({
     initialSettings: { defaultCustomLimit: 256_000, autoCompactWhileRunning: 'resume' },
     initialTelemetryBySession: {
@@ -555,7 +558,7 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
         sessionId: 'sess-self-time',
         status: 'CASCADE_RUN_STATUS_RUNNING',
         modelName: 'Gemini 4 Neon (High)',
-        stepCount: 100,
+        stepCount: null,
         usedTokens: 270_000,
         maxContextTokens: 512_000,
         lastCompactedStep: 10,
@@ -587,7 +590,7 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
     hSelfResume.telemetryBySession.set(sid, {
       ...hSelfResume.telemetryBySession.get(sid),
       status: 'CASCADE_RUN_STATUS_RUNNING',
-      stepCount: 102,
+      stepCount: sid === 'sess-self-time' ? null : 102,
       usedTokens: 45_000,
       lastCompactedStep: 101,
       compactionJustCompleted: true,
@@ -607,10 +610,10 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
   const sSteps = await hSelfResume.service.getSessionSnapshot('sess-self-steps');
   assert.equal(sSteps.autoResumePending, false, 'Host advancing >=2 steps while RUNNING cancels auto-resume');
 
-  // sess-self-time stays RUNNING past 12s grace window -> cancel
+  // sess-self-time (stepCount unavailable) stays RUNNING past 12s grace window -> cancel via fallback
   hSelfResume.advance(11_000);
   const sTime = await hSelfResume.service.getSessionSnapshot('sess-self-time');
-  assert.equal(sTime.autoResumePending, false, 'Sustained RUNNING past 12s grace window cancels auto-resume');
+  assert.equal(sTime.autoResumePending, false, 'Sustained RUNNING past 12s grace window cancels auto-resume when stepCount is unavailable');
 
   // Even when both later drop to IDLE, 0 auto-resume commands are dispatched
   hSelfResume.advance(1_000);

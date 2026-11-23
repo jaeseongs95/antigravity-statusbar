@@ -201,10 +201,13 @@ export function extractLatestUsageMetadata(metadataList) {
   }
 
   let bestUsage = null;
+  let bestUsageStepIndex = null;
   let bestModel = null;
   let bestBreakdown = null;
   let bestStepIndex = null;
-  let bestContextWindowMeta = null;
+  let bestContextWindowEstimated = null;
+  let bestContextWindowEstimatedStepIndex = null;
+  let bestContextWindowMax = null;
 
   for (let i = metadataList.length - 1; i >= 0; i -= 1) {
     const item = metadataList[i];
@@ -239,11 +242,19 @@ export function extractLatestUsageMetadata(metadataList) {
     }
 
     const cwm = chatModel?.chatStartMetadata?.contextWindowMetadata;
-    if (bestContextWindowMeta === null && cwm && typeof cwm === 'object') {
-      const est = toNonNegativeIntOrNull(cwm.estimatedTokensUsed);
-      const max = toNonNegativeIntOrNull(cwm.maxContextTokens);
-      if (est !== null || max !== null) {
-        bestContextWindowMeta = { estimatedTokensUsed: est, maxContextTokens: max };
+    if (cwm && typeof cwm === 'object') {
+      if (bestContextWindowEstimated === null) {
+        const est = toNonNegativeIntOrNull(cwm.estimatedTokensUsed);
+        if (est !== null) {
+          bestContextWindowEstimated = est;
+          bestContextWindowEstimatedStepIndex = stepIdx;
+        }
+      }
+      if (bestContextWindowMax === null) {
+        const max = toNonNegativeIntOrNull(cwm.maxContextTokens);
+        if (max !== null) {
+          bestContextWindowMax = max;
+        }
       }
     }
 
@@ -264,15 +275,28 @@ export function extractLatestUsageMetadata(metadataList) {
           inputTokens,
           cacheReadTokens,
         };
+        bestUsageStepIndex = stepIdx;
       }
     }
 
-    if (bestUsage && bestModel && bestBreakdown && bestContextWindowMeta) {
+    if (
+      bestUsage &&
+      bestModel &&
+      bestBreakdown &&
+      bestContextWindowEstimated !== null &&
+      bestContextWindowMax !== null
+    ) {
       break;
     }
   }
 
-  if (!bestUsage && !bestModel && !bestBreakdown && !bestContextWindowMeta) {
+  if (
+    !bestUsage &&
+    !bestModel &&
+    !bestBreakdown &&
+    bestContextWindowEstimated === null &&
+    bestContextWindowMax === null
+  ) {
     return null;
   }
 
@@ -283,8 +307,10 @@ export function extractLatestUsageMetadata(metadataList) {
     cacheReadTokens: bestUsage?.cacheReadTokens ?? null,
     stepIndex: bestStepIndex,
     tokenBreakdownGroups: bestBreakdown,
-    contextWindowEstimatedTokens: bestContextWindowMeta?.estimatedTokensUsed ?? null,
-    contextWindowMaxTokens: bestContextWindowMeta?.maxContextTokens ?? null,
+    contextWindowEstimatedTokens: bestContextWindowEstimated,
+    contextWindowEstimatedStepIndex: bestContextWindowEstimatedStepIndex,
+    contextWindowMaxTokens: bestContextWindowMax,
+    usageStepIndex: bestUsageStepIndex,
   };
 }
 
@@ -382,6 +408,7 @@ function isSystemOrToolGroupKey(rawKey) {
  *   generatorMetadata?: unknown[],
  *   tailSteps?: unknown[],
  *   tailStepsOffset?: number,
+ *   knownCheckpoint?: { lastCompletedStep: number, summaryChars: number } | null,
  * }} input
  */
 export function mapSessionTelemetry({
@@ -391,6 +418,7 @@ export function mapSessionTelemetry({
   generatorMetadata = [],
   tailSteps = [],
   tailStepsOffset = 0,
+  knownCheckpoint = null,
 }) {
   const update = streamFrame?.update ?? streamFrame ?? {};
 
@@ -407,6 +435,20 @@ export function mapSessionTelemetry({
   const latestUsage = extractLatestUsageMetadata(generatorMetadata);
   const lastMetaStepIndex = latestUsage ? latestUsage.stepIndex : null;
   const tailCheckpoint = extractTailCheckpoint(tailSteps, tailStepsOffset);
+  const knownCpStep = toNonNegativeIntOrNull(knownCheckpoint?.lastCompletedStep);
+  const knownCpSummaryChars = toNonNegativeIntOrNull(knownCheckpoint?.summaryChars) ?? 0;
+  const effectiveCheckpointStep =
+    tailCheckpoint.lastCompletedStep !== null && knownCpStep !== null
+      ? Math.max(tailCheckpoint.lastCompletedStep, knownCpStep)
+      : tailCheckpoint.lastCompletedStep ?? knownCpStep;
+  const effectiveSummaryChars =
+    effectiveCheckpointStep !== null &&
+    effectiveCheckpointStep === tailCheckpoint.lastCompletedStep &&
+    tailCheckpoint.summaryChars > 0
+      ? tailCheckpoint.summaryChars
+      : effectiveCheckpointStep !== null && effectiveCheckpointStep === knownCpStep
+        ? knownCpSummaryChars
+        : tailCheckpoint.summaryChars;
 
   const streamEstimatedUsed = toNonNegativeIntOrNull(cwu.estimatedTokensUsed);
   // F2: Fallback to chatModel.chatStartMetadata.contextWindowMetadata.{estimatedTokensUsed, maxContextTokens}
@@ -426,9 +468,9 @@ export function mapSessionTelemetry({
   const lastStepIndex = toNonNegativeIntOrNull(cwu.lastStepIndex);
   const streamCompactedStep = extractLastCompactedStep(update);
   const lastCompactedStep =
-    streamCompactedStep !== null && tailCheckpoint.lastCompletedStep !== null
-      ? Math.max(streamCompactedStep, tailCheckpoint.lastCompletedStep)
-      : streamCompactedStep ?? tailCheckpoint.lastCompletedStep;
+    streamCompactedStep !== null && effectiveCheckpointStep !== null
+      ? Math.max(streamCompactedStep, effectiveCheckpointStep)
+      : streamCompactedStep ?? effectiveCheckpointStep;
 
   const latestActivityStep = Math.max(
     lastMetaStepIndex !== null ? lastMetaStepIndex : -1,
@@ -441,13 +483,22 @@ export function mapSessionTelemetry({
     lastCompactedStep >= 0 &&
     lastCompactedStep >= latestActivityStep;
 
-  // Oversized >4MB stream fallback: when StreamAgentStateUpdates had no contextWindowUsage,
-  // a completed CHECKPOINT step newer than the latest chatModel metadata means /compact just finished
-  // and generatorMetadata still holds stale pre-compaction tokens until the next LLM turn runs.
+  // Oversized >4MB stream fallback: compare the checkpoint step against the specific metadata step
+  // that actually supplied the token count (not a newer streaming/partial item with empty usage: {}),
+  // and treat metadata at or before the checkpoint step (including the summarization call itself)
+  // as pre-compaction so stale tokens never leak back in.
+  const tokenSourceMetaStep =
+    latestUsage?.contextWindowEstimatedTokens != null
+      ? latestUsage.contextWindowEstimatedStepIndex
+      : latestUsage &&
+          (latestUsage.inputTokens !== null || latestUsage.cacheReadTokens !== null)
+        ? latestUsage.usageStepIndex
+        : lastMetaStepIndex;
+
   const checkpointNewerThanMeta =
     streamEstimatedUsed === null &&
-    tailCheckpoint.lastCompletedStep !== null &&
-    (lastMetaStepIndex === null || tailCheckpoint.lastCompletedStep > lastMetaStepIndex);
+    effectiveCheckpointStep !== null &&
+    (tokenSourceMetaStep === null || effectiveCheckpointStep >= tokenSourceMetaStep);
 
   let usedTokens = null;
   let usedTokensSource = 'unavailable';
@@ -467,7 +518,7 @@ export function mapSessionTelemetry({
       }
     }
     const summaryTokens =
-      tailCheckpoint.summaryChars > 0 ? Math.ceil(tailCheckpoint.summaryChars / 3) : 0;
+      effectiveSummaryChars > 0 ? Math.ceil(effectiveSummaryChars / 3) : 0;
     const postCompactTotal = systemTokens + summaryTokens;
     usedTokens =
       postCompactTotal > 0
@@ -636,7 +687,10 @@ export function mapQuotaSummary(rawResult) {
  */
 export function createAntigravityTelemetryAdapter(lsTransport) {
   const OVERSIZED_STREAM_SKIP_MS = 30_000;
+  const MAX_TRACKED_SESSIONS = 64;
   const oversizedStreamUntil = new Map();
+  /** @type {Map<string, { lastCompletedStep: number, summaryChars: number }>} */
+  const knownCheckpoints = new Map();
 
   return {
     async listSessions() {
@@ -659,7 +713,7 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
               .catch((error) => {
                 if (typeof error?.message === 'string' && error.message.includes('exceeds 4MB cap')) {
                   oversizedStreamUntil.set(sessionId, now + OVERSIZED_STREAM_SKIP_MS);
-                  while (oversizedStreamUntil.size > 64) {
+                  while (oversizedStreamUntil.size > MAX_TRACKED_SESSIONS) {
                     const oldest = oversizedStreamUntil.keys().next().value;
                     if (oldest === undefined) break;
                     oversizedStreamUntil.delete(oldest);
@@ -710,14 +764,52 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
           : Promise.resolve({ stepOffset: 0, steps: [] }),
       ]);
 
-      return mapSessionTelemetry({
+      const liveTailCheckpoint = extractTailCheckpoint(
+        tailStepsResult.steps,
+        tailStepsResult.stepOffset,
+      );
+      const knownCheckpoint = knownCheckpoints.get(sessionId) ?? null;
+
+      const mapped = mapSessionTelemetry({
         requestedSessionId: sessionId,
         streamFrame,
         trajectorySummary,
         generatorMetadata,
         tailSteps: tailStepsResult.steps,
         tailStepsOffset: tailStepsResult.stepOffset,
+        knownCheckpoint,
       });
+
+      // Monotonically retain the highest observed checkpoint per session so oversized >4MB sessions
+      // never lose lastCompactedStep or revert to pre-compaction tokens when CHECKPOINT leaves tailSteps.
+      if (typeof mapped.lastCompactedStep === 'number' && mapped.lastCompactedStep >= 0) {
+        const prevCp = knownCheckpoints.get(sessionId);
+        const nextStep = mapped.lastCompactedStep;
+        const nextSummaryChars =
+          liveTailCheckpoint.lastCompletedStep === nextStep && liveTailCheckpoint.summaryChars > 0
+            ? liveTailCheckpoint.summaryChars
+            : prevCp && prevCp.lastCompletedStep === nextStep
+              ? prevCp.summaryChars
+              : 0;
+        if (
+          !prevCp ||
+          nextStep > prevCp.lastCompletedStep ||
+          (nextStep === prevCp.lastCompletedStep && nextSummaryChars > prevCp.summaryChars)
+        ) {
+          knownCheckpoints.delete(sessionId);
+          knownCheckpoints.set(sessionId, {
+            lastCompletedStep: nextStep,
+            summaryChars: nextSummaryChars,
+          });
+          while (knownCheckpoints.size > MAX_TRACKED_SESSIONS) {
+            const oldest = knownCheckpoints.keys().next().value;
+            if (oldest === undefined) break;
+            knownCheckpoints.delete(oldest);
+          }
+        }
+      }
+
+      return mapped;
     },
 
     async getQuotaSummary() {
