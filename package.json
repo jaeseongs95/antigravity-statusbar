@@ -15,11 +15,11 @@
     "start": "node sidecars/statusbar/main.mjs",
     "install-plugin": "node scripts/install-plugin.mjs",
     "test:static": "node --test test/static/boundary.test.mjs",
-    "test:unit": "node --test test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs",
+    "test:unit": "node --test test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/autocompact-tdd.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs",
     "test:integration": "node --test test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs",
     "test:security": "node --test test/security/sidecar-security.test.mjs",
     "test:ui": "node --test test/ui/ui-app.test.mjs",
-    "test": "node --test test/static/boundary.test.mjs test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs test/security/sidecar-security.test.mjs test/ui/ui-app.test.mjs"
+    "test": "node --test test/static/boundary.test.mjs test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/autocompact-tdd.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs test/security/sidecar-security.test.mjs test/ui/ui-app.test.mjs"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2",
