@@ -1,4 +1,4 @@
-# Test Cases — Antigravity Statusbar v3.1.0
+# Test Cases — Antigravity Statusbar v3.1.1
 
 | Suite | File | Scope & Regression IDs |
 |---|---|---|
@@ -61,13 +61,15 @@
 | `TC-GLOBAL-05` | `G-1` fresh snapshot synchronization & session limit UX (`bar-controller.mjs`) | Trigger `handleApplyLimit` while a background `/api/snapshot` poll is already `inFlight`; verify controller waits for post-save fresh snapshot before showing toast/updating UI | Post-save toast and status text reflect updated snapshot rather than stale pre-save snapshot. |
 | `TC-GLOBAL-06` | `G-2` `AUX_PANE` global default scope sync (`src/ui/app.js`) | Switch `limitScopeSelect` between `'session'` and `'default'` after loading settings with `defaultCustomLimit: 256000` and session limit `128000`; render `limitSource: 'model'` badge | Switching scope accurately loads each scope's saved value into inputs (without leaking model-global limit into session input); `'model'` source displays localized model-global label. |
 
-## v3.1 P0 Hardening & Mid-Work Auto-Resume TDD Cases (`TC-P0-00` – `TC-P0-10`)
+## v3.1 / v3.1.1 P0 Hardening, Auto-Resume & Headless Sidecar TDD Cases (`TC-P0-00` – `TC-P0-11`)
 
 | ID | Issue | Scenario & Inputs | Expected Result (Oracle) |
 |---|---|---|---|
 | `TC-P0-00a` | `ISS-00` | `RUNNING` session hits custom limit → auto-compact completes into `IDLE` (`autoCompactWhileRunning: 'resume'`); also test manual `/compact`, `IDLE` auto-compact, `CANCELLED`, manual user input, and 3-run circuit breaker | Dispatches exactly 1 guarded continuation prompt via `sendCommand` on interrupted `RUNNING` auto-compact completion; 0 dispatches on all negative guards. |
 | `TC-P0-00b` | `ISS-00` | `autoCompactWhileRunning: 'defer'` while `RUNNING` then transitions to `IDLE` | Sets `autoCompactDeferred: true` while `RUNNING` (0 `/compact`), fires immediately on `IDLE`, never sends resume prompt. |
-| `TC-P0-00c` | `ISS-00` | `compaction-adapter.sendCommand` with plain-text Korean continuation prompt | Uses `SendUserCascadeMessage` RPC first (0 child process spawns), falling back to `agentapi` only on RPC failure. |
+| `TC-P0-00c` | `ISS-00` | `compaction-adapter.sendCommand` with plain-text Korean continuation prompt (`agentApiExePath` configured vs non-accepted fallback) | Prefers official `agentapi send-message` (`shell: false`) first when configured, falling back to `SendUserCascadeMessage` RPC cleanly on non-acceptance or absence. |
+| `TC-P0-00d` | `v3.1.1` | Reproduces live `b9bf40a9` transient `RUNNING` window after `CHECKPOINT DONE` → `IDLE`, host self-resume (`stepCount +2` or `>= 12s`), and `sendCommand` returning `{ accepted: false }` / rejecting | Latches completion across transient `RUNNING` and dispatches 1 auto-resume on `IDLE`; cancels cleanly on genuine host self-resume; surfaces `AUTO_RESUME_FAILED` visibly without retry loops until `RUNNING`. |
+| `TC-P0-00e` | `v3.1.1` | `extractTailCheckpoint` positional index vs `includedStepIndexEnd`, and empty `update.status` string fallback in `mapSessionTelemetry` | `lastCompactedStep` uses `explicitStep ?? Math.max(baseOffset + i, includedStepIndexEnd)`; empty `update.status` falls back to `trajectorySummary.status`. |
 | `TC-P0-02` | `ISS-01`, `ISS-02`, `ISS-10` | Real Headless Chromium/Edge Shadow DOM E2E (`test/ui/addon-browser-e2e.test.mjs`) | Verifies `type="text"` non-reset on `'abc'`/`'32,000'`, `99.7%` → `99%`, 5h+Weekly labels, non-writable `window.statusbarAddons`, modal `modelListEl` focus preservation across polls, `Escape` focus return to `.agy-inline-gear`, and disconnect indicator on stale snapshot. |
 | `TC-P0-03` | `ISS-03` | Session A host-compacting >15s while Session B is polled + `<4MB` stream with `includeTailSteps: true` | Session A retains 300s lock (409 on re-request); `<4MB` session queries `getTailTrajectorySteps` when requested. |
 | `TC-P0-04` | `ISS-04` | `ls-transport` receives HTTP 502 / 504 timeout on metadata & step RPCs | Fails fast in 1 RPC call instead of amplifying into 12 probes; only `RESPONSE_CAP_EXCEEDED` triggers narrower window fallback. |
@@ -77,4 +79,5 @@
 | `TC-P0-08` | `ISS-08` | `runtime-publisher.teardownSync()` after `publish()` | Synchronously atomically overwrites renderer bundle with credential-free standby stub (`0o600`). |
 | `TC-P0-09` | `ISS-09`, `ISS-01` | `AUX_PANE` `syncLimitInputs` under `limitSource: 'model'` + `src/ui/index.html` input type check | Session input remains `''` under model limit; `limit-custom-input` uses `type="text"`. |
 | `TC-P0-10` | `ISS-10`, `ISS-13`, `ISS-14` | `24h` quota bucket, `99.7%` rounding, addon command tooltip, `api-client` network error reset, subagent `sweepActiveSessions` exclusion | `24h` never labeled `주간한도`, `99.7%` renders `99%`, tooltip shows command & resetTime, `isConnected()` flips `false`, subagent excluded from background sweep. |
+| `TC-P0-11` | `v3.1.1` | Headless `startSidecar` (`has_web_ui: false`) without `ANTIGRAVITY_SIDECAR_UI_TOKEN` vs explicit `< 16` char short token | Mints a 64-char hex (256-bit) per-process ephemeral token accepted on `POST /api/settings/get` (`401` unauth, `200` with token), rejects explicit short token Fail-Closed, and cleans up via `stop()`. |
 

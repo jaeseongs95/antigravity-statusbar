@@ -1,27 +1,26 @@
-# Architecture v3.1.0 — Official Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + `AUX_PANE` Fallback Sidecar)
+# Architecture v3.1.1 — Official Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + Headless Native Sidecar)
 
 ## 1. Design Principles
 
 1. **Zero Host Mutation**: No `app.asar` patching, no Electron renderer injection, no React Fiber/Redux/Protobuf mutation, no `SetMendelFlagOverrides`, no `hooks.json`.
 2. **Strict Vendor Neutrality (Ports & Adapters)**:
-   - `src/core/`: Pure ESM domain models, 4-tier context limit policy (`session > model > default > host`), guarded auto-compaction & auto-resume state machine, error codes, port contracts, and application service. Zero Node I/O, zero vendor strings.
-   - `src/ui/`: Self-contained `AUX_PANE` fallback browser UI (`index.html`, `styles.css`, `i18n.mjs`, `bridge/host-bridge.mjs`, `app.js`). Zero `innerHTML`, zero inline scripts/styles, zero `../core` imports, zero vendor strings.
+   - `src/core/`: Pure ESM domain models, 4-tier context limit policy (`session > model > default > host`), guarded auto-compaction & auto-resume state machine (with post-checkpoint completion latch and `AUTO_RESUME_FAILED` error surfacing), error codes, port contracts, and application service. Zero Node I/O, zero vendor strings.
+   - `src/ui/`: Self-contained vendor-neutral browser UI modules (`index.html`, `styles.css`, `i18n.mjs`, `bridge/host-bridge.mjs`, `app.js`) retained for unit/UI contract testing (the right-hand `AUX_PANE` tab is disabled in `sidecars/statusbar/sidecar.json` via `has_web_ui: false`). Zero `innerHTML`, zero inline scripts/styles, zero `../core` imports, zero vendor strings.
    - `src/adapters/storage/`: File-backed `json-settings-store.mjs` with injected `dataDir`, cross-process `proper-lockfile` lock, atomic in-lock delta patches (`sessionLimit`, `modelLimit`, `addonUpsert`, `addonToggle`, `addonRemove`), monotonic timestamps, and `write-file-atomic` persistence.
-   - `src/adapters/antigravity/`: All Antigravity-specific Language Server transport (`ls-transport.mjs`), telemetry mapping (`telemetry-mapper.mjs`), compaction (`compaction-adapter.mjs`), `AddonManifest.v2` inline Shadow DOM renderer bundle (`addon/*.mjs`), UI bridge (`/bridge.js`), and hardened Sidecar HTTP server (`sidecar-entry.mjs`).
+   - `src/adapters/antigravity/`: All Antigravity-specific Language Server transport (`ls-transport.mjs`), telemetry mapping (`telemetry-mapper.mjs`), compaction (`compaction-adapter.mjs`), `AddonManifest.v2` inline Shadow DOM renderer bundle (`addon/*.mjs`), UI bridge (`/bridge.js`), and hardened headless Sidecar HTTP server (`sidecar-entry.mjs`).
 
 ## 2. Data Flow
 
 ```text
 AddonManifest.v2 Inline Statusbar (Shadow DOM slots: root / popover / modal)
-  + AUX_PANE Webview Fallback (src/ui/)
-   │  POST /api/* + X-Statusbar-Token + exact loopback/host Origin
+   │  POST /api/* + X-Statusbar-Token (explicit >=16 or headless 256-bit ephemeral) + exact loopback/host Origin
    ▼
-Sidecar HTTP Server (src/adapters/antigravity/sidecar-entry.mjs)
+Headless Sidecar HTTP Server (src/adapters/antigravity/sidecar-entry.mjs, has_web_ui: false)
    │  Fail-Closed auth, Host/Origin/CSP/path.relative jail, teardownSync()
    ▼
 Statusbar Service (src/core/app/statusbar-service.mjs)
    ├── TelemetryPort  ──► ls-transport.mjs (Connect JSON & 5B stream, oversize-only fallback)
-   ├── CompactionPort ──► compaction-adapter.mjs (SendUserCascadeMessage RPC + bounded spawn fallback)
+   ├── CompactionPort ──► compaction-adapter.mjs (/compact: RPC-first + spawn fallback; continuation: agentapi-first + RPC fallback)
    └── SettingsPort   ──► json-settings-store.mjs (proper-lockfile + write-file-atomic delta patches)
 ```
 
