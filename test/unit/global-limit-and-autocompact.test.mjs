@@ -550,10 +550,10 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
   });
   assert.equal(overrideBanner.classList.contains('hidden'), true);
 
-  // Escape closes modal and returns focus to opener button
+  // Escape closes modal and returns focus to visible bar settings button (ISS-10)
   doc.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {} });
   assert.equal(globalModalView.backdropEl.classList.contains('hidden'), true);
-  assert.equal(doc.activeElement, popoverView.openGlobalModalBtn);
+  assert.equal(doc.activeElement, barView.settingsBtn);
 
   // G-1: Concurrent in-flight snapshot does NOT cause handleApplyLimit to inspect stale maxContextTokens
   const deferredPoll = { defer: true, resolve: null };
@@ -631,9 +631,9 @@ test('TC-GLOBAL-06: G-2 AUX_PANE app.js syncs global default scope on scope swit
   const app = createStatusbarApp({ doc, win: {}, bridge });
   await app.start();
 
-  // Renders '모델별 전역' source badge
+  // Renders '모델별 전역' source badge without leaking model limit into session input (ISS-09)
   assert.equal(doc.getElementById('context-limit-tag').textContent, '모델별 전역');
-  assert.equal(doc.getElementById('limit-custom-input').value, '192000');
+  assert.equal(doc.getElementById('limit-custom-input').value, '');
 
   // Switching scope to 'default' displays stored global default (256000)
   scopeSel.value = 'default';

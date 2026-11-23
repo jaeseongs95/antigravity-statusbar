@@ -302,7 +302,7 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   const quota5hEl = metrics[metrics.length - 2];
   const quotaWeeklyEl = metrics[metrics.length - 1];
   assert.equal(quota5hEl.textContent, '5시간 한도 72%');
-  assert.equal(quotaWeeklyEl.textContent, '주간한도 41% (오래됨)');
+  assert.equal(quotaWeeklyEl.textContent, '24h 41% (오래됨)');
   assert.ok(quotaWeeklyEl.title.includes('Pro (5h): 72%'));
   assert.ok(quotaWeeklyEl.title.includes('Flash (24h): 41%'));
 

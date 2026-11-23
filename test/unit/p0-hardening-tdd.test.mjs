@@ -497,17 +497,17 @@ test('TC-P0-04 (ISS-04): ls-transport must not amplify 504 timeouts or 502 error
   const server = http.createServer((req, res) => {
     if (req.url?.includes('GetCascadeTrajectoryGeneratorMetadata')) {
       metaCalls += 1;
-      res.writeHead(502, { 'content-type': 'application/json' });
+      res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
       res.end(JSON.stringify({ message: 'upstream unavailable' }));
       return;
     }
     if (req.url?.includes('GetCascadeTrajectorySteps')) {
       stepCalls += 1;
-      res.writeHead(502, { 'content-type': 'application/json' });
+      res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
       res.end(JSON.stringify({ message: 'upstream unavailable' }));
       return;
     }
-    res.writeHead(404);
+    res.writeHead(404, { connection: 'close' });
     res.end();
   });
 
@@ -526,6 +526,7 @@ test('TC-P0-04 (ISS-04): ls-transport must not amplify 504 timeouts or 502 error
     await assert.rejects(() => transport.getTailTrajectorySteps('sess-err', 60));
     assert.equal(stepCalls, 1, `Expected 1 RPC call on non-oversize error, got ${stepCalls}`);
   } finally {
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
 });
@@ -753,7 +754,7 @@ test('TC-P0-09 (ISS-09 & ISS-01): AUX_PANE syncLimitInputs does not leak model l
     win: { setInterval: () => 1, clearInterval: () => {} },
     bridge: {
       listSessions: async () => ({ sessions: [{ sessionId: 'sess-m1', title: 'M1' }] }),
-      getSnapshot: async () => ({
+      getSessionSnapshot: async () => ({
         sessionId: 'sess-m1',
         usedTokens: 50_000,
         effectiveLimit: 128_000,
@@ -771,10 +772,10 @@ test('TC-P0-09 (ISS-09 & ISS-01): AUX_PANE syncLimitInputs does not leak model l
         compaction: { inProgress: false, status: 'idle' },
         locale: 'en',
       }),
-      getQuota: async () => ({ available: false, groups: [], stale: false }),
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false }),
       getSettings: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: [] }),
       updateSettings: async () => ({ locale: 'en', defaultCustomLimit: null, sessions: [] }),
-      compact: async () => ({ accepted: true }),
+      requestCompaction: async () => ({ accepted: true }),
     },
   });
 

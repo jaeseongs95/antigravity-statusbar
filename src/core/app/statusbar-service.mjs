@@ -949,9 +949,9 @@ export function createStatusbarService({
         typeof settings.defaultCustomLimit === 'number' ||
         (settings.modelLimits instanceof Map && settings.modelLimits.size > 0) ||
         (settings.sessions instanceof Map && settings.sessions.size > 0);
-      const hasPendingWork =
-        pendingAutoResume.size > 0 || deferredAutoCompactSessions.size > 0;
-      if ((!autoCompactEnabled || !hasAnyCustomLimit) && !hasPendingWork) {
+      if (!autoCompactEnabled || !hasAnyCustomLimit) {
+        pendingAutoResume.clear();
+        deferredAutoCompactSessions.clear();
         return { checked: 0, triggered: 0, resumed: 0 };
       }
 
