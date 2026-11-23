@@ -3,7 +3,7 @@
   "schemaVersion": 2,
   "pluginId": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "trustLevel": "restricted",
   "compatibility": {
     "hostProfile": "antigravity-desktop",

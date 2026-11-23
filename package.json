@@ -1,7 +1,7 @@
 {
   "name": "antigravity-statusbar",
-  "version": "3.1.0",
-  "description": "Official Antigravity Native Plugin (AddonManifest.v2 Inline Statusbar + AUX_PANE Fallback Sidecar) for real-time context usage, prompt cache hit rate, 5h/weekly quota, 4-tier context limits, guarded auto-compact & auto-resume, editable compaction prompt, and one-click compaction.",
+  "version": "3.1.1",
+  "description": "Official Antigravity Native Plugin (AddonManifest.v2 Inline Statusbar + Headless Native Sidecar) for real-time context usage, prompt cache hit rate, 5h/weekly quota, 4-tier context limits, guarded auto-compact & auto-resume, editable compaction prompt, and one-click compaction.",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
