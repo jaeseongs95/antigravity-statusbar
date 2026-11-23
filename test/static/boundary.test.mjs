@@ -157,13 +157,13 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v2.json d
     fs.readFileSync(path.join(REPO_ROOT, 'addon-manifest.v2.json'), 'utf8'),
   );
   assert.equal(pluginManifest.name, 'antigravity-statusbar');
-  assert.equal(pluginManifest.version, '3.1.1');
+  assert.equal(pluginManifest.version, '3.1.2');
   assert.equal(sidecarManifest.has_web_ui, false);
   assert.equal(sidecarManifest.ui_config, undefined);
 
   assert.equal(addonManifest.schemaVersion, 2);
   assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-  assert.equal(addonManifest.version, '3.1.1');
+  assert.equal(addonManifest.version, '3.1.2');
   assert.equal(addonManifest.trustLevel, 'restricted');
   assert.equal(addonManifest.compatibility?.minHostVersion, '2.0.0');
   assert.deepEqual(addonManifest.capabilities, ['renderer']);

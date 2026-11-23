@@ -87,6 +87,8 @@ export function createStatusbarService({
   const deferredAutoCompactSessions = new Set();
   /** @type {Map<string, { code: string, message: string, at: number }>} */
   const lastAutoCompactErrors = new Map();
+  /** @type {Map<string, { maxCompactedStep: number | null, maxStepCount: number | null }>} */
+  const observedProgress = new Map();
   let attemptSeq = 0;
 
   function recordAutoCompactError(sessionId, code, message) {
@@ -277,6 +279,46 @@ export function createStatusbarService({
       const isRunning = isRunningStatus(telemetry.status);
       const currentCompactedStep =
         typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
+      const incomingStepCount =
+        typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null;
+
+      // Monotonic progress guard: out-of-order stale polls (regressed stepCount or regressed/dropped
+      // lastCompactedStep) must never re-trigger auto-compaction.
+      const prevObs = observedProgress.get(sessionId) ?? null;
+      const compactedStepRegressed =
+        prevObs !== null &&
+        prevObs.maxCompactedStep !== null &&
+        (currentCompactedStep === null || currentCompactedStep < prevObs.maxCompactedStep);
+      const stepCountRegressed =
+        prevObs !== null &&
+        prevObs.maxStepCount !== null &&
+        incomingStepCount !== null &&
+        incomingStepCount < prevObs.maxStepCount;
+      const telemetryRegressed = compactedStepRegressed || stepCountRegressed;
+      if (!telemetryRegressed && (currentCompactedStep !== null || incomingStepCount !== null)) {
+        const nextMaxCompacted =
+          prevObs?.maxCompactedStep !== null && prevObs?.maxCompactedStep !== undefined
+            ? currentCompactedStep !== null
+              ? Math.max(prevObs.maxCompactedStep, currentCompactedStep)
+              : prevObs.maxCompactedStep
+            : currentCompactedStep;
+        const nextMaxStep =
+          prevObs?.maxStepCount !== null && prevObs?.maxStepCount !== undefined
+            ? incomingStepCount !== null
+              ? Math.max(prevObs.maxStepCount, incomingStepCount)
+              : prevObs.maxStepCount
+            : incomingStepCount;
+        observedProgress.delete(sessionId);
+        observedProgress.set(sessionId, {
+          maxCompactedStep: nextMaxCompacted,
+          maxStepCount: nextMaxStep,
+        });
+        while (observedProgress.size > MAX_SESSION_OVERRIDES) {
+          const oldestObs = observedProgress.keys().next().value;
+          if (oldestObs === undefined) break;
+          observedProgress.delete(oldestObs);
+        }
+      }
 
       // ISS-00 / v3.1.1: Guarded single-shot Auto-Resume for RUNNING sessions interrupted by auto-compact
       const resumeEntry = pendingAutoResume.get(sessionId);
@@ -325,19 +367,23 @@ export function createStatusbarService({
               typeof telemetry.stepCount === 'number' &&
               telemetry.stepCount >= currentCompactedStep + 3;
 
-            // The host briefly keeps status=RUNNING after checkpoint completion before dropping to IDLE.
-            // Only treat RUNNING as genuine host self-resume after grace window or >=2 post-checkpoint steps.
-            const runningStepDelta =
+            // The host can remain in status=RUNNING for >12s after checkpoint completion with
+            // 0 new steps before dropping to IDLE. When stepCount telemetry is available, require
+            // actual step progress (>=2 steps) before cancelling pendingAutoResume; only fall back
+            // to the elapsed-time grace window when stepCount telemetry is unavailable.
+            const hasKnownStepProgress =
               typeof telemetry.stepCount === 'number' &&
-              typeof resumeEntry.compactionDoneStepCount === 'number'
-                ? telemetry.stepCount - resumeEntry.compactionDoneStepCount
-                : 0;
+              typeof resumeEntry.compactionDoneStepCount === 'number';
+            const runningStepDelta = hasKnownStepProgress
+              ? telemetry.stepCount - resumeEntry.compactionDoneStepCount
+              : 0;
             const runningElapsedMs =
               resumeEntry.compactionDoneAt !== null ? now - resumeEntry.compactionDoneAt : 0;
             const hostResumedOnItsOwn =
               isRunning &&
-              (runningStepDelta >= AUTO_RESUME_RUNNING_STEP_DELTA ||
-                runningElapsedMs >= AUTO_RESUME_RUNNING_GRACE_MS);
+              (hasKnownStepProgress
+                ? runningStepDelta >= AUTO_RESUME_RUNNING_STEP_DELTA
+                : runningElapsedMs >= AUTO_RESUME_RUNNING_GRACE_MS);
 
             if (manualUserIntervened || hostResumedOnItsOwn) {
               // Host genuinely resumed on its own or user manually sent a follow-up message
@@ -405,6 +451,7 @@ export function createStatusbarService({
         failedWhileRunning: false,
       };
 
+      const isSyntheticAfterCompaction = telemetry.usedTokensSource === 'after_compaction';
       const compactionAdvanced =
         currentCompactedStep !== null &&
         (prevAuto.lastTriggeredCompactedStep === null
@@ -415,7 +462,10 @@ export function createStatusbarService({
 
       if (
         compactionAdvanced &&
-        (prevAuto.waitingForDrop || prevAuto.cooldownUntil > 0 || prevAuto.failedWhileRunning)
+        (prevAuto.waitingForDrop ||
+          prevAuto.cooldownUntil > 0 ||
+          prevAuto.failedWhileRunning ||
+          isSyntheticAfterCompaction)
       ) {
         const hasNumericTokens = typeof telemetry.usedTokens === 'number';
         const droppedBelowLimit = hasNumericTokens && !threshold.exceededSoftLimit;
@@ -427,7 +477,11 @@ export function createStatusbarService({
 
         if (droppedBelowLimit || reducedMeaningfully) {
           prevAuto.waitingForDrop = false;
-          prevAuto.cooldownUntil = 0;
+          // Preserve/refresh settlement cooldown while readings are synthetic ('after_compaction'),
+          // even if compaction took longer than 90s; cleared once a real below-limit reading arrives.
+          prevAuto.cooldownUntil = isSyntheticAfterCompaction
+            ? Math.max(prevAuto.cooldownUntil, now + AUTO_COMPACT_COOLDOWN_MS)
+            : 0;
           prevAuto.failedWhileRunning = false;
           prevAuto.lastTriggeredTokens = null;
           prevAuto.lastTriggeredStep = null;
@@ -453,10 +507,13 @@ export function createStatusbarService({
       if (typeof telemetry.usedTokens === 'number' && !threshold.exceededSoftLimit) {
         deferredAutoCompactSessions.delete(sessionId);
         autoResumeCircuit.delete(sessionId);
-        if (prevAuto.waitingForDrop || prevAuto.failedWhileRunning || prevAuto.cooldownUntil > 0) {
+        const shouldClearCooldown = !isSyntheticAfterCompaction && prevAuto.cooldownUntil > 0;
+        if (prevAuto.waitingForDrop || prevAuto.failedWhileRunning || shouldClearCooldown) {
           prevAuto.waitingForDrop = false;
           prevAuto.failedWhileRunning = false;
-          prevAuto.cooldownUntil = 0;
+          if (!isSyntheticAfterCompaction) {
+            prevAuto.cooldownUntil = 0;
+          }
           autoCompactState.set(sessionId, prevAuto);
         }
         const existingErr = lastAutoCompactErrors.get(sessionId);
@@ -488,6 +545,7 @@ export function createStatusbarService({
           !compaction.inProgress &&
           telemetry.hostCompactionInProgress !== true &&
           telemetry.compactionJustCompleted !== true &&
+          !telemetryRegressed &&
           cooldownExpired &&
           canTriggerAgain
         ) {
