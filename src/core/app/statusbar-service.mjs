@@ -80,6 +80,43 @@ export function createStatusbarService({
 
   function getCompactionState(sessionId, telemetry, now) {
     const hostRunning = telemetry?.hostCompactionInProgress === true;
+    const preEntry = compactingSessions.get(sessionId);
+
+    // Detect post-acceptance compaction completion (F1 & F5) BEFORE TTL pruning so
+    // long compactions (>15s) that just completed still report `status: 'completed'`.
+    if (preEntry && preEntry.status === 'accepted' && telemetry && !hostRunning) {
+      const currentCompactedStep =
+        typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
+      const stepAdvanced =
+        currentCompactedStep !== null &&
+        (preEntry.baselineCompactedStep === null
+          ? currentCompactedStep >= 0 && telemetry.compactionJustCompleted === true
+          : currentCompactedStep > preEntry.baselineCompactedStep);
+
+      const tokenDroppedSignificantly =
+        currentCompactedStep === null &&
+        preEntry.baselineCompactedStep === null &&
+        typeof preEntry.baselineUsedTokens === 'number' &&
+        preEntry.baselineUsedTokens >= 20_000 &&
+        typeof telemetry.usedTokens === 'number' &&
+        telemetry.usedTokens < preEntry.baselineUsedTokens * 0.75 &&
+        preEntry.baselineUsedTokens - telemetry.usedTokens >= 10_000;
+
+      if (stepAdvanced || tokenDroppedSignificantly) {
+        compactingSessions.delete(sessionId);
+        lastAutoCompactErrors.delete(sessionId);
+        pruneCompactingSessions(now, null);
+        return {
+          inProgress: false,
+          status: 'completed',
+          startedAt: preEntry.startedAt,
+          method: preEntry.method,
+          trigger: preEntry.trigger,
+          lastError: null,
+        };
+      }
+    }
+
     pruneCompactingSessions(now, hostRunning ? sessionId : null);
     const entry = compactingSessions.get(sessionId);
     const lastError = lastAutoCompactErrors.get(sessionId) ?? null;
@@ -102,41 +139,6 @@ export function createStatusbarService({
         trigger: null,
         lastError,
       };
-    }
-
-    // Detect post-acceptance compaction completion (F1 & F5):
-    // 1. Primary: strict step progression past baselineCompactedStep.
-    // 2. Fallback for >4MB streams where lastCompactedStep is unavailable: significant token drop (>=25% and >=10K).
-    if (entry.status === 'accepted' && telemetry && !hostRunning) {
-      const currentCompactedStep =
-        typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
-      const stepAdvanced =
-        currentCompactedStep !== null &&
-        (entry.baselineCompactedStep === null
-          ? currentCompactedStep >= 0 && telemetry.compactionJustCompleted === true
-          : currentCompactedStep > entry.baselineCompactedStep);
-
-      const tokenDroppedSignificantly =
-        currentCompactedStep === null &&
-        entry.baselineCompactedStep === null &&
-        typeof entry.baselineUsedTokens === 'number' &&
-        entry.baselineUsedTokens >= 20_000 &&
-        typeof telemetry.usedTokens === 'number' &&
-        telemetry.usedTokens < entry.baselineUsedTokens * 0.75 &&
-        entry.baselineUsedTokens - telemetry.usedTokens >= 10_000;
-
-      if (stepAdvanced || tokenDroppedSignificantly) {
-        compactingSessions.delete(sessionId);
-        lastAutoCompactErrors.delete(sessionId);
-        return {
-          inProgress: false,
-          status: 'completed',
-          startedAt: entry.startedAt,
-          method: entry.method,
-          trigger: entry.trigger,
-          lastError: null,
-        };
-      }
     }
 
     return {
