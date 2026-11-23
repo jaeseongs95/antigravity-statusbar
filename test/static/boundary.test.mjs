@@ -158,9 +158,8 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v2.json d
   );
   assert.equal(pluginManifest.name, 'antigravity-statusbar');
   assert.equal(pluginManifest.version, '3.1.0');
-  assert.equal(sidecarManifest.has_web_ui, true);
-  assert.equal(sidecarManifest.ui_config?.views?.[0]?.path, '/');
-  assert.equal(sidecarManifest.ui_config?.views?.[0]?.entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
+  assert.equal(sidecarManifest.has_web_ui, false);
+  assert.equal(sidecarManifest.ui_config, undefined);
 
   assert.equal(addonManifest.schemaVersion, 2);
   assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
