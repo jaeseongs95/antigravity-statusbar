@@ -256,6 +256,7 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
       const disposeHandlers = [];
       let rootShadowHost = null;
       let rootShadow = null;
+      let rootSlotContainer = null;
       let popoverHost = null;
       let popoverShadow = null;
       let modalDialog = null;
@@ -270,17 +271,22 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
       window.addonHost = {
         schemaVersion: 2,
         pluginId: 'antigravity-statusbar',
-        mountSlot(slotId, anchorEl) {
+        mountSlot(slotId, opts) {
+          const anchorEl = opts && opts.container ? opts.container : opts;
           if (!rootShadowHost) {
             rootShadowHost = document.createElement('div');
             rootShadowHost.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
             rootShadowHost.setAttribute('data-slot-id', slotId);
             rootShadow = rootShadowHost.attachShadow({ mode: 'open' });
+            rootSlotContainer = document.createElement('div');
+            rootShadow.appendChild(rootSlotContainer);
           }
           if (anchorEl && anchorEl.parentNode && rootShadowHost.parentNode !== anchorEl.parentNode) {
             anchorEl.parentNode.insertBefore(rootShadowHost, anchorEl.nextSibling);
+          } else if (anchorEl && !anchorEl.parentNode) {
+            document.body.appendChild(rootShadowHost);
           }
-          return rootShadow;
+          return rootSlotContainer;
         },
         unmountSlot() {
           if (rootShadowHost && rootShadowHost.parentNode) rootShadowHost.remove();
@@ -338,6 +344,11 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
           modalShadow.appendChild(bodyEl);
           document.body.appendChild(modalDialog);
           modalDialog.addEventListener('close', () => {
+            if (modalDialog) {
+              modalDialog.remove();
+              modalDialog = null;
+              modalShadow = null;
+            }
             if (opts && typeof opts.onClose === 'function') opts.onClose();
           });
           if (typeof modalDialog.showModal === 'function') {
@@ -450,10 +461,10 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
     await cdp.call('Page.navigate', { url: `http://127.0.0.1:${harnessPort}/` });
 
     // 1. Wait for inline bar in Shadow DOM to render live metrics
-    await waitFor("Boolean(window.__e2eShadows.root?.querySelector('.agy-inline-ctx-text')?.textContent?.includes('255.2K'))");
+    await waitFor("Boolean(window.__e2eShadows.root?.querySelector('.agy-inline-metric-btn')?.textContent?.includes('255.2K'))");
 
     // Verify 99.7% non-exceeded displays 99% (not 100%)
-    const ctxText = await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-ctx-text').textContent");
+    const ctxText = await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-metric-btn').textContent");
     assert.ok(ctxText.includes('99%'), `Expected 99% for non-exceeded 99.7%, got "${ctxText}"`);
 
     // Verify 5h + Weekly quota labels rendered in Shadow DOM
@@ -464,7 +475,7 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
     assert.equal(writableDesc, false, 'window.statusbarAddons must be non-writable');
 
     // 2. ISS-01: Open popover, inspect customInput.type === 'text', enter 'abc' -> must NOT silently reset limit to null!
-    await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-ctx-btn').click()");
+    await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-metric-btn').click()");
     await waitFor("Boolean(window.__e2eShadows.popover?.querySelector('.agy-inline-pop-input'))");
 
     const inputType = await evalExpr("window.__e2eShadows.popover.querySelector('.agy-inline-pop-input').type");
@@ -517,7 +528,7 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
       dlg.close();
     })()`);
     await waitFor("!window.__e2eShadows.modal");
-    const focusedBackOnBar = await evalExpr("window.__e2eShadows.root.activeElement === window.__e2eShadows.root.querySelector('.agy-inline-gear')");
+    const focusedBackOnBar = await evalExpr("window.__e2eShadows.root.activeElement === window.__e2eShadows.root.querySelector('button[aria-label=\"상태바\"]')");
     assert.equal(focusedBackOnBar, true, 'Closing modal must restore focus to visible bar settings button');
 
     // 4. ISS-10: Disconnect indicator visible even when stale snapshot exists
@@ -537,6 +548,7 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
         resolve();
       });
     });
+    harnessServer.closeAllConnections?.();
     await new Promise((resolve) => harnessServer.close(resolve));
     await sidecar.close();
     await fsp.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
