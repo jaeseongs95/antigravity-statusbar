@@ -530,6 +530,10 @@ test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session s
   const token = 'real-browser-cdp-token-32chars-ok';
   const settingsUpdates = [];
   const compactCalls = [];
+  let resolveCompactCalled = null;
+  const compactCalled = new Promise((resolve) => {
+    resolveCompactCalled = resolve;
+  });
   let savedLimitForSess2 = null;
 
   const sidecar = createSidecarServer({
@@ -583,6 +587,7 @@ test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session s
       },
       requestCompaction: async (sid) => {
         compactCalls.push(sid);
+        resolveCompactCalled?.(sid);
         return { accepted: true, sessionId: sid, method: 'rpc' };
       },
     },
@@ -691,6 +696,20 @@ test('R2-F6: interactive Headless Chromium/Edge CDP E2E verifies load, session s
     // 4. Interactive compact button click -> POST /api/compact
     await evalExpr("document.getElementById('btn-compact').click()");
     await waitForCondition("document.getElementById('compact-status')?.textContent === 'Compaction requested...'");
+    let compactWaitTimer = null;
+    try {
+      await Promise.race([
+        compactCalled,
+        new Promise((_, reject) => {
+          compactWaitTimer = setTimeout(
+            () => reject(new Error('Timed out waiting for POST /api/compact')),
+            8_000,
+          );
+        }),
+      ]);
+    } finally {
+      if (compactWaitTimer) clearTimeout(compactWaitTimer);
+    }
     assert.equal(compactCalls[0], 'sess-chrome-2');
 
     // 5. Real browser reload WITHOUT ?token= in URL -> sessionStorage retains auth & re-renders live data

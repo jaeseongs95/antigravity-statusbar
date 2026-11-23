@@ -1,12 +1,12 @@
-# Antigravity Statusbar (v3.1.1)
+# Antigravity Statusbar (v3.1.2)
 
 공식 **Antigravity 네이티브 플러그인 (`AddonManifest.v2` 인라인 상태바 + 헤드리스 네이티브 Sidecar)** 입니다. 채팅 입력창 바로 아래에서 실시간 컨텍스트 사용량, 프롬프트 캐시 적중률, 5시간·주간 계정 한도, 4단계 컨텍스트 한도(`현재 세션 > 모델별 전역 > 일괄 전역 > 호스트 기본값`), 작업 중단 없는 가드된 자동 압축·자동 재개, 토큰 상세 내역, 원클릭 `/compact`를 안전하게 제공합니다.
 
 [English README (README.md)](./README.md)
 
-## v3.1.1 아키텍처 (`AddonManifest.v2` 인라인 상태바 + 헤드리스 네이티브 Sidecar)
+## v3.1.2 아키텍처 (`AddonManifest.v2` 인라인 상태바 + 헤드리스 네이티브 Sidecar)
 
-구버전(v1/v2)은 Electron `app.asar` 바이너리를 패치하고 렌더러 내부(`lsClient`, React Fiber, Protobuf)를 후킹했습니다. **v3.1.1**은 공식 네이티브 플러그인과 `antigravity-native-addon-host` v2 (`AddonManifest.v2`) 위에서 동작합니다.
+구버전(v1/v2)은 Electron `app.asar` 바이너리를 패치하고 렌더러 내부(`lsClient`, React Fiber, Protobuf)를 후킹했습니다. **v3.1.2**는 공식 네이티브 플러그인과 `antigravity-native-addon-host` v2 (`AddonManifest.v2`) 위에서 동작합니다.
 
 - **`app.asar` 패치 0건**, Electron 렌더러 변조 0건, React Fiber/Protobuf 후킹 0건, `hooks.json` 0건.
 - **Shadow DOM 격리 인라인 UI (`AddonManifest.v2`)**: 호스트가 소유한 Shadow DOM 슬롯(`status-bar`, `overlay` 팝오버, `modal` `<dialog>`)으로 렌더링하며 `window`/DOM에 토큰이나 호스트 핸들을 노출하지 않습니다. 불필요한 우측 `AUX_PANE` 탭은 제거했습니다(`sidecar.json` `has_web_ui: false`).

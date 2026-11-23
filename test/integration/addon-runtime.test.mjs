@@ -612,7 +612,7 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
 
   const v2HostHandle = Object.freeze({
     pluginId,
-    version: '3.1.1',
+    version: '3.1.2',
     trustLevel: 'restricted',
     schemaVersion: 2,
     sourceSchemaVersion: 2,

@@ -547,7 +547,10 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
   assert.equal(h.commandCalls.length, 1);
   assert.equal(h.commandCalls[0].sid, 'sess-b9bf40a9');
 
-  // 2. Negative guard: genuine host self-resume (sustained RUNNING >12s grace OR stepCount +2) cancels pendingAutoResume
+  // 2. Negative guard: genuine host self-resume cancels pendingAutoResume:
+  //    - sess-self-steps: known stepCount advancing >=2 steps while RUNNING cancels immediately
+  //    - sess-self-time: unavailable stepCount (null) falls back to the 12s grace window
+  //    (When stepCount is known with 0 step delta, TC-P0-12d verifies pendingAutoResume survives >12s.)
   const hSelfResume = createServiceHarness({
     initialSettings: { defaultCustomLimit: 256_000, autoCompactWhileRunning: 'resume' },
     initialTelemetryBySession: {
@@ -555,7 +558,7 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
         sessionId: 'sess-self-time',
         status: 'CASCADE_RUN_STATUS_RUNNING',
         modelName: 'Gemini 4 Neon (High)',
-        stepCount: 100,
+        stepCount: null,
         usedTokens: 270_000,
         maxContextTokens: 512_000,
         lastCompactedStep: 10,
@@ -587,7 +590,7 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
     hSelfResume.telemetryBySession.set(sid, {
       ...hSelfResume.telemetryBySession.get(sid),
       status: 'CASCADE_RUN_STATUS_RUNNING',
-      stepCount: 102,
+      stepCount: sid === 'sess-self-time' ? null : 102,
       usedTokens: 45_000,
       lastCompactedStep: 101,
       compactionJustCompleted: true,
@@ -607,10 +610,10 @@ test('TC-P0-00d (v3.1.1): transient RUNNING after CHECKPOINT DONE preserves pend
   const sSteps = await hSelfResume.service.getSessionSnapshot('sess-self-steps');
   assert.equal(sSteps.autoResumePending, false, 'Host advancing >=2 steps while RUNNING cancels auto-resume');
 
-  // sess-self-time stays RUNNING past 12s grace window -> cancel
+  // sess-self-time (stepCount unavailable) stays RUNNING past 12s grace window -> cancel via fallback
   hSelfResume.advance(11_000);
   const sTime = await hSelfResume.service.getSessionSnapshot('sess-self-time');
-  assert.equal(sTime.autoResumePending, false, 'Sustained RUNNING past 12s grace window cancels auto-resume');
+  assert.equal(sTime.autoResumePending, false, 'Sustained RUNNING past 12s grace window cancels auto-resume when stepCount is unavailable');
 
   // Even when both later drop to IDLE, 0 auto-resume commands are dispatched
   hSelfResume.advance(1_000);
@@ -1317,4 +1320,409 @@ test('TC-P0-11 (v3.1.1): startSidecar supports headless mode (unset ANTIGRAVITY_
     }
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('TC-P0-12a (v3.1.2): oversized >4MB tail probe widens to 40 steps and telemetry adapter retains monotonic lastCompactedStep after CHECKPOINT leaves tail window', async () => {
+  // 1. ls-transport getTailTrajectorySteps probes total - 40 first (capturing CHECKPOINT at 5036 when stepCount=5051)
+  const observedOffsets = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      if (req.url?.includes('GetCascadeTrajectorySteps')) {
+        observedOffsets.push(body.stepOffset);
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        res.end(
+          JSON.stringify({
+            steps: [
+              {
+                type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+                status: 'CORTEX_STEP_STATUS_DONE',
+                checkpoint: { includedStepIndexEnd: 5036, sessionSummary: 'x'.repeat(15_000) },
+              },
+            ],
+          }),
+        );
+        return;
+      }
+      res.writeHead(404, { connection: 'close' });
+      res.end();
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const transport = createLsTransport({
+      lsAddress: `http://127.0.0.1:${port}`,
+      csrfToken: 'test-csrf-token-1234',
+      timeoutMs: 2_000,
+    });
+    const tail = await transport.getTailTrajectorySteps('sess-2b0577cb', 5051);
+    assert.equal(observedOffsets[0], 5011, 'Expected initial tail probe at total - 40 (5011), not total - 12 (5039)');
+    assert.equal(tail.stepOffset, 5011);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  // 2. Even when stepCount advances far past the tail window (>40 steps) and CHECKPOINT is no longer
+  //    in tailSteps, createAntigravityTelemetryAdapter must retain monotonic lastCompactedStep (5036)
+  //    and NOT snap usedTokens back to stale pre-compaction >256K metadata.
+  let currentStepCount = 5037;
+  let currentTailSteps = {
+    stepOffset: 5035,
+    steps: [
+      { type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE' },
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        checkpoint: { includedStepIndexEnd: 5036, sessionSummary: 'x'.repeat(15_000) },
+      },
+    ],
+  };
+  let currentGeneratorMetadata = [
+    {
+      stepIndices: [5034],
+      chatModel: {
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        usage: { apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', inputTokens: '260000', cacheReadTokens: '0' },
+        chatStartMetadata: {
+          startStepIndex: 4900,
+          contextWindowMetadata: {
+            estimatedTokensUsed: 262_000,
+            maxContextTokens: 512_000,
+            tokenBreakdown: {
+              groups: [
+                { source: 'TOKEN_SOURCE_SYSTEM', numTokens: '20000' },
+                { source: 'TOKEN_TYPE_CHAT_MESSAGES', numTokens: '242000' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  ];
+
+  const adapter = createAntigravityTelemetryAdapter({
+    callUnaryRpc: async () => ({
+      trajectorySummaries: {
+        'sess-2b0577cb': {
+          summary: 'Oversized session',
+          status: 'CASCADE_RUN_STATUS_RUNNING',
+          stepCount: currentStepCount,
+        },
+      },
+    }),
+    readFirstStreamFrame: async () => {
+      throw new Error('StreamAgentStateUpdates response exceeds 4MB cap');
+    },
+    getTailGeneratorMetadata: async () => currentGeneratorMetadata,
+    getTailTrajectorySteps: async () => currentTailSteps,
+    getQuotaSummaryRaw: async () => ({ data: null, stale: false, fetchedAt: Date.now() }),
+  });
+
+  // Poll 1: observes CHECKPOINT at step 5036
+  const t1 = await adapter.getSessionTelemetry('sess-2b0577cb');
+  assert.equal(t1.lastCompactedStep, 5036);
+  assert.equal(t1.usedTokensSource, 'after_compaction');
+  assert.equal(t1.usedTokens, 25_000);
+
+  // Poll 2: 60+ tool calls push CHECKPOINT out of tailSteps while generatorMetadata is still pre-compaction (5034)
+  currentStepCount = 5100;
+  currentTailSteps = {
+    stepOffset: 5060,
+    steps: [{ type: 'CORTEX_STEP_TYPE_TOOL_CALL', status: 'CORTEX_STEP_STATUS_DONE' }],
+  };
+  const t2 = await adapter.getSessionTelemetry('sess-2b0577cb');
+  assert.equal(t2.lastCompactedStep, 5036, 'lastCompactedStep must remain monotonically >= 5036 after leaving tail window');
+  assert.equal(t2.usedTokensSource, 'after_compaction', 'Must keep after_compaction instead of reverting to stale pre-compaction metadata');
+  assert.ok(t2.usedTokens !== null && t2.usedTokens < 256_000, `Expected low post-compaction tokens, got ${t2.usedTokens}`);
+
+  // Poll 3: real post-compaction LLM turn completes (stepIndices [5102] > 5036) -> switches cleanly to live tokens
+  currentStepCount = 5103;
+  currentGeneratorMetadata = [
+    ...currentGeneratorMetadata,
+    {
+      stepIndices: [5102],
+      chatModel: {
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        usage: { apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', inputTokens: '45000', cacheReadTokens: '0' },
+        chatStartMetadata: {
+          startStepIndex: 5036,
+          contextWindowMetadata: {
+            estimatedTokensUsed: 48_000,
+            maxContextTokens: 512_000,
+          },
+        },
+      },
+    },
+  ];
+  const t3 = await adapter.getSessionTelemetry('sess-2b0577cb');
+  assert.equal(t3.lastCompactedStep, 5036);
+  assert.equal(t3.usedTokensSource, 'estimated');
+  assert.equal(t3.usedTokens, 48_000);
+});
+
+test('TC-P0-12b (v3.1.2): partial post-compaction generatorMetadata without token fields and checkpoint-step summarization metadata must not leak pre-compaction tokens', () => {
+  const preCompactMeta = {
+    stepIndices: [5034],
+    chatModel: {
+      modelDisplayName: 'Gemini 4 Neon (High)',
+      usage: { apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', inputTokens: '260000', cacheReadTokens: '0' },
+      chatStartMetadata: {
+        startStepIndex: 4900,
+        contextWindowMetadata: {
+          estimatedTokensUsed: 262_000,
+          maxContextTokens: 512_000,
+          tokenBreakdown: {
+            groups: [
+              { source: 'TOKEN_SOURCE_SYSTEM', numTokens: '20000' },
+              { source: 'TOKEN_TYPE_CHAT_MESSAGES', numTokens: '242000' },
+            ],
+          },
+        },
+      },
+    },
+  };
+
+  // Case 1: New post-compaction streaming chatModel item (step 5042) has empty usage: {} and no estimatedTokensUsed
+  const partialPostCompact = mapSessionTelemetry({
+    requestedSessionId: 'sess-cross-cp',
+    streamFrame: { update: { conversationId: 'sess-cross-cp', status: 'CASCADE_RUN_STATUS_RUNNING' } },
+    trajectorySummary: { summary: 'Active', status: 'CASCADE_RUN_STATUS_RUNNING', stepCount: 5043 },
+    generatorMetadata: [
+      preCompactMeta,
+      {
+        stepIndices: [5042],
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (High)',
+          usage: {},
+          chatStartMetadata: {
+            startStepIndex: 5036,
+            contextWindowMetadata: { maxContextTokens: 512_000 },
+          },
+        },
+      },
+    ],
+    tailStepsOffset: 5036,
+    tailSteps: [
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        checkpoint: { includedStepIndexEnd: 5036, sessionSummary: 'x'.repeat(15_000) },
+      },
+    ],
+  });
+
+  assert.equal(partialPostCompact.usedTokensSource, 'after_compaction', 'Partial step 5042 metadata must not leak step 5034 pre-compaction tokens');
+  assert.equal(partialPostCompact.usedTokens, 25_000);
+  assert.equal(partialPostCompact.compactionJustCompleted, true);
+
+  // Case 2: Summarization chatModel call at CHECKPOINT step itself (stepIndices: [5036]) reports pre-compaction 262K input
+  const checkpointStepMeta = mapSessionTelemetry({
+    requestedSessionId: 'sess-cross-cp',
+    streamFrame: { update: { conversationId: 'sess-cross-cp', status: 'CASCADE_RUN_STATUS_RUNNING' } },
+    trajectorySummary: { summary: 'Active', status: 'CASCADE_RUN_STATUS_RUNNING', stepCount: 5038 },
+    generatorMetadata: [
+      {
+        ...preCompactMeta,
+        stepIndices: [5036],
+      },
+    ],
+    tailStepsOffset: 5036,
+    tailSteps: [
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        checkpoint: { includedStepIndexEnd: 5036, sessionSummary: 'x'.repeat(15_000) },
+      },
+    ],
+  });
+
+  assert.equal(checkpointStepMeta.usedTokensSource, 'after_compaction', 'Metadata at CHECKPOINT step itself (5036) must not leak pre-compaction summarization input');
+  assert.equal(checkpointStepMeta.usedTokens, 25_000);
+});
+
+test('TC-P0-12c (v3.1.2): synthetic after_compaction preserves settlement cooldown across long compactions (>90s) and out-of-order stale polls cannot double-trigger /compact', async () => {
+  // Part 1: Long compaction (99s, matching real 2b0577cb 21:46:36->21:48:15) followed by synthetic after_compaction
+  const h = createServiceHarness({
+    initialSettings: { defaultCustomLimit: 256_000, autoCompactWhileRunning: 'resume' },
+    initialTelemetryBySession: {
+      'sess-long-cp': {
+        sessionId: 'sess-long-cp',
+        status: 'CASCADE_RUN_STATUS_RUNNING',
+        modelName: 'Gemini 4 Neon (High)',
+        stepCount: 5035,
+        usedTokens: 265_000,
+        usedTokensSource: 'estimated',
+        maxContextTokens: 512_000,
+        lastCompactedStep: 4900,
+        compactionJustCompleted: false,
+        hostCompactionInProgress: false,
+        tokenBreakdown: [],
+      },
+    },
+  });
+
+  const snap1 = await h.service.getSessionSnapshot('sess-long-cp');
+  assert.equal(snap1.autoCompactTriggered, true);
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // 99 seconds later: compaction completes with synthetic after_compaction reading
+  h.advance(99_000);
+  h.telemetryBySession.set('sess-long-cp', {
+    ...h.telemetryBySession.get('sess-long-cp'),
+    status: 'CASCADE_RUN_STATUS_IDLE',
+    stepCount: 5037,
+    usedTokens: 25_000,
+    usedTokensSource: 'after_compaction',
+    lastCompactedStep: 5036,
+    compactionJustCompleted: true,
+  });
+  const snapDone = await h.service.getSessionSnapshot('sess-long-cp');
+  assert.equal(snapDone.autoCompactTriggered, false);
+  await flush();
+
+  // 15 seconds after completion (114s after 1st trigger): stale >256K spike arrives before any real <256K turn
+  h.advance(15_000);
+  h.telemetryBySession.set('sess-long-cp', {
+    ...h.telemetryBySession.get('sess-long-cp'),
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 5051,
+    usedTokens: 262_000,
+    usedTokensSource: 'estimated',
+    lastCompactedStep: 5036,
+    compactionJustCompleted: false,
+  });
+  const snapSpike = await h.service.getSessionSnapshot('sess-long-cp');
+  assert.equal(snapSpike.autoCompactTriggered, false, 'Settlement cooldown after synthetic after_compaction must block immediate double /compact');
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // Real post-compaction below-limit turn arrives -> clears settlement cooldown cleanly
+  h.advance(5_000);
+  h.telemetryBySession.set('sess-long-cp', {
+    ...h.telemetryBySession.get('sess-long-cp'),
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 5055,
+    usedTokens: 45_000,
+    usedTokensSource: 'estimated',
+    lastCompactedStep: 5036,
+    compactionJustCompleted: false,
+  });
+  await h.service.getSessionSnapshot('sess-long-cp');
+
+  // Later real context growth past 256K triggers cleanly (re-armed by the real 45K reading)
+  h.advance(10_000);
+  h.telemetryBySession.set('sess-long-cp', {
+    ...h.telemetryBySession.get('sess-long-cp'),
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 5120,
+    usedTokens: 268_000,
+    usedTokensSource: 'estimated',
+    lastCompactedStep: 5036,
+    compactionJustCompleted: false,
+  });
+  const snapRealCross = await h.service.getSessionSnapshot('sess-long-cp');
+  assert.equal(snapRealCross.autoCompactTriggered, true, 'Real below-limit reading must re-arm auto-compact for genuine future crossings');
+  await flush();
+  assert.equal(h.compactCalls.length, 2);
+
+  // Part 2: Out-of-order stale poll (regressed stepCount / lastCompactedStep) must NEVER trigger /compact
+  h.advance(120_000);
+  h.telemetryBySession.set('sess-long-cp', {
+    ...h.telemetryBySession.get('sess-long-cp'),
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 5130,
+    usedTokens: 40_000,
+    usedTokensSource: 'estimated',
+    lastCompactedStep: 5125,
+    compactionJustCompleted: false,
+  });
+  await h.service.getSessionSnapshot('sess-long-cp');
+
+  // Stale out-of-order response arrives with older stepCount (5120 < 5130) & older lastCompactedStep (5036 < 5125)
+  h.advance(1_000);
+  h.telemetryBySession.set('sess-long-cp', {
+    ...h.telemetryBySession.get('sess-long-cp'),
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 5120,
+    usedTokens: 270_000,
+    usedTokensSource: 'estimated',
+    lastCompactedStep: 5036,
+    compactionJustCompleted: false,
+  });
+  const snapStale = await h.service.getSessionSnapshot('sess-long-cp');
+  assert.equal(snapStale.autoCompactTriggered, false, 'Regressed out-of-order telemetry must never trigger /compact');
+  await flush();
+  assert.equal(h.compactCalls.length, 2);
+});
+
+test('TC-P0-12d (v3.1.2): post-checkpoint RUNNING lasting >12s with 0 new steps preserves pendingAutoResume and resumes once IDLE', async () => {
+  const h = createServiceHarness({
+    initialSettings: { defaultCustomLimit: 256_000, autoCompactWhileRunning: 'resume' },
+    initialTelemetryBySession: {
+      'sess-working-stall': {
+        sessionId: 'sess-working-stall',
+        status: 'CASCADE_RUN_STATUS_RUNNING',
+        modelName: 'Gemini 4 Neon (High)',
+        stepCount: 5052,
+        usedTokens: 270_000,
+        usedTokensSource: 'estimated',
+        maxContextTokens: 512_000,
+        lastCompactedStep: 5036,
+        compactionJustCompleted: false,
+        hostCompactionInProgress: false,
+        tokenBreakdown: [],
+      },
+    },
+  });
+
+  // Trigger auto-compact while RUNNING
+  const s1 = await h.service.getSessionSnapshot('sess-working-stall');
+  assert.equal(s1.autoCompactTriggered, true);
+  assert.equal(s1.autoResumePending, true);
+  await flush();
+
+  // t+5s: CHECKPOINT finishes at step 5053 while UI still displays "Working" (status=RUNNING, stepCount=5054)
+  h.advance(5_000);
+  h.telemetryBySession.set('sess-working-stall', {
+    ...h.telemetryBySession.get('sess-working-stall'),
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 5054,
+    usedTokens: 25_000,
+    usedTokensSource: 'after_compaction',
+    lastCompactedStep: 5053,
+    compactionJustCompleted: true,
+  });
+  const sDone = await h.service.getSessionSnapshot('sess-working-stall');
+  assert.equal(sDone.autoResumePending, true);
+  assert.equal(sDone.autoResumeTriggered, false);
+
+  // t+25s (20s after checkpoint done — past old 12s grace window!): still RUNNING with 0 new steps (5054)
+  h.advance(20_000);
+  const sStillWorking = await h.service.getSessionSnapshot('sess-working-stall');
+  assert.equal(
+    sStillWorking.autoResumePending,
+    true,
+    'RUNNING with 0 new steps past 12s must NOT cancel pendingAutoResume (prevents dead agent after compaction)',
+  );
+  assert.equal(sStillWorking.autoResumeTriggered, false);
+
+  // t+30s: Host finally settles to IDLE -> MUST dispatch single-shot auto-resume
+  h.advance(5_000);
+  h.telemetryBySession.set('sess-working-stall', {
+    ...h.telemetryBySession.get('sess-working-stall'),
+    status: 'CASCADE_RUN_STATUS_IDLE',
+    stepCount: 5054,
+  });
+  const sIdle = await h.service.getSessionSnapshot('sess-working-stall');
+  assert.equal(sIdle.autoResumeTriggered, true, 'Must fire single-shot auto-resume once delayed RUNNING settles to IDLE');
+  assert.equal(sIdle.autoResumePending, false);
+  await flush();
+  assert.equal(h.commandCalls.length, 1);
+  assert.equal(h.commandCalls[0].sid, 'sess-working-stall');
 });
