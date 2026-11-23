@@ -606,10 +606,31 @@ export async function startSidecar(env = process.env, deps = {}) {
     })}\n`,
   );
 
+  // Background active-session sweep protects non-focused RUNNING tabs under global/model limits
+  let sweepInFlight = false;
+  const sweepIntervalMs = Math.max(
+    1_000,
+    Number(env.STATUSBAR_SWEEP_INTERVAL_MS) || 5_000,
+  );
+  const sweepTimer = setInterval(() => {
+    if (shuttingDown || sweepInFlight) return;
+    sweepInFlight = true;
+    service
+      .sweepActiveSessions()
+      .catch(() => {})
+      .finally(() => {
+        sweepInFlight = false;
+      });
+  }, sweepIntervalMs);
+  if (typeof sweepTimer.unref === 'function') {
+    sweepTimer.unref();
+  }
+
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearInterval(sweepTimer);
     if (rendererPublisher) {
       try {
         await rendererPublisher.teardown();

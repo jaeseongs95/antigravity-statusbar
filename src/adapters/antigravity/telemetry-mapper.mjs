@@ -490,6 +490,19 @@ export function mapSessionTelemetry({
   } else if (estimatedUsed !== null) {
     usedTokens = estimatedUsed;
     usedTokensSource = 'estimated';
+  } else if (
+    latestUsage &&
+    (latestUsage.inputTokens !== null || latestUsage.cacheReadTokens !== null)
+  ) {
+    const input = latestUsage.inputTokens ?? 0;
+    const cache = latestUsage.cacheReadTokens ?? 0;
+    const usageTotal = providerInputIncludesCache(latestUsage.apiProvider)
+      ? input
+      : input + cache;
+    if (usageTotal > 0) {
+      usedTokens = usageTotal;
+      usedTokensSource = 'usage_fallback';
+    }
   }
 
   const cacheHitPercent =

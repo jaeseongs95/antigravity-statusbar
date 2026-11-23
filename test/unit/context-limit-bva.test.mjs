@@ -434,18 +434,19 @@ test('TC-BVA-05: statusbar-service.mjs auto-compact boundary (limit-1 vs limit v
   assert.equal(snapBelow.autoCompactTriggered, false);
   assert.equal(compactCalls.length, 0);
 
-  // usedTokens = 32,000 while RUNNING -> defers auto-compact
+  // usedTokens = 32,000 while RUNNING -> triggers auto-compact immediately once (no waiting for IDLE)
   telemetryState = { ...telemetryState, usedTokens: 32_000, status: 'CASCADE_RUN_STATUS_RUNNING' };
   const snapRunning = await service.getSessionSnapshot('sess-bva');
   assert.equal(snapRunning.exceededSoftLimit, true);
-  assert.equal(snapRunning.autoCompactTriggered, false);
-  assert.equal(compactCalls.length, 0);
+  assert.equal(snapRunning.autoCompactTriggered, true);
+  await flush();
+  assert.equal(compactCalls.length, 1);
 
-  // usedTokens = 32,000 when IDLE -> triggers auto-compact exactly once
+  // Subsequent IDLE poll while waiting for drop -> does NOT double-fire
   telemetryState = { ...telemetryState, status: 'IDLE' };
   const snapAtLimit = await service.getSessionSnapshot('sess-bva');
   assert.equal(snapAtLimit.exceededSoftLimit, true);
-  assert.equal(snapAtLimit.autoCompactTriggered, true);
+  assert.equal(snapAtLimit.autoCompactTriggered, false);
   await flush();
   assert.equal(compactCalls.length, 1);
 

@@ -22,8 +22,12 @@ import {
 } from '../ports/contracts.mjs';
 
 const DEFAULT_COMPACT_COOLDOWN_MS = 15_000;
+const HOST_COMPACT_MAX_LOCK_MS = 300_000;
 const AUTO_COMPACT_COOLDOWN_MS = 90_000;
+const AUTO_COMPACT_RUNNING_RETRY_MS = 10_000;
 const AUTO_COMPACT_RETRIGGER_TOKEN_DELTA = 20_000;
+const MAX_BACKGROUND_SWEEP_SESSIONS = 5;
+const BACKGROUND_RECENT_WINDOW_MS = 60_000;
 
 /**
  * Core application service orchestrating session telemetry, quota, settings,
@@ -44,7 +48,7 @@ export function createStatusbarService({
 
   /** @type {Map<string, { attemptToken: string, startedAt: number, acceptedAt: number | null, method: string | null, trigger: 'manual' | 'auto', baselineCompactedStep: number | null, baselineUsedTokens: number | null, status: 'pending' | 'accepted' }>} */
   const compactingSessions = new Map();
-  /** @type {Map<string, { cooldownUntil: number, waitingForDrop: boolean, lastTriggeredTokens: number | null, lastTriggeredStep: number | null }>} */
+  /** @type {Map<string, { cooldownUntil: number, waitingForDrop: boolean, lastTriggeredTokens: number | null, lastTriggeredStep: number | null, lastTriggeredCompactedStep: number | null, failedWhileRunning: boolean }>} */
   const autoCompactState = new Map();
   /** @type {Map<string, { code: string, message: string, at: number }>} */
   const lastAutoCompactErrors = new Map();
@@ -59,9 +63,11 @@ export function createStatusbarService({
     }));
   }
 
-  function pruneCompactingSessions(now) {
+  function pruneCompactingSessions(now, activeHostCompactingSessionId = null) {
     for (const [sid, entry] of compactingSessions.entries()) {
-      if (entry.status === 'accepted' && now - entry.startedAt >= compactCooldownMs) {
+      const ttl =
+        sid === activeHostCompactingSessionId ? HOST_COMPACT_MAX_LOCK_MS : compactCooldownMs;
+      if (entry.status === 'accepted' && now - entry.startedAt >= ttl) {
         compactingSessions.delete(sid);
       }
     }
@@ -73,11 +79,12 @@ export function createStatusbarService({
   }
 
   function getCompactionState(sessionId, telemetry, now) {
-    pruneCompactingSessions(now);
+    const hostRunning = telemetry?.hostCompactionInProgress === true;
+    pruneCompactingSessions(now, hostRunning ? sessionId : null);
     const entry = compactingSessions.get(sessionId);
     const lastError = lastAutoCompactErrors.get(sessionId) ?? null;
     if (!entry) {
-      if (telemetry?.hostCompactionInProgress === true) {
+      if (hostRunning) {
         return {
           inProgress: true,
           status: 'running',
@@ -100,7 +107,7 @@ export function createStatusbarService({
     // Detect post-acceptance compaction completion (F1 & F5):
     // 1. Primary: strict step progression past baselineCompactedStep.
     // 2. Fallback for >4MB streams where lastCompactedStep is unavailable: significant token drop (>=25% and >=10K).
-    if (entry.status === 'accepted' && telemetry) {
+    if (entry.status === 'accepted' && telemetry && !hostRunning) {
       const currentCompactedStep =
         typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
       const stepAdvanced =
@@ -134,7 +141,7 @@ export function createStatusbarService({
 
     return {
       inProgress: true,
-      status: entry.status,
+      status: hostRunning ? 'running' : entry.status,
       startedAt: entry.startedAt,
       method: entry.method,
       trigger: entry.trigger,
@@ -197,11 +204,36 @@ export function createStatusbarService({
         waitingForDrop: false,
         lastTriggeredTokens: null,
         lastTriggeredStep: null,
+        lastTriggeredCompactedStep: null,
+        failedWhileRunning: false,
       };
 
+      const currentCompactedStep =
+        typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
+      const compactionAdvanced =
+        currentCompactedStep !== null &&
+        (prevAuto.lastTriggeredCompactedStep === null
+          ? telemetry.compactionJustCompleted === true
+          : currentCompactedStep > prevAuto.lastTriggeredCompactedStep);
+
+      if (
+        compactionAdvanced &&
+        (prevAuto.waitingForDrop || prevAuto.cooldownUntil > 0 || prevAuto.failedWhileRunning)
+      ) {
+        prevAuto.waitingForDrop = false;
+        prevAuto.cooldownUntil = 0;
+        prevAuto.failedWhileRunning = false;
+        prevAuto.lastTriggeredTokens = null;
+        prevAuto.lastTriggeredStep = null;
+        prevAuto.lastTriggeredCompactedStep = currentCompactedStep;
+        autoCompactState.set(sessionId, prevAuto);
+      }
+
       if (!threshold.exceededSoftLimit) {
-        if (prevAuto.waitingForDrop) {
+        if (prevAuto.waitingForDrop || prevAuto.failedWhileRunning || prevAuto.cooldownUntil > 0) {
           prevAuto.waitingForDrop = false;
+          prevAuto.failedWhileRunning = false;
+          prevAuto.cooldownUntil = 0;
           autoCompactState.set(sessionId, prevAuto);
         }
         if (lastAutoCompactErrors.has(sessionId)) {
@@ -212,6 +244,12 @@ export function createStatusbarService({
         const isRunning =
           typeof telemetry.status === 'string' &&
           telemetry.status.toUpperCase().includes('RUNNING');
+        if (!isRunning && prevAuto.failedWhileRunning) {
+          prevAuto.failedWhileRunning = false;
+          prevAuto.cooldownUntil = 0;
+          autoCompactState.set(sessionId, prevAuto);
+        }
+
         const cooldownExpired = prevAuto.cooldownUntil <= now;
         const stepAdvancedSinceLast =
           typeof telemetry.stepCount === 'number' &&
@@ -226,8 +264,9 @@ export function createStatusbarService({
         if (
           autoCompactEnabled &&
           limitInfo.isCustomActive &&
-          !isRunning &&
           !compaction.inProgress &&
+          telemetry.hostCompactionInProgress !== true &&
+          telemetry.compactionJustCompleted !== true &&
           cooldownExpired &&
           canTriggerAgain
         ) {
@@ -238,6 +277,8 @@ export function createStatusbarService({
               typeof telemetry.usedTokens === 'number' ? telemetry.usedTokens : null,
             lastTriggeredStep:
               typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null,
+            lastTriggeredCompactedStep: currentCompactedStep,
+            failedWhileRunning: false,
           };
           autoCompactState.set(sessionId, triggerRecord);
           while (autoCompactState.size > MAX_SESSION_OVERRIDES) {
@@ -248,13 +289,17 @@ export function createStatusbarService({
           lastAutoCompactErrors.delete(sessionId);
           compaction.lastError = null;
           autoCompactTriggered = true;
-          // Fire-and-forget guarded auto-compaction for this session
+          // Fire-and-forget guarded auto-compaction for this session (queues even while RUNNING)
           this.requestCompaction(sessionId, { trigger: 'auto' }).catch((err) => {
-            // A-1 & A-3: Keep cooldown active to prevent retry storms, but release waitingForDrop
-            // so auto-compact can retry once cooldown expires, and surface the failure reason.
+            // A-1 & A-3: Release waitingForDrop so retry is possible; if rejected while RUNNING,
+            // use short backoff and retry immediately once the session transitions to IDLE.
             const cur = autoCompactState.get(sessionId);
             if (cur === triggerRecord) {
               cur.waitingForDrop = false;
+              if (isRunning) {
+                cur.failedWhileRunning = true;
+                cur.cooldownUntil = clock() + AUTO_COMPACT_RUNNING_RETRY_MS;
+              }
             }
             lastAutoCompactErrors.set(sessionId, {
               code: err?.code || ERROR_CODES.COMPACTION_FAILED,
@@ -647,6 +692,51 @@ export function createStatusbarService({
           err?.message || 'Compaction request failed.',
         );
       }
+    },
+
+    async sweepActiveSessions({
+      maxSessions = MAX_BACKGROUND_SWEEP_SESSIONS,
+      recentWindowMs = BACKGROUND_RECENT_WINDOW_MS,
+    } = {}) {
+      const settings = await settingsPort.read();
+      const autoCompactEnabled = settings.autoCompact !== false;
+      const hasAnyCustomLimit =
+        typeof settings.defaultCustomLimit === 'number' ||
+        (settings.modelLimits instanceof Map && settings.modelLimits.size > 0) ||
+        (settings.sessions instanceof Map && settings.sessions.size > 0);
+      if (!autoCompactEnabled || !hasAnyCustomLimit) {
+        return { checked: 0, triggered: 0 };
+      }
+
+      const sessions = await telemetryPort.listSessions();
+      const now = clock();
+      const candidates = (Array.isArray(sessions) ? sessions : [])
+        .filter((s) => {
+          if (!s || typeof s.sessionId !== 'string' || !s.sessionId) return false;
+          const running =
+            typeof s.status === 'string' && s.status.toUpperCase().includes('RUNNING');
+          const recent =
+            typeof s.lastModifiedMs === 'number' &&
+            s.lastModifiedMs > 0 &&
+            now - s.lastModifiedMs <= recentWindowMs;
+          return running || recent;
+        })
+        .slice(0, maxSessions);
+
+      let checked = 0;
+      let triggered = 0;
+      for (const s of candidates) {
+        try {
+          const snap = await this.getSessionSnapshot(s.sessionId);
+          checked += 1;
+          if (snap.autoCompactTriggered) {
+            triggered += 1;
+          }
+        } catch {
+          // Best-effort sweep: isolate per-session telemetry failures
+        }
+      }
+      return { checked, triggered };
     },
   };
 }

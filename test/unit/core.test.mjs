@@ -257,7 +257,7 @@ test('R2-F1: repeated /compact does NOT prematurely clear mutex when lastCompact
   assert.equal(snap2.compaction.status, 'completed');
 });
 
-test('auto-compact defers while RUNNING, fires once on IDLE without looping, and re-arms after drop', async () => {
+test('auto-compact fires immediately while RUNNING without looping and re-arms after drop', async () => {
   let now = 5_000_000;
   let compactCalls = 0;
   let telemetry = {
@@ -300,15 +300,16 @@ test('auto-compact defers while RUNNING, fires once on IDLE without looping, and
     },
   });
 
-  // 1. While RUNNING -> MUST NOT fire auto-compact
+  // 1. Crossing limit while RUNNING -> queues auto-compact IMMEDIATELY once
   const snapRunning = await service.getSessionSnapshot('sess-auto');
-  assert.equal(snapRunning.autoCompactTriggered, false);
-  assert.equal(compactCalls, 0);
+  assert.equal(snapRunning.autoCompactTriggered, true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(compactCalls, 1);
 
-  // 2. Once IDLE -> fires auto-compact ONCE
+  // 2. Transitioning to IDLE while still waiting for drop -> MUST NOT double-fire
   telemetry = { ...telemetry, status: 'CASCADE_RUN_STATUS_IDLE' };
   const snapIdle1 = await service.getSessionSnapshot('sess-auto');
-  assert.equal(snapIdle1.autoCompactTriggered, true);
+  assert.equal(snapIdle1.autoCompactTriggered, false);
   await new Promise((r) => setImmediate(r));
   assert.equal(compactCalls, 1);
 
