@@ -218,42 +218,16 @@ export function createAntigravityCompactionAdapter({
       if (trimmed.startsWith('/compact ')) {
         return this.compactSession(sessionId, { prompt: trimmed.slice(9).trim() });
       }
-      // ISS-00: For plain-text messages (e.g. guarded auto-resume continuation), prefer direct
-      // SendUserCascadeMessage RPC first (no child spawn, UTF-8 safe on Windows); fall back to agentapi.
-      if (!trimmed.startsWith('/')) {
-        try {
-          await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
-            cascadeId: sessionId,
-            items: [{ text: trimmed }],
-          });
-          return { accepted: true, method: 'rpc' };
-        } catch (rpcErr) {
-          const realExe = resolveSafeAgentApiExe(agentApiExePath);
-          if (!realExe) {
-            return {
-              accepted: false,
-              method: 'rpc',
-              reason: rpcErr?.message || 'Failed to send continuation message.',
-            };
-          }
-          const fallbackRes = await runFallbackSpawn(realExe, sessionId, trimmed);
-          if (fallbackRes.accepted) {
-            return fallbackRes;
-          }
-          return {
-            accepted: false,
-            method: 'agentapi',
-            reason: `${rpcErr?.message || 'RPC failed'}; fallback: ${fallbackRes.reason}`,
-          };
-        }
-      }
-
+      // v3.1.1: Prefer official `agentapi send-message` first (shell: false, UTF-16 safe via CreateProcessW
+      // on Windows, automatically attaches active cascadeConfig); fall back to SendUserCascadeMessage RPC.
       const realExe = resolveSafeAgentApiExe(agentApiExePath);
+      let agentApiError = null;
       if (realExe) {
         const res = await runFallbackSpawn(realExe, sessionId, trimmed);
         if (res.accepted) {
           return res;
         }
+        agentApiError = res.reason || 'agentapi send-message failed';
       }
       try {
         await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
@@ -262,10 +236,11 @@ export function createAntigravityCompactionAdapter({
         });
         return { accepted: true, method: 'rpc' };
       } catch (rpcErr) {
+        const rpcReason = rpcErr?.message || 'Failed to send command.';
         return {
           accepted: false,
-          method: 'rpc',
-          reason: rpcErr?.message || 'Failed to send custom command.',
+          method: realExe ? 'agentapi' : 'rpc',
+          reason: agentApiError ? `${agentApiError}; fallback: ${rpcReason}` : rpcReason,
         };
       }
     },

@@ -29,6 +29,9 @@ const AUTO_COMPACT_COOLDOWN_MS = 90_000;
 const AUTO_COMPACT_RUNNING_RETRY_MS = 10_000;
 const AUTO_COMPACT_RETRIGGER_TOKEN_DELTA = 20_000;
 const AUTO_RESUME_WINDOW_MS = 300_000;
+const AUTO_RESUME_RUNNING_GRACE_MS = 12_000;
+const AUTO_RESUME_RUNNING_STEP_DELTA = 2;
+const AUTO_RESUME_ERROR_CODE = 'AUTO_RESUME_FAILED';
 const AUTO_RESUME_CIRCUIT_WINDOW_MS = 600_000;
 const MAX_CONSECUTIVE_AUTO_RESUMES = 3;
 const MAX_BACKGROUND_SWEEP_SESSIONS = 5;
@@ -76,7 +79,7 @@ export function createStatusbarService({
   const compactingSessions = new Map();
   /** @type {Map<string, { cooldownUntil: number, waitingForDrop: boolean, lastTriggeredTokens: number | null, lastTriggeredStep: number | null, lastTriggeredCompactedStep: number | null, failedWhileRunning: boolean }>} */
   const autoCompactState = new Map();
-  /** @type {Map<string, { attemptToken: string, triggeredAt: number, baselineCompactedStep: number | null, baselineUsedTokens: number | null, baselineStepCount: number | null, locale: string, dispatched: boolean }>} */
+  /** @type {Map<string, { attemptToken: string, triggeredAt: number, baselineCompactedStep: number | null, baselineUsedTokens: number | null, baselineStepCount: number | null, compactionDoneAt: number | null, compactionDoneStepCount: number | null, locale: string, dispatched: boolean }>} */
   const pendingAutoResume = new Map();
   /** @type {Map<string, { count: number, windowStartedAt: number }>} */
   const autoResumeCircuit = new Map();
@@ -85,6 +88,19 @@ export function createStatusbarService({
   /** @type {Map<string, { code: string, message: string, at: number }>} */
   const lastAutoCompactErrors = new Map();
   let attemptSeq = 0;
+
+  function recordAutoCompactError(sessionId, code, message) {
+    lastAutoCompactErrors.set(sessionId, {
+      code: code || ERROR_CODES.COMPACTION_FAILED,
+      message: message || 'Auto-compaction failed.',
+      at: clock(),
+    });
+    while (lastAutoCompactErrors.size > MAX_SESSION_OVERRIDES) {
+      const oldestErr = lastAutoCompactErrors.keys().next().value;
+      if (oldestErr === undefined) break;
+      lastAutoCompactErrors.delete(oldestErr);
+    }
+  }
 
   function formatModelLimits(modelLimitsMap) {
     if (!(modelLimitsMap instanceof Map)) return [];
@@ -262,7 +278,7 @@ export function createStatusbarService({
       const currentCompactedStep =
         typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
 
-      // ISS-00: Guarded single-shot Auto-Resume for RUNNING sessions interrupted by auto-compact
+      // ISS-00 / v3.1.1: Guarded single-shot Auto-Resume for RUNNING sessions interrupted by auto-compact
       const resumeEntry = pendingAutoResume.get(sessionId);
       if (resumeEntry) {
         const resumeExpired = now - resumeEntry.triggeredAt > AUTO_RESUME_WINDOW_MS;
@@ -283,54 +299,98 @@ export function createStatusbarService({
           typeof telemetry.usedTokens === 'number' &&
           telemetry.usedTokens < resumeEntry.baselineUsedTokens * 0.75 &&
           resumeEntry.baselineUsedTokens - telemetry.usedTokens >= 10_000;
-        const compactionDoneForResume =
+        const compactionDoneNow =
           compaction.status === 'completed' || resumeStepAdvanced || resumeTokenDropped;
 
         if (resumeExpired || cancelledOrError || resumeEntry.dispatched) {
           pendingAutoResume.delete(sessionId);
-        } else if (compactionDoneForResume && telemetry.hostCompactionInProgress !== true) {
-          const manualUserIntervened =
-            telemetry.compactionJustCompleted !== true &&
-            currentCompactedStep !== null &&
-            typeof telemetry.stepCount === 'number' &&
-            telemetry.stepCount > currentCompactedStep + 2;
+        } else {
+          if (
+            compactionDoneNow &&
+            telemetry.hostCompactionInProgress !== true &&
+            resumeEntry.compactionDoneAt === null
+          ) {
+            // Latch completion once observed because getCompactionState() reports 'completed' single-shot
+            resumeEntry.compactionDoneAt = now;
+            resumeEntry.compactionDoneStepCount =
+              typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null;
+          }
+          const compactionDoneForResume = resumeEntry.compactionDoneAt !== null || compactionDoneNow;
 
-          if (isRunning || manualUserIntervened) {
-            // Host already resumed or user manually sent a follow-up message
-            pendingAutoResume.delete(sessionId);
-          } else if (isIdleStatus(telemetry.status)) {
-            const circuit = autoResumeCircuit.get(sessionId);
-            const circuitCount =
-              circuit && now - circuit.windowStartedAt < AUTO_RESUME_CIRCUIT_WINDOW_MS
-                ? circuit.count
+          if (compactionDoneForResume && telemetry.hostCompactionInProgress !== true) {
+            const manualUserIntervened =
+              telemetry.compactionJustCompleted !== true &&
+              telemetry.usedTokensSource !== 'after_compaction' &&
+              currentCompactedStep !== null &&
+              typeof telemetry.stepCount === 'number' &&
+              telemetry.stepCount >= currentCompactedStep + 3;
+
+            // Antigravity briefly keeps status=RUNNING after CHECKPOINT DONE before dropping to IDLE.
+            // Only treat RUNNING as genuine host self-resume after grace window or >=2 post-checkpoint steps.
+            const runningStepDelta =
+              typeof telemetry.stepCount === 'number' &&
+              typeof resumeEntry.compactionDoneStepCount === 'number'
+                ? telemetry.stepCount - resumeEntry.compactionDoneStepCount
                 : 0;
-            const circuitWindowStart =
-              circuit && now - circuit.windowStartedAt < AUTO_RESUME_CIRCUIT_WINDOW_MS
-                ? circuit.windowStartedAt
-                : now;
+            const runningElapsedMs =
+              resumeEntry.compactionDoneAt !== null ? now - resumeEntry.compactionDoneAt : 0;
+            const hostResumedOnItsOwn =
+              isRunning &&
+              (runningStepDelta >= AUTO_RESUME_RUNNING_STEP_DELTA ||
+                runningElapsedMs >= AUTO_RESUME_RUNNING_GRACE_MS);
 
-            // Synchronously mark dispatched and remove BEFORE any await to prevent double-send
-            resumeEntry.dispatched = true;
-            pendingAutoResume.delete(sessionId);
+            if (manualUserIntervened || hostResumedOnItsOwn) {
+              // Host genuinely resumed on its own or user manually sent a follow-up message
+              pendingAutoResume.delete(sessionId);
+            } else if (!isRunning && isIdleStatus(telemetry.status)) {
+              const circuit = autoResumeCircuit.get(sessionId);
+              const circuitCount =
+                circuit && now - circuit.windowStartedAt < AUTO_RESUME_CIRCUIT_WINDOW_MS
+                  ? circuit.count
+                  : 0;
+              const circuitWindowStart =
+                circuit && now - circuit.windowStartedAt < AUTO_RESUME_CIRCUIT_WINDOW_MS
+                  ? circuit.windowStartedAt
+                  : now;
 
-            if (
-              circuitCount < MAX_CONSECUTIVE_AUTO_RESUMES &&
-              typeof compactionPort.sendCommand === 'function'
-            ) {
-              autoResumeCircuit.set(sessionId, {
-                count: circuitCount + 1,
-                windowStartedAt: circuitWindowStart,
-              });
-              while (autoResumeCircuit.size > MAX_SESSION_OVERRIDES) {
-                const oldestKey = autoResumeCircuit.keys().next().value;
-                if (oldestKey === undefined) break;
-                autoResumeCircuit.delete(oldestKey);
+              // Synchronously mark dispatched and remove BEFORE any await to prevent double-send
+              resumeEntry.dispatched = true;
+              pendingAutoResume.delete(sessionId);
+
+              if (
+                circuitCount < MAX_CONSECUTIVE_AUTO_RESUMES &&
+                typeof compactionPort.sendCommand === 'function'
+              ) {
+                autoResumeCircuit.set(sessionId, {
+                  count: circuitCount + 1,
+                  windowStartedAt: circuitWindowStart,
+                });
+                while (autoResumeCircuit.size > MAX_SESSION_OVERRIDES) {
+                  const oldestKey = autoResumeCircuit.keys().next().value;
+                  if (oldestKey === undefined) break;
+                  autoResumeCircuit.delete(oldestKey);
+                }
+                autoResumeTriggered = true;
+                const resumePrompt = buildAutoResumePrompt(resumeEntry.locale);
+                Promise.resolve(compactionPort.sendCommand(sessionId, resumePrompt))
+                  .then((res) => {
+                    if (!res || res.accepted !== true) {
+                      recordAutoCompactError(
+                        sessionId,
+                        AUTO_RESUME_ERROR_CODE,
+                        res?.reason || 'Auto-resume continuation message was not accepted.',
+                      );
+                    }
+                  })
+                  .catch((err) => {
+                    // Best-effort single-shot resume: surface failure in lastError without looping
+                    recordAutoCompactError(
+                      sessionId,
+                      err?.code || AUTO_RESUME_ERROR_CODE,
+                      err?.message || 'Auto-resume continuation failed.',
+                    );
+                  });
               }
-              autoResumeTriggered = true;
-              const resumePrompt = buildAutoResumePrompt(resumeEntry.locale);
-              Promise.resolve(compactionPort.sendCommand(sessionId, resumePrompt)).catch(() => {
-                // Best-effort single-shot resume: never loop on send failure
-              });
             }
           }
         }
@@ -399,7 +459,8 @@ export function createStatusbarService({
           prevAuto.cooldownUntil = 0;
           autoCompactState.set(sessionId, prevAuto);
         }
-        if (lastAutoCompactErrors.has(sessionId)) {
+        const existingErr = lastAutoCompactErrors.get(sessionId);
+        if (existingErr && (existingErr.code !== AUTO_RESUME_ERROR_CODE || isRunning)) {
           lastAutoCompactErrors.delete(sessionId);
           compaction.lastError = null;
         }
@@ -464,6 +525,8 @@ export function createStatusbarService({
                   typeof telemetry.usedTokens === 'number' ? telemetry.usedTokens : null,
                 baselineStepCount:
                   typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null,
+                compactionDoneAt: null,
+                compactionDoneStepCount: null,
                 locale: settings.locale || 'ko',
                 dispatched: false,
               });
@@ -495,16 +558,11 @@ export function createStatusbarService({
                   cur.cooldownUntil = clock() + AUTO_COMPACT_RUNNING_RETRY_MS;
                 }
               }
-              lastAutoCompactErrors.set(sessionId, {
-                code: err?.code || ERROR_CODES.COMPACTION_FAILED,
-                message: err?.message || 'Auto-compaction failed.',
-                at: clock(),
-              });
-              while (lastAutoCompactErrors.size > MAX_SESSION_OVERRIDES) {
-                const oldestErr = lastAutoCompactErrors.keys().next().value;
-                if (oldestErr === undefined) break;
-                lastAutoCompactErrors.delete(oldestErr);
-              }
+              recordAutoCompactError(
+                sessionId,
+                err?.code || ERROR_CODES.COMPACTION_FAILED,
+                err?.message || 'Auto-compaction failed.',
+              );
             });
           }
         }
