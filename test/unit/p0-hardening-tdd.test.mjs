@@ -1264,6 +1264,8 @@ test('TC-P0-11 (v3.1.1): startSidecar supports headless mode (unset ANTIGRAVITY_
   try {
     started = await startSidecar(
       {
+        ANTIGRAVITY_LS_ADDRESS: '127.0.0.1:1',
+        ANTIGRAVITY_CSRF_TOKEN: 'test-csrf-token',
         ANTIGRAVITY_PLUGIN_DATA_DIR: tmpDir,
         STATUSBAR_SWEEP_INTERVAL_MS: '600000',
       },
