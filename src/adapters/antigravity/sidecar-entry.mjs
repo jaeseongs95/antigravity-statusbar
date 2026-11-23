@@ -540,11 +540,18 @@ export function createSidecarServer({
  * Production sidecar entrypoint invoked by sidecars/statusbar/main.mjs.
  */
 export async function startSidecar(env = process.env, deps = {}) {
-  const token = env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '';
-  if (token.length < MIN_TOKEN_LENGTH) {
-    throw new Error(
-      `ANTIGRAVITY_SIDECAR_UI_TOKEN is missing or shorter than ${MIN_TOKEN_LENGTH} characters.`,
-    );
+  const rawToken = env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+  let token;
+  if (typeof rawToken === 'string' && rawToken.length > 0) {
+    if (rawToken.length < MIN_TOKEN_LENGTH) {
+      throw new Error(
+        `ANTIGRAVITY_SIDECAR_UI_TOKEN is shorter than ${MIN_TOKEN_LENGTH} characters.`,
+      );
+    }
+    token = rawToken;
+  } else {
+    // Headless mode (has_web_ui: false): mint a 256-bit per-process cryptographic token for inline addon bridge.
+    token = crypto.randomBytes(32).toString('hex');
   }
 
   const defaultPluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -631,10 +638,17 @@ export async function startSidecar(env = process.env, deps = {}) {
 
   let rendererCleanedUp = false;
   let shuttingDown = false;
-  const shutdown = async (exitCode = 0) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  const cleanupResources = async () => {
     clearInterval(sweepTimer);
+    process.removeListener('SIGTERM', onSigTerm);
+    process.removeListener('SIGINT', onSigInt);
+    process.removeListener('SIGBREAK', onSigBreak);
+    process.removeListener('uncaughtException', onUncaught);
+    process.removeListener('exit', onExit);
+    if (process.stdin && typeof process.stdin.removeListener === 'function') {
+      process.stdin.removeListener('end', onStdinClose);
+      process.stdin.removeListener('close', onStdinClose);
+    }
     if (rendererPublisher && !rendererCleanedUp) {
       try {
         await rendererPublisher.teardown();
@@ -644,28 +658,38 @@ export async function startSidecar(env = process.env, deps = {}) {
       }
     }
     await compactionPort.dispose();
+    if (typeof sidecar.server.closeAllConnections === 'function') {
+      sidecar.server.closeAllConnections();
+    }
     await sidecar.close();
+  };
+
+  const stop = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await cleanupResources();
+  };
+
+  const shutdown = async (exitCode = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await cleanupResources();
     process.exit(typeof exitCode === 'number' ? exitCode : 0);
   };
 
-  process.once('SIGTERM', () => {
+  const onSigTerm = () => {
     void shutdown(0);
-  });
-  process.once('SIGINT', () => {
+  };
+  const onSigInt = () => {
     void shutdown(0);
-  });
-  process.once('SIGBREAK', () => {
+  };
+  const onSigBreak = () => {
     void shutdown(0);
-  });
-  if (process.stdin && typeof process.stdin.on === 'function') {
-    process.stdin.once('end', () => {
-      void shutdown(0);
-    });
-    process.stdin.once('close', () => {
-      void shutdown(0);
-    });
-  }
-  process.once('uncaughtException', (err) => {
+  };
+  const onStdinClose = () => {
+    void shutdown(0);
+  };
+  const onUncaught = (err) => {
     process.stderr.write(`[statusbar-sidecar] uncaughtException: ${err?.stack || err?.message || String(err)}\n`);
     if (rendererPublisher && !rendererCleanedUp && typeof rendererPublisher.teardownSync === 'function') {
       try {
@@ -675,8 +699,8 @@ export async function startSidecar(env = process.env, deps = {}) {
     }
     compactionPort.disposeSync();
     process.exit(1);
-  });
-  process.once('exit', () => {
+  };
+  const onExit = () => {
     if (rendererPublisher && !rendererCleanedUp && typeof rendererPublisher.teardownSync === 'function') {
       try {
         rendererPublisher.teardownSync();
@@ -684,7 +708,17 @@ export async function startSidecar(env = process.env, deps = {}) {
       } catch {}
     }
     compactionPort.disposeSync();
-  });
+  };
 
-  return { sidecar, port, url, shutdown };
+  process.once('SIGTERM', onSigTerm);
+  process.once('SIGINT', onSigInt);
+  process.once('SIGBREAK', onSigBreak);
+  if (process.stdin && typeof process.stdin.on === 'function') {
+    process.stdin.once('end', onStdinClose);
+    process.stdin.once('close', onStdinClose);
+  }
+  process.once('uncaughtException', onUncaught);
+  process.once('exit', onExit);
+
+  return { sidecar, port, url, shutdown, stop };
 }

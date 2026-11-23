@@ -331,12 +331,16 @@ export function extractTailCheckpoint(tailSteps, stepOffset = 0) {
       lastCompletedStep === null &&
       (status.includes('DONE') || status.includes('COMPLETE') || !status)
     ) {
-      const resolvedStep = toNonNegativeIntOrNull(
-        step.stepIndex ??
-          step.metadata?.sourceTrajectoryStepInfo?.stepIndex ??
-          step.checkpoint?.includedStepIndexEnd ??
-          baseOffset + i,
+      const explicitStep = toNonNegativeIntOrNull(
+        step.stepIndex ?? step.metadata?.sourceTrajectoryStepInfo?.stepIndex,
       );
+      const includedEnd = toNonNegativeIntOrNull(step.checkpoint?.includedStepIndexEnd);
+      const positionalStep = toNonNegativeIntOrNull(baseOffset + i);
+      const resolvedStep =
+        explicitStep ??
+        (positionalStep !== null && includedEnd !== null
+          ? Math.max(positionalStep, includedEnd)
+          : positionalStep ?? includedEnd);
       if (resolvedStep !== null) {
         lastCompletedStep = resolvedStep;
         summaryChars =
@@ -540,11 +544,12 @@ export function mapSessionTelemetry({
     })),
   );
 
-  const status = typeof update.status === 'string'
-    ? update.status
-    : typeof trajectorySummary?.status === 'string'
-      ? trajectorySummary.status
-      : 'unknown';
+  const status =
+    typeof update.status === 'string' && update.status.trim()
+      ? update.status.trim()
+      : typeof trajectorySummary?.status === 'string' && trajectorySummary.status.trim()
+        ? trajectorySummary.status.trim()
+        : 'unknown';
 
   return {
     sessionId: reportedId,

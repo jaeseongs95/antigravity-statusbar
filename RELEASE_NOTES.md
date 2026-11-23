@@ -1,3 +1,43 @@
+# Release Notes — `v3.1.1` (2026-11-23)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.1.1` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.1.1` fixes the recurring mid-work auto-compaction auto-resume drop reproduced on live Antigravity Desktop sessions and removes the redundant right-hand `AUX_PANE` `"Statusbar"` side panel while keeping the `AddonManifest.v2` Shadow DOM inline statusbar running securely in headless sidecar mode.
+
+### 2. Defect Fixes & Changes
+- **Fix #1 — Transient `RUNNING` Race & Single-Shot Completion Latch (`src/core/app/statusbar-service.mjs`)**: Latches `compactionDoneAt` and `compactionDoneStepCount` as soon as `CHECKPOINT DONE` is observed, tolerating the brief post-checkpoint `RUNNING` window instead of immediately cancelling `pendingAutoResume`. Cancels only when the host genuinely resumes on its own (`stepCount` advances by `>= 2` or stays `RUNNING` for `>= 12s`) or after confirmed manual user intervention.
+- **Fix #2 — Checkpoint Step Index & Empty Status Fallback (`src/adapters/antigravity/telemetry-mapper.mjs`)**: Computes positional checkpoint indices via `explicitStep ?? Math.max(baseOffset + i, includedStepIndexEnd)` so `lastCompactedStep` is never underestimated by `includedStepIndexEnd`, and trims empty `update.status` strings so status cleanly falls back to `trajectorySummary.status`.
+- **Fix #3 — Continuation Transport & Visible Error Surfacing (`src/adapters/antigravity/compaction-adapter.mjs`, `src/core/app/statusbar-service.mjs`)**: Dispatches non-`/compact` continuation prompts via official `agentapi send-message` (`shell: false`) first when configured with automatic fallback to `SendUserCascadeMessage` RPC, inspects both `{ accepted: false }` responses and rejected promises, and surfaces `AUTO_RESUME_FAILED` visibly in snapshots until the session resumes running.
+- **Fix #4 — Remove Redundant `AUX_PANE` Side Panel & Support Headless Ephemeral Auth (`sidecars/statusbar/sidecar.json`, `src/adapters/antigravity/sidecar-entry.mjs`)**: Sets `has_web_ui: false` and removes `ui_config` (`AUX_PANE` tab). When running headless without `ANTIGRAVITY_SIDECAR_UI_TOKEN`, `startSidecar()` mints a 256-bit (64-char hex) per-process cryptographic token for the inline renderer bundle while preserving strict Fail-Closed rejection for any explicitly supplied short token (`< 16` chars).
+
+### 3. Verification
+- Verified TDD RED → GREEN on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): **88/88 tests passing per OS (176/176 total)** across `test:static`, `test:unit`, `test:integration`, `test:security`, `test:ui` (real Headless Chromium Shadow DOM E2E), and `install-plugin.mjs --dry-run`.
+
+---
+
+## [한국어] `v3.1.1` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.1.1`은 실제 Antigravity Desktop 세션에서 재현된 **작업 중 자동 압축 후 자동 재개 누락 결함**을 근본 수정하고, 인라인 상태바 도입 이후 불필요해진 **우측 `AUX_PANE` `"Statusbar"` 패널을 제거**하면서 헤드리스 Sidecar 모드에서도 `AddonManifest.v2` Shadow DOM 인라인 상태바가 안전하게 동작하도록 개선한 패치 릴리즈입니다.
+
+### 2. 주요 결함 수정 및 변경 사항
+- **수정 1 — 체크포인트 완료 직후 일시적 `RUNNING` 레이스 및 단일-샷 완료 래치 (`src/core/app/statusbar-service.mjs`)**: `CHECKPOINT DONE` 관측 시 `compactionDoneAt`과 `compactionDoneStepCount`를 `pendingAutoResume`에 래치해, 직후 호스트가 짧게 `RUNNING`을 유지하다 `IDLE`로 전환되는 구간에서 자동 재개 예약이 오취소되는 결함을 수정했습니다. 호스트가 실제로 자체 재개한 경우(`RUNNING` 중 `stepCount` 2 이상 증가 또는 12초 이상 경과)나 사용자 수동 입력이 확인된 경우에만 취소합니다.
+- **수정 2 — 체크포인트 스텝 인덱스 보정 및 빈 상태 문자열 폴백 (`src/adapters/antigravity/telemetry-mapper.mjs`)**: `extractTailCheckpoint`에서 `explicitStep ?? Math.max(baseOffset + i, includedStepIndexEnd)`로 위치를 보정해 `lastCompactedStep` 과소평가를 방지하고, `mapSessionTelemetry`에서 빈 `update.status` 문자열이 `trajectorySummary.status` 폴백을 가리지 않도록 수정했습니다.
+- **수정 3 — 이어하기 전송 경로 보강 및 실패 가시화 (`src/adapters/antigravity/compaction-adapter.mjs`, `src/core/app/statusbar-service.mjs`)**: `/compact` 외 이어하기 프롬프트는 설정된 공식 `agentapi send-message`(`shell: false`)를 우선 사용하고 미접수/미설정 시 `SendUserCascadeMessage` RPC로 폴백합니다. `{ accepted: false }`와 Promise reject를 모두 검사해 재시도 루프 없이 `AUTO_RESUME_FAILED`를 스냅샷에 가시적으로 기록합니다.
+- **수정 4 — 우측 `AUX_PANE` 패널 제거 및 헤드리스 256-bit 임시 토큰 인증 (`sidecars/statusbar/sidecar.json`, `src/adapters/antigravity/sidecar-entry.mjs`)**: `has_web_ui: false` 설정 및 `ui_config` 제거로 우측 `Statusbar` 탭을 제거했습니다. 헤드리스 기동 시 호스트가 `ANTIGRAVITY_SIDECAR_UI_TOKEN`을 주입하지 않으면 프로세스별 256-bit(64자 hex) 임시 암호 토큰을 생성해 인라인 번들에 발급하며, 명시적으로 16자 미만 토큰이 주어지면 기존과 동일하게 Fail-Closed로 거부합니다.
+
+### 3. 검증 근거
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) TDD RED → GREEN 검증: `test:static`, `test:unit`, `test:integration`, `test:security`, `test:ui`(실브라우저 Headless Chromium Shadow DOM E2E), `install-plugin.mjs --dry-run` 전 항목 **OS당 88/88 통과(총 176/176, 0 실패, 0 스킵)**.
+
+---
+
 # Release Notes — `v3.1.0` (2026-11-23)
 
 > **Document Policy / 문서 작성 기준**
