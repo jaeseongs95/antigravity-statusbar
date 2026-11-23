@@ -317,10 +317,20 @@ export function startAddonStatusbar({
   }
 
   // Expose ONLY the frozen, credential-free StatusbarAddon.v1 registry in Isolated World 998
+  // P1: Define non-writable so peer scripts cannot overwrite `window.statusbarAddons`
   if (win && typeof win === 'object') {
     try {
-      win.statusbarAddons = addons.publicApi;
-    } catch {}
+      Object.defineProperty(win, 'statusbarAddons', {
+        value: addons.publicApi,
+        writable: false,
+        enumerable: true,
+        configurable: true,
+      });
+    } catch {
+      try {
+        win.statusbarAddons = addons.publicApi;
+      } catch {}
+    }
   }
 
   function dispose() {

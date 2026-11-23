@@ -95,16 +95,14 @@ export function createStatusbarApp({
   }
 
   function syncLimitInputs(snap) {
-    // G-2: Sync limit preset/input to the active scope (global default vs current session)
+    // G-2 & ISS-09: Sync limit preset/input strictly to the active scope (never leak model limit into session input)
     const scope = el.limitScopeSelect?.value === 'default' ? 'default' : 'session';
     const rawLimit =
       scope === 'default'
         ? state.defaultCustomLimit
         : snap && snap.limitSource === 'session' && typeof snap.customLimit === 'number'
           ? snap.customLimit
-          : snap && typeof snap.customLimit === 'number' && snap.limitSource !== 'default'
-            ? snap.customLimit
-            : null;
+          : null;
     const val = typeof rawLimit === 'number' ? String(rawLimit) : '';
     if (el.limitCustomInput) el.limitCustomInput.value = val;
     if (el.limitPresetSelect) {
@@ -597,7 +595,12 @@ export function createStatusbarApp({
       async () => {
         const targetSessionId = state.selectedSessionId;
         const t = getStrings(state.locale);
-        const rawStr = el.limitCustomInput.value.trim() || el.limitPresetSelect.value.trim();
+        if (el.limitCustomInput?.validity?.badInput) {
+          setTextIfChanged(el.limitFeedback, t.limitInvalid);
+          el.limitFeedback.classList.remove('hidden');
+          return;
+        }
+        const rawStr = el.limitCustomInput.value.trim();
         let limit = null;
         if (rawStr !== '') {
           const normalizedStr = rawStr.replace(/[\s,]/g, '');

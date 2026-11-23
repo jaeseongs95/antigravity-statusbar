@@ -76,10 +76,9 @@ export function createGlobalLimitModalView({ doc, i18n, presets }) {
   defaultPresetSelect.className = 'agy-inline-pop-select';
   const defaultInput = doc.createElement('input');
   defaultInput.className = 'agy-inline-pop-input';
-  defaultInput.type = 'number';
-  defaultInput.min = '32000';
-  defaultInput.max = '980000';
-  defaultInput.step = '1000';
+  defaultInput.type = 'text';
+  defaultInput.inputMode = 'numeric';
+  defaultInput.autocomplete = 'off';
   defaultInput.placeholder = i18n.t().limitPlaceholder;
   const defaultApplyBtn = doc.createElement('button');
   defaultApplyBtn.type = 'button';
@@ -137,10 +136,9 @@ export function createGlobalLimitModalView({ doc, i18n, presets }) {
   modelPresetSelect.className = 'agy-inline-pop-select';
   const modelLimitInput = doc.createElement('input');
   modelLimitInput.className = 'agy-inline-pop-input';
-  modelLimitInput.type = 'number';
-  modelLimitInput.min = '32000';
-  modelLimitInput.max = '980000';
-  modelLimitInput.step = '1000';
+  modelLimitInput.type = 'text';
+  modelLimitInput.inputMode = 'numeric';
+  modelLimitInput.autocomplete = 'off';
   modelLimitInput.placeholder = i18n.t().limitPlaceholder;
   const modelSaveBtn = doc.createElement('button');
   modelSaveBtn.type = 'button';
@@ -174,6 +172,9 @@ export function createGlobalLimitModalView({ doc, i18n, presets }) {
   backdropEl.appendChild(dialogEl);
 
   let lastPresetsLocale = '';
+  let lastModelListKey = '';
+  let currentOnEditModel = null;
+  let currentOnRemoveModel = null;
 
   function fillPresetSelect(selectEl, includeHostDefault) {
     const prev = selectEl.value;
@@ -274,8 +275,20 @@ export function createGlobalLimitModalView({ doc, i18n, presets }) {
       useCurrentModelBtn.classList.add('hidden');
     }
 
-    clearChildren(modelListEl);
+    currentOnEditModel = onEditModel;
+    currentOnRemoveModel = onRemoveModel;
+
     const list = Array.isArray(modelLimits) ? modelLimits : [];
+    const nextModelListKey = JSON.stringify({
+      loc: i18n.getLocale(),
+      items: list.map((item) => [item.model, item.limit]),
+    });
+    if (lastModelListKey === nextModelListKey) {
+      return;
+    }
+    lastModelListKey = nextModelListKey;
+
+    clearChildren(modelListEl);
     if (list.length === 0) {
       const emptyEl = doc.createElement('div');
       emptyEl.className = 'agy-inline-pop-hint';
@@ -304,7 +317,7 @@ export function createGlobalLimitModalView({ doc, i18n, presets }) {
         editBtn.className = 'agy-inline-btn';
         editBtn.textContent = tr.editBtn;
         editBtn.addEventListener('click', () => {
-          if (typeof onEditModel === 'function') onEditModel(item);
+          if (typeof currentOnEditModel === 'function') currentOnEditModel(item);
         });
 
         const delBtn = doc.createElement('button');
@@ -312,7 +325,7 @@ export function createGlobalLimitModalView({ doc, i18n, presets }) {
         delBtn.className = 'agy-inline-btn';
         delBtn.textContent = tr.delBtn;
         delBtn.addEventListener('click', () => {
-          if (typeof onRemoveModel === 'function') onRemoveModel(item.model);
+          if (typeof currentOnRemoveModel === 'function') currentOnRemoveModel(item.model);
         });
 
         actions.appendChild(editBtn);

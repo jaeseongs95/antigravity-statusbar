@@ -21,31 +21,72 @@ import {
   validateAddonId,
 } from '../src/core/model/context-policy.mjs';
 
+const BOOLEAN_FLAGS = new Set(['runtime']);
+const VALUE_FLAGS = new Set([
+  'data-dir',
+  'id',
+  'label',
+  'command',
+  'description',
+  'slot',
+  'order',
+  'enabled',
+  'source',
+]);
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 function parseCliArgs(argv) {
   const action = argv[0] || 'list';
-  const flags = {};
+  const flags = Object.create(null);
   for (let i = 1; i < argv.length; i += 1) {
     const token = argv[i];
     if (token.startsWith('--')) {
       const key = token.slice(2);
-      const next = argv[i + 1];
-      if (!next || next.startsWith('--')) {
-        flags[key] = true;
-      } else {
-        flags[key] = next;
-        i += 1;
+      if (!key || FORBIDDEN_KEYS.has(key)) {
+        throw new Error(`Invalid flag: ${token}`);
       }
+      if (BOOLEAN_FLAGS.has(key)) {
+        flags[key] = true;
+        continue;
+      }
+      if (!VALUE_FLAGS.has(key)) {
+        throw new Error(`Unknown flag: --${key}`);
+      }
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--') || next.includes('\0')) {
+        throw new Error(`Flag --${key} requires a valid value.`);
+      }
+      flags[key] = next;
+      i += 1;
     }
   }
   return { action, flags };
 }
 
+function parseStrictEnabled(raw, defaultValue = null) {
+  if (raw === undefined) {
+    if (defaultValue !== null) return defaultValue;
+    throw new Error('Flag --enabled requires one of: true, false, 1, 0.');
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  throw new Error(`Invalid --enabled value "${raw}". Expected true, false, 1, or 0.`);
+}
+
 function resolveDefaultDataDir(explicitDir) {
-  if (explicitDir && typeof explicitDir === 'string') {
+  if (explicitDir !== undefined) {
+    if (typeof explicitDir !== 'string' || !explicitDir.trim() || explicitDir.includes('\0')) {
+      throw new Error('Flag --data-dir requires a valid non-empty directory path.');
+    }
     return path.resolve(explicitDir);
   }
   if (process.env.ANTIGRAVITY_PLUGIN_DATA_DIR) {
-    return path.resolve(process.env.ANTIGRAVITY_PLUGIN_DATA_DIR);
+    const envDir = process.env.ANTIGRAVITY_PLUGIN_DATA_DIR;
+    if (envDir.includes('\0')) {
+      throw new Error('ANTIGRAVITY_PLUGIN_DATA_DIR cannot contain null bytes.');
+    }
+    return path.resolve(envDir);
   }
   return path.join(os.homedir(), '.gemini', 'config', 'plugins', 'antigravity-statusbar', 'data');
 }
@@ -74,28 +115,21 @@ export async function runAddonCli(argv) {
       description: typeof flags.description === 'string' ? flags.description : '',
       slot: flags.slot === 'left' ? 'left' : 'right',
       order: flags.order !== undefined ? Number(flags.order) : 100,
-      enabled: flags.enabled === 'false' ? false : true,
+      enabled: parseStrictEnabled(flags.enabled, true),
       source: typeof flags.source === 'string' ? flags.source : 'agent',
     });
-    const current = await store.read();
-    const list = [...current.customButtons];
-    const idx = list.findIndex((b) => b.id === descriptor.id);
-    if (idx >= 0) list[idx] = descriptor;
-    else list.push(descriptor);
-    const updated = await store.update({ customButtons: list });
+    const updated = await store.update({ addonUpsert: descriptor });
     return { ok: true, action: 'upsert', addon: descriptor, addons: updated.customButtons };
   }
 
   if (action === 'toggle') {
     const id = validateAddonId(flags.id);
-    const enabled = flags.enabled === 'false' ? false : Boolean(flags.enabled !== '0');
+    const enabled = parseStrictEnabled(flags.enabled, null);
     const isRuntime = Boolean(flags.runtime);
-    const current = await store.read();
+    const updated = await store.update({
+      addonToggle: { id, enabled, runtime: isRuntime },
+    });
     if (isRuntime) {
-      const disabled = new Set(current.disabledRuntimeAddonIds);
-      if (enabled) disabled.delete(id);
-      else disabled.add(id);
-      const updated = await store.update({ disabledRuntimeAddonIds: Array.from(disabled) });
       return {
         ok: true,
         action: 'toggle',
@@ -105,16 +139,12 @@ export async function runAddonCli(argv) {
         disabledRuntimeAddonIds: updated.disabledRuntimeAddonIds,
       };
     }
-    const nextList = current.customButtons.map((b) => (b.id === id ? { ...b, enabled } : b));
-    const updated = await store.update({ customButtons: nextList });
     return { ok: true, action: 'toggle', id, enabled, runtime: false, addons: updated.customButtons };
   }
 
   if (action === 'remove' || action === 'delete') {
     const id = validateAddonId(flags.id);
-    const current = await store.read();
-    const nextList = current.customButtons.filter((b) => b.id !== id);
-    const updated = await store.update({ customButtons: nextList });
+    const updated = await store.update({ addonRemove: { id } });
     return { ok: true, action: 'remove', id, addons: updated.customButtons };
   }
 

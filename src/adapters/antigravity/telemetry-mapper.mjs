@@ -131,11 +131,18 @@ export function mapTrajectorySummaries(resp) {
     if (!info || typeof info !== 'object') continue;
     const lastModifiedTime = normalizeResetTime(info.lastModifiedTime) || '';
     const lastModifiedMs = lastModifiedTime ? Date.parse(lastModifiedTime) : 0;
+    const isSubagent = Boolean(
+      info.isSubagent === true ||
+        (typeof info.parentCascadeId === 'string' && info.parentCascadeId.trim()) ||
+        (typeof info.parentConversationId === 'string' && info.parentConversationId.trim()) ||
+        (typeof info.parentTrajectoryId === 'string' && info.parentTrajectoryId.trim()),
+    );
     items.push({
       sessionId,
       title: typeof info.summary === 'string' ? info.summary : '',
       stepCount: toNonNegativeIntOrNull(info.stepCount),
       status: typeof info.status === 'string' ? info.status : 'unknown',
+      isSubagent,
       lastModifiedTime,
       lastModifiedMs: Number.isFinite(lastModifiedMs) ? lastModifiedMs : 0,
     });
@@ -632,7 +639,7 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
       return mapTrajectorySummaries(resp);
     },
 
-    async getSessionTelemetry(sessionId) {
+    async getSessionTelemetry(sessionId, opts = {}) {
       const now = Date.now();
       const skipStream = (oversizedStreamUntil.get(sessionId) || 0) > now;
 
@@ -685,7 +692,7 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
       );
 
       const needTailSteps =
-        !streamOutcome.ok &&
+        (!streamOutcome.ok || opts?.includeTailSteps === true) &&
         typeof lsTransport.getTailTrajectorySteps === 'function' &&
         toNonNegativeIntOrNull(trajectorySummary?.stepCount) !== null;
 

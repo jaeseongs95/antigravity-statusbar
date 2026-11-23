@@ -218,6 +218,36 @@ export function createAntigravityCompactionAdapter({
       if (trimmed.startsWith('/compact ')) {
         return this.compactSession(sessionId, { prompt: trimmed.slice(9).trim() });
       }
+      // ISS-00: For plain-text messages (e.g. guarded auto-resume continuation), prefer direct
+      // SendUserCascadeMessage RPC first (no child spawn, UTF-8 safe on Windows); fall back to agentapi.
+      if (!trimmed.startsWith('/')) {
+        try {
+          await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
+            cascadeId: sessionId,
+            items: [{ text: trimmed }],
+          });
+          return { accepted: true, method: 'rpc' };
+        } catch (rpcErr) {
+          const realExe = resolveSafeAgentApiExe(agentApiExePath);
+          if (!realExe) {
+            return {
+              accepted: false,
+              method: 'rpc',
+              reason: rpcErr?.message || 'Failed to send continuation message.',
+            };
+          }
+          const fallbackRes = await runFallbackSpawn(realExe, sessionId, trimmed);
+          if (fallbackRes.accepted) {
+            return fallbackRes;
+          }
+          return {
+            accepted: false,
+            method: 'agentapi',
+            reason: `${rpcErr?.message || 'RPC failed'}; fallback: ${fallbackRes.reason}`,
+          };
+        }
+      }
+
       const realExe = resolveSafeAgentApiExe(agentApiExePath);
       if (realExe) {
         const res = await runFallbackSpawn(realExe, sessionId, trimmed);

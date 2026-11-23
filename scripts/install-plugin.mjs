@@ -3,9 +3,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import writeFileAtomic from 'write-file-atomic';
 
 import { renderAddonStandbyStub } from '../src/adapters/antigravity/addon/bundle-builder.mjs';
-import { DEFAULT_RENDERER_ENTRY } from '../src/adapters/antigravity/addon/runtime-publisher.mjs';
+import {
+  DEFAULT_RENDERER_ENTRY,
+  resolveConfinedRendererTarget,
+} from '../src/adapters/antigravity/addon/runtime-publisher.mjs';
 
 const PLUGIN_NAME = 'antigravity-statusbar';
 const INCLUDE_ENTRIES = [
@@ -75,21 +79,41 @@ export function parseArgs(argv) {
 }
 
 /**
- * Copies files/directories using Node 20 built-in `fs.cp` with explicit symlink refusal.
+ * Verifies that an existing destination path (if any) is not a symlink.
+ */
+async function assertNotSymlinkIfExists(targetPath) {
+  try {
+    const stat = await fs.lstat(targetPath);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing to write through symlink destination: ${targetPath}`);
+    }
+  } catch (err) {
+    if (err?.code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+/**
+ * Copies files/directories using Node 20 built-in `fs.cp` with explicit symlink refusal
+ * on both source and destination sides (ISS-06).
  */
 async function copySafe(src, dest) {
   const rootStat = await fs.lstat(src);
   if (rootStat.isSymbolicLink()) {
     throw new Error(`Refusing to copy symlink: ${src}`);
   }
+  await assertNotSymlinkIfExists(dest);
   await fs.cp(src, dest, {
     recursive: true,
     force: true,
     verbatimSymlinks: true,
-    filter: async (srcPath) => {
+    filter: async (srcPath, destPath) => {
       const stat = await fs.lstat(srcPath);
       if (stat.isSymbolicLink()) {
         throw new Error(`Refusing to copy symlink: ${srcPath}`);
+      }
+      if (destPath) {
+        await assertNotSymlinkIfExists(destPath);
       }
       return true;
     },
@@ -150,22 +174,37 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       mode: 0o600,
     });
 
-    // Preserve user data/ (settings.json) if it already exists
+    // Preserve user data/ (settings.json) if it already exists — fail-fast on symlink or copy error (ISS-06)
+    let dataStat = null;
     try {
-      const dataStat = await fs.stat(preservedDataDir);
-      if (dataStat.isDirectory()) {
-        await copySafe(preservedDataDir, stagedDataDir);
+      dataStat = await fs.lstat(preservedDataDir);
+    } catch (statErr) {
+      if (statErr?.code !== 'ENOENT') {
+        throw statErr;
       }
-    } catch {
-      // No existing data directory
+    }
+    if (dataStat) {
+      if (dataStat.isSymbolicLink()) {
+        throw new Error(`Refusing to follow symlinked plugin data directory: ${preservedDataDir}`);
+      }
+      if (!dataStat.isDirectory()) {
+        throw new Error(`Existing plugin data path is not a directory: ${preservedDataDir}`);
+      }
+      await copySafe(preservedDataDir, stagedDataDir);
     }
 
     const backupDir = path.join(parentDir, `.${PLUGIN_NAME}.old.${process.pid}.${Date.now()}`);
     let hadExisting = false;
     try {
-      await fs.access(destDir);
+      const existingStat = await fs.lstat(destDir);
+      if (existingStat.isSymbolicLink()) {
+        throw new Error(`Refusing to install over symlink destination: ${destDir}`);
+      }
       hadExisting = true;
-    } catch {
+    } catch (accessErr) {
+      if (accessErr?.code !== 'ENOENT') {
+        throw accessErr;
+      }
       hadExisting = false;
     }
 
@@ -182,7 +221,14 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       return { installed: true, dryRun: false, mode: 'atomic-rename', destDir, entries: plannedFiles };
     } catch (renameErr) {
       if (movedExistingToBackup) {
-        await renameWithRetry(backupDir, destDir).catch(() => {});
+        try {
+          await renameWithRetry(backupDir, destDir);
+          movedExistingToBackup = false;
+        } catch (restoreErr) {
+          throw new Error(
+            `Install swap failed (${renameErr?.message || renameErr}) and restoring backup failed (${restoreErr?.message || restoreErr}). Your preserved plugin data remains at: ${backupDir}`,
+          );
+        }
       }
       // On Windows, a running host app watching ~/.gemini/config/plugins/ may hold a directory handle
       // causing EPERM/EBUSY/EACCES on directory rename. Fall back to direct in-place copy preserving data/.
@@ -193,12 +239,26 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       for (const rel of plannedFiles) {
         await copySafe(path.join(repoRoot, rel), path.join(destDir, rel));
       }
-      const fallbackRendererPath = path.join(destDir, DEFAULT_RENDERER_ENTRY);
-      await fs.mkdir(path.dirname(fallbackRendererPath), { recursive: true });
-      await fs.writeFile(fallbackRendererPath, renderAddonStandbyStub(), {
-        encoding: 'utf8',
-        mode: 0o600,
-      });
+      // ISS-06: Preserve any existing live renderer bundle during in-place fallback;
+      // only seed standby stub atomically if missing.
+      const fallbackRendererPath = resolveConfinedRendererTarget(destDir, DEFAULT_RENDERER_ENTRY);
+      let rendererExists = false;
+      try {
+        const rStat = await fs.lstat(fallbackRendererPath);
+        if (rStat.isSymbolicLink()) {
+          throw new Error(`Refusing to overwrite symlink renderer: ${fallbackRendererPath}`);
+        }
+        rendererExists = rStat.isFile();
+      } catch (rErr) {
+        if (rErr?.code !== 'ENOENT') throw rErr;
+      }
+      if (!rendererExists) {
+        await fs.mkdir(path.dirname(fallbackRendererPath), { recursive: true });
+        await writeFileAtomic(fallbackRendererPath, renderAddonStandbyStub(), {
+          encoding: 'utf8',
+          mode: 0o600,
+        });
+      }
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       return { installed: true, dryRun: false, mode: 'in-place-fallback', destDir, entries: plannedFiles };
     }

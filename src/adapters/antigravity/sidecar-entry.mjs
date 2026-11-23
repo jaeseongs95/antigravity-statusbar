@@ -592,8 +592,11 @@ export async function startSidecar(env = process.env, deps = {}) {
           }),
       );
       await rendererPublisher.publish({ baseUrl: url, token });
-    } catch {
+    } catch (pubErr) {
       // Non-fatal: AUX_PANE remains available even if plugin runtime directory is read-only
+      process.stderr.write(
+        `[statusbar-sidecar] addon renderer publish warning: ${pubErr?.message || String(pubErr)}\n`,
+      );
     }
   }
 
@@ -626,26 +629,60 @@ export async function startSidecar(env = process.env, deps = {}) {
     sweepTimer.unref();
   }
 
+  let rendererCleanedUp = false;
   let shuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(sweepTimer);
-    if (rendererPublisher) {
+    if (rendererPublisher && !rendererCleanedUp) {
       try {
         await rendererPublisher.teardown();
+        rendererCleanedUp = true;
       } catch {
-        // Best-effort credential cleanup on shutdown
+        // Best-effort credential cleanup on shutdown; exit handler tries teardownSync
       }
     }
     await compactionPort.dispose();
     await sidecar.close();
-    process.exit(0);
+    process.exit(typeof exitCode === 'number' ? exitCode : 0);
   };
 
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', () => {
+    void shutdown(0);
+  });
+  process.once('SIGINT', () => {
+    void shutdown(0);
+  });
+  process.once('SIGBREAK', () => {
+    void shutdown(0);
+  });
+  if (process.stdin && typeof process.stdin.on === 'function') {
+    process.stdin.once('end', () => {
+      void shutdown(0);
+    });
+    process.stdin.once('close', () => {
+      void shutdown(0);
+    });
+  }
+  process.once('uncaughtException', (err) => {
+    process.stderr.write(`[statusbar-sidecar] uncaughtException: ${err?.stack || err?.message || String(err)}\n`);
+    if (rendererPublisher && !rendererCleanedUp && typeof rendererPublisher.teardownSync === 'function') {
+      try {
+        rendererPublisher.teardownSync();
+        rendererCleanedUp = true;
+      } catch {}
+    }
+    compactionPort.disposeSync();
+    process.exit(1);
+  });
   process.once('exit', () => {
+    if (rendererPublisher && !rendererCleanedUp && typeof rendererPublisher.teardownSync === 'function') {
+      try {
+        rendererPublisher.teardownSync();
+        rendererCleanedUp = true;
+      } catch {}
+    }
     compactionPort.disposeSync();
   });
 

@@ -194,6 +194,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
                 ERROR_CODES.TELEMETRY_UNAVAILABLE,
                 502,
                 `LS RPC ${method} exceeded 4MB response cap.`,
+                { reason: 'RESPONSE_CAP_EXCEEDED' },
               ),
             );
             return;
@@ -447,11 +448,20 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     }
   }
 
+  function isOversizeResponseError(err) {
+    return Boolean(
+      err?.details?.reason === 'RESPONSE_CAP_EXCEEDED' ||
+        (typeof err?.message === 'string' && err.message.includes('4MB')),
+    );
+  }
+
   /**
    * Bounded overshoot tail reader for GetCascadeTrajectoryGeneratorMetadata (-20/-60/-180).
    * F2: When approxIndex is missing/<=0, uses cached tail offset for O(1) subsequent polls;
    * on cache miss, probes offset=0 first and falls back to bounded exponential + binary
    * search to land cleanly on the final <4MB tail window in O(log N) calls.
+   * ISS-04: Only probes/falls back on RESPONSE_CAP_EXCEEDED (>4MB); non-oversize errors
+   * (504 timeouts, connection failures, 502 upstream errors) propagate immediately.
    *
    * @param {string} cascadeId
    * @param {number | null} approxIndex
@@ -504,7 +514,8 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
         let list;
         try {
           list = await fetchOffset(offset);
-        } catch {
+        } catch (err) {
+          if (!isOversizeResponseError(err)) throw err;
           continue;
         }
         if (list.length > 0 && (hasUsefulChatModel(list) || offset === 0)) {
@@ -527,7 +538,8 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
         return list;
       }
       return [];
-    } catch {
+    } catch (err) {
+      if (!isOversizeResponseError(err)) throw err;
       // offset = 0 overflowed 4MB cap -> exponential + binary tail search
     }
 
@@ -552,13 +564,16 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
               rememberTailEnd(cascadeId, backOffset + wider.length);
               return wider;
             }
-          } catch {}
+          } catch (backErr) {
+            if (!isOversizeResponseError(backErr)) throw backErr;
+          }
           rememberTailEnd(cascadeId, probe + list.length);
           return list;
         }
         highEmpty = probe;
         break;
-      } catch {
+      } catch (err) {
+        if (!isOversizeResponseError(err)) throw err;
         lowOverflow = probe;
         probe *= 2;
       }
@@ -580,7 +595,8 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
           return list;
         }
         hi = mid;
-      } catch {
+      } catch (err) {
+        if (!isOversizeResponseError(err)) throw err;
         lo = mid;
       }
     }
@@ -622,8 +638,9 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
         });
         const steps = Array.isArray(resp?.steps) ? resp.steps : [];
         return { stepOffset, steps };
-      } catch {
-        // Retry a narrower tail window if an earlier step contained a >4MB payload
+      } catch (err) {
+        if (!isOversizeResponseError(err)) throw err;
+        // Retry a narrower tail window only if an earlier step contained a >4MB payload
         continue;
       }
     }

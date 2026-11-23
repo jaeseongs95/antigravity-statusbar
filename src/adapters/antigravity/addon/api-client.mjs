@@ -43,6 +43,9 @@ export function createSidecarApiClient({ baseUrl, token, fetchImpl }) {
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (res.status >= 500) {
+          connected = false;
+        }
         const err = new Error(json?.error?.message || `HTTP ${res.status}`);
         err.status = res.status;
         err.code = json?.error?.code || 'HTTP_ERROR';
@@ -50,6 +53,11 @@ export function createSidecarApiClient({ baseUrl, token, fetchImpl }) {
       }
       connected = true;
       return json;
+    } catch (err) {
+      if (err?.name !== 'AbortError' && err?.message !== 'aborted' && (err?.status === undefined || err.status >= 500)) {
+        connected = false;
+      }
+      throw err;
     } finally {
       activeControllers.delete(ctrl);
       if (externalSignal) {

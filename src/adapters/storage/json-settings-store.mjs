@@ -6,10 +6,14 @@ import writeFileAtomic from 'write-file-atomic';
 
 import { DEFAULT_LOCALE, DomainError, ERROR_CODES, normalizeLocale } from '../../core/i18n/error-codes.mjs';
 import {
+  MAX_CUSTOM_BUTTONS,
   MAX_MODEL_LIMITS,
   MAX_SESSION_OVERRIDES,
+  normalizeAutoCompactWhileRunning,
   pruneModelLimits,
   pruneSessionOverrides,
+  validateAddonDescriptor,
+  validateAddonId,
   validateCompactPrompt,
   validateCustomButtons,
   validateCustomLimit,
@@ -30,6 +34,7 @@ function createDefaultState() {
     defaultCustomLimit: null,
     defaultCustomLimitUpdatedAt: 0,
     autoCompact: true,
+    autoCompactWhileRunning: 'resume',
     compactPrompt: '',
     customButtons: [],
     customButtonsUpdatedAt: 0,
@@ -73,6 +78,14 @@ function parsePersistedState(raw) {
 
   if (typeof raw.autoCompact === 'boolean') {
     state.autoCompact = raw.autoCompact;
+  }
+
+  if (typeof raw.autoCompactWhileRunning === 'string') {
+    try {
+      state.autoCompactWhileRunning = normalizeAutoCompactWhileRunning(raw.autoCompactWhileRunning);
+    } catch {
+      state.autoCompactWhileRunning = 'resume';
+    }
   }
 
   if (typeof raw.compactPrompt === 'string') {
@@ -125,6 +138,7 @@ function serializeState(state) {
       defaultCustomLimit: state.defaultCustomLimit,
       defaultCustomLimitUpdatedAt: state.defaultCustomLimitUpdatedAt,
       autoCompact: state.autoCompact,
+      autoCompactWhileRunning: state.autoCompactWhileRunning,
       compactPrompt: state.compactPrompt,
       customButtons: state.customButtons,
       customButtonsUpdatedAt: state.customButtonsUpdatedAt,
@@ -280,6 +294,7 @@ export function createJsonSettingsStore({
         locale: state.locale,
         defaultCustomLimit: state.defaultCustomLimit,
         autoCompact: state.autoCompact,
+        autoCompactWhileRunning: state.autoCompactWhileRunning,
         compactPrompt: state.compactPrompt,
         customButtons: state.customButtons.map((b) => ({ ...b })),
         disabledRuntimeAddonIds: [...state.disabledRuntimeAddonIds],
@@ -308,6 +323,12 @@ export function createJsonSettingsStore({
           current.autoCompact = Boolean(patch.autoCompact);
         }
 
+        if (Object.prototype.hasOwnProperty.call(patch, 'autoCompactWhileRunning')) {
+          current.autoCompactWhileRunning = normalizeAutoCompactWhileRunning(
+            patch.autoCompactWhileRunning,
+          );
+        }
+
         if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
           current.compactPrompt = validateCompactPrompt(patch.compactPrompt);
         }
@@ -315,6 +336,57 @@ export function createJsonSettingsStore({
         if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
           const ts = nextTimestamp(current.customButtonsUpdatedAt);
           current.customButtons = validateCustomButtons(patch.customButtons);
+          current.customButtonsUpdatedAt = ts;
+        }
+
+        // ISS-07: Atomic in-lock delta patches for StatusbarAddon.v1 mutations (no lost updates)
+        if (Object.prototype.hasOwnProperty.call(patch, 'addonUpsert') && patch.addonUpsert) {
+          const descriptor = validateAddonDescriptor(patch.addonUpsert);
+          const list = current.customButtons.map((b) => ({ ...b }));
+          const idx = list.findIndex((b) => b.id === descriptor.id);
+          if (idx >= 0) {
+            list[idx] = descriptor;
+          } else {
+            if (list.length >= MAX_CUSTOM_BUTTONS) {
+              throw new DomainError(
+                ERROR_CODES.INVALID_SETTINGS_PATCH,
+                400,
+                `customButtons cannot exceed ${MAX_CUSTOM_BUTTONS} items.`,
+              );
+            }
+            list.push(descriptor);
+          }
+          const ts = nextTimestamp(current.customButtonsUpdatedAt);
+          current.customButtons = validateCustomButtons(list);
+          current.customButtonsUpdatedAt = ts;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'addonToggle') && patch.addonToggle) {
+          const id = validateAddonId(patch.addonToggle.id);
+          const enabled = Boolean(patch.addonToggle.enabled);
+          const isRuntime = Boolean(patch.addonToggle.runtime);
+          if (isRuntime) {
+            const disabled = new Set(current.disabledRuntimeAddonIds);
+            if (enabled) disabled.delete(id);
+            else disabled.add(id);
+            current.disabledRuntimeAddonIds = validateDisabledAddonIds(Array.from(disabled));
+          } else {
+            const nextList = current.customButtons.map((b) =>
+              b.id === id ? { ...b, enabled } : { ...b },
+            );
+            const ts = nextTimestamp(current.customButtonsUpdatedAt);
+            current.customButtons = validateCustomButtons(nextList);
+            current.customButtonsUpdatedAt = ts;
+          }
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'addonRemove') && patch.addonRemove) {
+          const rawId =
+            typeof patch.addonRemove === 'string' ? patch.addonRemove : patch.addonRemove.id;
+          const id = validateAddonId(rawId);
+          const nextList = current.customButtons.filter((b) => b.id !== id);
+          const ts = nextTimestamp(current.customButtonsUpdatedAt);
+          current.customButtons = validateCustomButtons(nextList);
           current.customButtonsUpdatedAt = ts;
         }
 
@@ -359,6 +431,7 @@ export function createJsonSettingsStore({
           locale: current.locale,
           defaultCustomLimit: current.defaultCustomLimit,
           autoCompact: current.autoCompact,
+          autoCompactWhileRunning: current.autoCompactWhileRunning,
           compactPrompt: current.compactPrompt,
           customButtons: current.customButtons.map((b) => ({ ...b })),
           disabledRuntimeAddonIds: [...current.disabledRuntimeAddonIds],

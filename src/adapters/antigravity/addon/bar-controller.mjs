@@ -61,6 +61,7 @@ export function createBarController({
     syncedLimitKey: '',
     syncedPromptVal: null,
     lastAutoErrAt: 0,
+    consecutiveSnapshotFailures: 0,
   };
 
   function isElementFocused(el) {
@@ -129,9 +130,17 @@ export function createBarController({
     }
     portalEl.style.top = 'auto';
     if (rect) {
-      const bottomPx = Math.max(VIEWPORT_MARGIN, Math.min(vh - 80, Math.round(vh - rect.top + 8)));
       const maxEdgeOffset = Math.max(VIEWPORT_MARGIN, vw - POPOVER_WIDTH - VIEWPORT_MARGIN);
-      portalEl.style.bottom = `${bottomPx}px`;
+      if (rect.top < 220 && vh - rect.bottom > rect.top) {
+        // ISS-10: Flip below anchor when insufficient vertical space exists above
+        portalEl.style.bottom = 'auto';
+        portalEl.style.top = `${Math.max(VIEWPORT_MARGIN, Math.round(rect.bottom + 8))}px`;
+        popoverView.popEl.style.maxHeight = `${Math.max(160, Math.round(vh - rect.bottom - 16))}px`;
+      } else {
+        const bottomPx = Math.max(VIEWPORT_MARGIN, Math.min(vh - 80, Math.round(vh - rect.top + 8)));
+        portalEl.style.bottom = `${bottomPx}px`;
+        popoverView.popEl.style.maxHeight = `${Math.max(160, Math.round(rect.top - 16))}px`;
+      }
       if (anchorEl === barView.ctxBtn && typeof rect.left === 'number') {
         const leftPx = Math.max(VIEWPORT_MARGIN, Math.min(maxEdgeOffset, Math.round(rect.left)));
         portalEl.style.left = `${leftPx}px`;
@@ -202,7 +211,14 @@ export function createBarController({
     }
   }
 
-  function parseStrictLimitInput(rawStr, { allowBlank = true } = {}) {
+  function parseStrictLimitInput(inputElOrValue, { allowBlank = true } = {}) {
+    if (inputElOrValue && typeof inputElOrValue === 'object') {
+      if (inputElOrValue.validity && inputElOrValue.validity.badInput === true) {
+        return { ok: false, value: null };
+      }
+    }
+    const rawStr =
+      inputElOrValue && typeof inputElOrValue === 'object' ? inputElOrValue.value : inputElOrValue;
     const raw = String(rawStr || '').replace(/[\s,]/g, '').trim();
     if (raw === '') {
       return allowBlank ? { ok: true, value: null } : { ok: false, value: null };
@@ -469,9 +485,10 @@ export function createBarController({
       persistedButtons: persistedSorted,
       runtimeButtons: visibleRuntime,
       onPersistedClick: handleCustomCommand,
-      onRuntimeClick(rtDef, btnEl) {
+      onRuntimeClick(rtDef) {
         try {
-          rtDef.onClick({ sessionId: getSessionId(), barEl: barView.barEl, buttonEl: btnEl });
+          // P1: Do not leak live barEl/buttonEl DOM handles to peer runtime add-ons
+          rtDef.onClick({ sessionId: getSessionId() });
         } catch {}
       },
     });
@@ -520,6 +537,9 @@ export function createBarController({
       hasSession: Boolean(getSessionId()),
       compactPrompt: sharedState.compactPrompt,
     });
+    if (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected())) {
+      barView.setReconnecting();
+    }
     popoverView.renderSnapshotDetails(snap);
     if (snap) {
       syncLimitControls(false);
@@ -567,7 +587,7 @@ export function createBarController({
     });
   }
 
-  function finalizeModalClosed() {
+  function finalizeModalClosed(returnFocus = true) {
     if (state.modalBackdropListener && state.modalPortalHandle?.element) {
       try {
         state.modalPortalHandle.element.removeEventListener('click', state.modalBackdropListener);
@@ -581,14 +601,19 @@ export function createBarController({
         globalModalView.dialogEl.remove();
       } catch {}
     }
+    if (returnFocus && !state.disposed) {
+      try {
+        (state.modalTriggerEl || barView.settingsBtn).focus();
+      } catch {}
+    }
   }
 
   function openGlobalModal(triggerEl) {
     if (!globalModalView) return;
-    const returnTarget = hasPopoverPortal && state.popOpen
-      ? state.lastTriggerEl || barView.settingsBtn
-      : triggerEl || barView.settingsBtn;
-    state.modalTriggerEl = returnTarget;
+    // ISS-10: Always restore focus to a visible bar trigger (never a detached popover button)
+    const isVisibleBarTrigger =
+      triggerEl === barView.settingsBtn || triggerEl === barView.ctxBtn;
+    state.modalTriggerEl = isVisibleBarTrigger ? triggerEl : barView.settingsBtn;
     setPopoverOpen(false);
 
     if (hasModalPortal) {
@@ -691,11 +716,13 @@ export function createBarController({
       try {
         const snap = await api.post('/api/snapshot', { sessionId: sid }, state.abortCtrl.signal);
         if (state.disposed || reqEpoch !== state.epoch) return;
+        state.consecutiveSnapshotFailures = 0;
         state.snapshot = snap;
         render();
       } catch (err) {
         if (state.disposed || err?.name === 'AbortError' || err?.message === 'aborted') return;
-        if (!state.snapshot) {
+        state.consecutiveSnapshotFailures += 1;
+        if (!state.snapshot || state.consecutiveSnapshotFailures >= 2 || !api.isConnected()) {
           barView.setReconnecting();
         }
       } finally {
@@ -736,7 +763,7 @@ export function createBarController({
 
   async function handleApplyLimit() {
     const tr = i18n.t();
-    const parsedLimit = parseStrictLimitInput(popoverView.customInput.value, { allowBlank: true });
+    const parsedLimit = parseStrictLimitInput(popoverView.customInput, { allowBlank: true });
     if (!parsedLimit.ok) {
       showFeedback(tr.invalidLimit, true);
       return;
@@ -940,8 +967,12 @@ export function createBarController({
   };
   const onDocPointerDown = (e) => {
     if (!state.popOpen || state.popoverPortalHandle) return;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
     const target = e.target;
     if (
+      path.includes(popoverView.popEl) ||
+      path.includes(barView.settingsBtn) ||
+      path.includes(barView.ctxBtn) ||
       popoverView.popEl.contains(target) ||
       barView.settingsBtn.contains(target) ||
       barView.ctxBtn.contains(target)

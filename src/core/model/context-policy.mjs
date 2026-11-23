@@ -9,6 +9,7 @@ export const MAX_CUSTOM_BUTTONS = 20;
 export const MAX_BUTTON_LABEL_LEN = 24;
 export const MAX_BUTTON_COMMAND_LEN = 500;
 export const MAX_COMPACT_PROMPT_LEN = 1000;
+export const AUTO_COMPACT_WHILE_RUNNING_MODES = Object.freeze(['resume', 'defer']);
 
 const CUSTOM_BUTTON_ID_PATTERN = /^[A-Za-z0-9_-]{1,48}$/;
 
@@ -102,6 +103,50 @@ export function validateCompactPrompt(rawPrompt) {
     );
   }
   return trimmed;
+}
+
+/**
+ * Validates the policy for auto-compaction triggered while a session is RUNNING.
+ * - 'resume' (default): compact immediately and dispatch a guarded single-shot auto-resume once compacted to IDLE.
+ * - 'defer': wait until the RUNNING turn completes into IDLE, then compact cleanly.
+ *
+ * @param {unknown} rawMode
+ * @returns {'resume' | 'defer'}
+ */
+export function normalizeAutoCompactWhileRunning(rawMode) {
+  if (rawMode === null || rawMode === undefined || rawMode === '') {
+    return 'resume';
+  }
+  if (typeof rawMode !== 'string') {
+    throw new DomainError(
+      ERROR_CODES.INVALID_SETTINGS_PATCH,
+      400,
+      'autoCompactWhileRunning must be "resume" or "defer".',
+    );
+  }
+  const normalized = rawMode.trim().toLowerCase();
+  if (normalized === 'resume' || normalized === 'defer') {
+    return normalized;
+  }
+  throw new DomainError(
+    ERROR_CODES.INVALID_SETTINGS_PATCH,
+    400,
+    'autoCompactWhileRunning must be "resume" or "defer".',
+  );
+}
+
+/**
+ * Builds the single-shot continuation prompt sent after an interrupted RUNNING session
+ * finishes auto-compaction and lands in IDLE.
+ *
+ * @param {string} [locale]
+ * @returns {string}
+ */
+export function buildAutoResumePrompt(locale = 'ko') {
+  if (locale === 'en') {
+    return 'Auto-compaction completed after reaching the context limit. If a task was interrupted mid-execution, please continue from where you left off using the compaction summary. If the task was already finished, briefly confirm completion.';
+  }
+  return '컨텍스트 한도 도달로 자동 압축이 완료되었습니다. 압축 직전 진행 중이던 미완료 작업이 있다면 요약 컨텍스트를 참고해 중단된 지점부터 이어서 계속 진행해 주세요. 이미 작업이 완료된 상태라면 짧게 완료 여부만 알려 주세요.';
 }
 
 /**

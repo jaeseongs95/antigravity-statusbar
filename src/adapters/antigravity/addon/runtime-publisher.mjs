@@ -113,8 +113,21 @@ export function createAddonRuntimePublisher({
     return writeAtomically(standbySource);
   }
 
+  /**
+   * Synchronous last-resort credential teardown for process `exit` / `uncaughtException`.
+   */
+  function teardownSync() {
+    const standbySource = buildStandby();
+    const targetPath = resolveConfinedRendererTarget(pluginRootDir, relativeEntryPath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const verifiedTarget = resolveConfinedRendererTarget(pluginRootDir, relativeEntryPath);
+    writeFileAtomic.sync(verifiedTarget, standbySource, { encoding: 'utf8', mode: 0o600 });
+    return verifiedTarget;
+  }
+
   return Object.freeze({
     publish,
     teardown,
+    teardownSync,
   });
 }

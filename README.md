@@ -1,27 +1,31 @@
-# Antigravity Statusbar (v3.0.0)
+# Antigravity Statusbar (v3.1.0)
 
-Official **Antigravity Native Plugin + Auxiliary Pane Sidecar (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`)** for monitoring real-time session context usage, prompt cache hit rate, account quota, per-session soft context limits, token breakdown, and one-click `/compact`.
+Official **Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + `SIDECAR_UI_ENTRYPOINT_AUX_PANE` Fallback Sidecar)** for monitoring real-time session context usage, prompt cache hit rate, 5h & weekly account quota, 4-tier soft context limits (`session > model > default > host`), guarded auto-compaction with auto-resume, token breakdown, and one-click `/compact`.
 
 [한국어 문서 (README.ko.md)](./README.ko.md)
 
-## Why v3.0.0 (Clean-Slate Native Plugin)
+## Why v3.1.0 (AddonManifest.v2 Inline Statusbar + Native Sidecar)
 
-Previous versions patched Electron `app.asar` and hooked renderer internals (`lsClient` / React Fiber / Protobuf). Antigravity `2.33.0` upgraded to `@bufbuild/protobuf` v2, proving renderer mutation is unsafe.
+Previous v1/v2 versions patched Electron `app.asar` and hooked renderer internals (`lsClient` / React Fiber / Protobuf). Antigravity `2.33.0` upgraded to `@bufbuild/protobuf` v2, proving renderer mutation is unsafe.
 
-**v3.0.0 is rebuilt from scratch** as a 100% official native plugin:
+**v3.1.0** runs on the official native plugin + `antigravity-native-addon-host` v2 (`AddonManifest.v2`) architecture:
 - **Zero `app.asar` patching**, zero Electron renderer injection, zero React Fiber/Redux/Protobuf mutation, zero `hooks.json`.
+- **Isolated Shadow DOM Inline UI (`AddonManifest.v2`)**: Renders directly beneath the chat input box using host-owned Shadow DOM slots (`status-bar`, `overlay` popover, `modal` `<dialog>`) with zero credential leakage onto `window` or DOM. The `AUX_PANE` webview remains available as a lightweight fallback.
 - **Ports & Adapters (Hexagonal) Architecture**: `src/core/` and `src/ui/` are 100% vendor-neutral. All Antigravity integration lives exclusively in `src/adapters/antigravity/`.
-- **Hardened Sidecar Security**: Fail-closed auth (`ANTIGRAVITY_SIDECAR_UI_TOKEN >= 16`), `POST`-only `/api/*`, `Host` + exact `Origin` validation, SHA-256 `timingSafeEqual`, `16KB` body cap, zero CORS, strict CSP, and `path.relative` + `realpathSync` static asset jail.
+- **Hardened Sidecar Security**: Fail-closed auth (`ANTIGRAVITY_SIDECAR_UI_TOKEN >= 16`), `POST`-only `/api/*`, `Host` + exact `Origin` validation, SHA-256 `timingSafeEqual`, `16KB` body cap, strict CSP, `path.relative` + `realpathSync` static asset jail, and synchronous `teardownSync()` credential revocation on shutdown/exit.
 
 ## Features
 
-1. **Real-Time Context Window Usage**: Current tokens / effective limit / %, immediate post-compaction updates, and strict cross-session isolation.
+1. **Real-Time Context Window Usage**: Current tokens / effective limit / % (with honest 99% floor below soft-limit boundary), immediate post-compaction updates, and strict cross-session isolation.
 2. **Prompt Cache Hit %**: Accurate cache hit ratio from provider-aware token usage (`cacheReadTokens` vs `inputTokens`).
-3. **5h & 7d Account Quota**: Remaining percentage and reset countdown per quota group.
-4. **Per-Session & Default Soft Context Limit (`32K`–`980K`)**: Option A per-session soft limit — never mutates global host engine flags (`SetMendelFlagOverrides`), warns when reached, and offers one-click compaction.
-5. **One-Click `[ compact ]`**: Async `SendUserCascadeMessage` RPC with bounded non-acceptance-only `agentapi` fallback and per-session mutex.
-6. **`[ context ]` Token Breakdown**: Model name, step count, and 8-group token breakdown.
-7. **`EN` / `KO` Locale Toggle**: Instant language switching persisted across sessions.
+3. **5h & Weekly Account Quota**: Displays 5h and weekly (or exact window label for non-weekly buckets) remaining percentages with reset timestamps in tooltip.
+4. **4-Tier Context Limits (`32K`–`980K`) & Global Limit Modal**: `This session > Per-model global > All-models global default > Host default` — never mutates global host engine flags (`SetMendelFlagOverrides`).
+5. **Guarded Auto-Compaction & Auto-Resume (`autoCompactWhileRunning`)**:
+   - `'resume'` (default): Compacts immediately when a `RUNNING` session reaches its custom limit and dispatches a single-shot guarded continuation prompt once the checkpoint finishes into `IDLE` so long tasks never halt mid-work (never resumes manual `/compact`, `IDLE` sessions, cancelled/errored runs, or after manual user input; protected by a 3-run circuit breaker).
+   - `'defer'`: Defers compaction until the active `RUNNING` turn finishes into `IDLE`.
+   - Background sweep excludes identifiable subagent cascades by default.
+6. **One-Click `[ compact ]` & Custom Prompt**: Async `SendUserCascadeMessage` RPC with bounded non-acceptance-only `agentapi` fallback, per-session mutex, and editable `/compact <prompt>`.
+7. **Statusbar Add-ons (`StatusbarAddon.v1`) & `EN` / `KO` Locale Toggle**: Atomic lock-protected custom command buttons via `scripts/statusbar-addon.mjs` and instant `EN`/`KO` switching.
 
 ## Installation
 

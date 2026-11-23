@@ -129,23 +129,34 @@ export function createBarView({ doc, i18n }) {
       typeof snap.usagePercent === 'number' && Number.isFinite(snap.usagePercent)
         ? Math.max(0, snap.usagePercent)
         : 0;
+    const isSoftExceeded = Boolean(snap.exceededSoftLimit || snap.softLimitExceeded);
+    // ISS-10: Avoid displaying "100%" without "Limit Reached" when usage is 99.5%..99.99%
+    const displayPct =
+      !isSoftExceeded && rawPct >= 99.5 && rawPct < 100
+        ? Math.floor(rawPct)
+        : Math.round(rawPct);
     const barPct = Math.min(100, rawPct);
     const usedStr = i18n.formatTokens(snap.usedTokens);
     const limitStr = i18n.formatTokens(snap.effectiveLimit);
-    setText(ctxTextEl, `${tr.ctx} ${rawPct.toFixed(0)}% (${usedStr} / ${limitStr})`);
+    setText(ctxTextEl, `${tr.ctx} ${displayPct}% (${usedStr} / ${limitStr})`);
 
-    const isSoftExceeded = Boolean(snap.exceededSoftLimit || snap.softLimitExceeded);
     fillEl.style.width = `${barPct}%`;
     fillEl.className =
       'agy-inline-bar-fill' +
       (isSoftExceeded || rawPct >= 90 ? ' danger' : rawPct >= 75 ? ' warn' : '');
 
-    if (snap.autoCompactTriggered || snap.compaction?.trigger === 'auto') {
+    if (snap.autoResumeTriggered || snap.autoResumePending) {
+      softBadgeEl.style.display = '';
+      setText(softBadgeEl, tr.autoResuming || tr.autoCompacting);
+    } else if (snap.autoCompactTriggered || snap.compaction?.trigger === 'auto') {
       softBadgeEl.style.display = '';
       setText(softBadgeEl, tr.autoCompacting);
     } else if (isBackendCompacting) {
       softBadgeEl.style.display = '';
       setText(softBadgeEl, tr.compactingBadge);
+    } else if (snap.autoCompactDeferred) {
+      softBadgeEl.style.display = '';
+      setText(softBadgeEl, tr.autoCompactDeferred || tr.softLimit);
     } else if (isSoftExceeded) {
       softBadgeEl.style.display = '';
       setText(softBadgeEl, tr.softLimit);
@@ -183,15 +194,17 @@ export function createBarView({ doc, i18n }) {
   function matchQuotaGroupsForModel(groups, modelName) {
     const lowerModel = typeof modelName === 'string' ? modelName.toLowerCase() : '';
     if (!lowerModel) return groups;
-    const isThirdParty = /\b(?:claude|gpt|openai|o1|o3|o4)\b/.test(lowerModel);
-    const isGemini = /\b(?:gemini|orchestrator)\b/.test(lowerModel);
+    const isThirdParty = /(?:^|[^a-z0-9])(?:claude|gpt|openai|o1|o3|o4)(?:$|[^a-z0-9])/.test(lowerModel);
+    const isGemini = /(?:^|[^a-z0-9])(?:gemini|orchestrator)(?:$|[^a-z0-9])/.test(lowerModel);
     if (isThirdParty) {
       const matched = groups.filter((g) =>
-        /\b(?:claude|gpt|3p|openai)\b/i.test(String(g?.label || '')),
+        /(?:^|[^a-z0-9])(?:claude|gpt|3p|openai)(?:$|[^a-z0-9])/i.test(String(g?.label || '')),
       );
       if (matched.length > 0) return matched;
     } else if (isGemini) {
-      const matched = groups.filter((g) => /\bgemini\b/i.test(String(g?.label || '')));
+      const matched = groups.filter((g) =>
+        /(?:^|[^a-z0-9])gemini(?:$|[^a-z0-9])/i.test(String(g?.label || '')),
+      );
       if (matched.length > 0) return matched;
     }
     return groups;
@@ -209,6 +222,7 @@ export function createBarView({ doc, i18n }) {
               label: g.label || 'Quota',
               window: b.window || '',
               pct: b.remainingPercent,
+              resetTime: typeof b.resetTime === 'string' ? b.resetTime : '',
             });
           }
         }
@@ -217,7 +231,7 @@ export function createBarView({ doc, i18n }) {
         const targetGroups = matchQuotaGroupsForModel(quotaState.groups, modelName);
         const fiveHourPcts = [];
         const weeklyPcts = [];
-        const otherPcts = [];
+        const otherBuckets = [];
         for (const g of targetGroups) {
           const buckets = Array.isArray(g.buckets) ? g.buckets : [];
           for (const b of buckets) {
@@ -225,38 +239,50 @@ export function createBarView({ doc, i18n }) {
             const kind = classifyQuotaWindow(b.window);
             if (kind === '5h') fiveHourPcts.push(b.remainingPercent);
             else if (kind === 'weekly') weeklyPcts.push(b.remainingPercent);
-            else otherPcts.push(b.remainingPercent);
+            else otherBuckets.push({ window: String(b.window || '').trim(), pct: b.remainingPercent });
           }
         }
 
         const fiveHourPct = fiveHourPcts.length > 0 ? Math.min(...fiveHourPcts) : null;
-        const weeklyPct =
-          weeklyPcts.length > 0
-            ? Math.min(...weeklyPcts)
-            : otherPcts.length > 0
-              ? Math.min(...otherPcts)
-              : null;
+        const weeklyPct = weeklyPcts.length > 0 ? Math.min(...weeklyPcts) : null;
+        let otherMin = null;
+        for (const ob of otherBuckets) {
+          if (otherMin === null || ob.pct < otherMin.pct) otherMin = ob;
+        }
+
         const staleTag = quotaState.stale ? ` (${tr.stale})` : '';
         const tooltip = allBuckets
-          .map((b) => `${b.label}${b.window ? ` (${b.window})` : ''}: ${Math.round(b.pct)}%`)
+          .map((b) => {
+            const winPart = b.window ? ` (${b.window})` : '';
+            const resetPart = b.resetTime ? ` · reset ${b.resetTime}` : '';
+            return `${b.label}${winPart}: ${Math.round(b.pct)}%${resetPart}`;
+          })
           .join('\n');
 
-        if (fiveHourPct !== null && weeklyPct !== null) {
+        const secondaryLabel =
+          weeklyPct !== null
+            ? tr.quotaWeekly
+            : otherMin && otherMin.window && otherMin.window.toLowerCase() !== 'unknown'
+              ? otherMin.window
+              : tr.quotaOther || tr.quota;
+        const secondaryPct = weeklyPct !== null ? weeklyPct : otherMin ? otherMin.pct : null;
+
+        if (fiveHourPct !== null && secondaryPct !== null) {
           quota5hEl.style.display = '';
           sep3.style.display = '';
           quotaEl.style.display = '';
           setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%`);
-          setText(quotaEl, `${tr.quotaWeekly} ${Math.round(weeklyPct)}%${staleTag}`);
+          setText(quotaEl, `${secondaryLabel} ${Math.round(secondaryPct)}%${staleTag}`);
         } else if (fiveHourPct !== null) {
           quota5hEl.style.display = '';
           sep3.style.display = 'none';
           quotaEl.style.display = 'none';
           setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%${staleTag}`);
-        } else if (weeklyPct !== null) {
+        } else if (secondaryPct !== null) {
           quota5hEl.style.display = 'none';
           sep3.style.display = 'none';
           quotaEl.style.display = '';
-          setText(quotaEl, `${tr.quotaWeekly} ${Math.round(weeklyPct)}%${staleTag}`);
+          setText(quotaEl, `${secondaryLabel} ${Math.round(secondaryPct)}%${staleTag}`);
         }
         quota5hEl.title = tooltip;
         quotaEl.title = tooltip;
@@ -280,7 +306,10 @@ export function createBarView({ doc, i18n }) {
       b.type = 'button';
       b.className = 'agy-inline-btn';
       b.textContent = btnDef.label;
-      b.title = btnDef.description || btnDef.command;
+      // ISS-13: Always surface the executed command in tooltip so users know what clicking sends
+      b.title = btnDef.description
+        ? `${btnDef.description} (${btnDef.command})`
+        : btnDef.command;
       b.addEventListener('click', () => onPersistedClick(btnDef, b));
       customBtnsContainer.appendChild(b);
     }
@@ -311,6 +340,10 @@ export function createBarView({ doc, i18n }) {
   return Object.freeze({
     barEl,
     ctxBtn,
+    ctxTextEl,
+    quota5hEl,
+    quotaEl,
+    customBtnsContainer,
     compactBtn,
     settingsBtn,
     renderSnapshot,

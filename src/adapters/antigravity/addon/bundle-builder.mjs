@@ -10,6 +10,11 @@
  * - Standby stub contains zero credentials.
  */
 
+import {
+  MAX_CUSTOM_LIMIT,
+  MIN_CUSTOM_LIMIT,
+  PRESET_LIMITS,
+} from '../../../core/model/context-policy.mjs';
 import { createAddonRegistry } from './addon-bridge.mjs';
 import { createAddonHostAdapter } from './addon-host-adapter.mjs';
 import { createSidecarApiClient } from './api-client.mjs';
@@ -68,6 +73,11 @@ export function renderAddonRendererBundle({ baseUrl, token }) {
     slotIds: ADDON_SLOT_IDS,
     styleId: STATUSBAR_STYLE_ID,
     styles: STATUSBAR_STYLES,
+    limits: {
+      min: MIN_CUSTOM_LIMIT,
+      max: MAX_CUSTOM_LIMIT,
+      presets: PRESET_LIMITS,
+    },
   });
 
   return [

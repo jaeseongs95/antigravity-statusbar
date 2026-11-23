@@ -126,10 +126,9 @@ export function createPopoverView({ doc, i18n, presets }) {
 
   const customInput = doc.createElement('input');
   customInput.className = 'agy-inline-pop-input';
-  customInput.type = 'number';
-  customInput.min = '32000';
-  customInput.max = '980000';
-  customInput.step = '1000';
+  customInput.type = 'text';
+  customInput.inputMode = 'numeric';
+  customInput.autocomplete = 'off';
   customInput.placeholder = i18n.t().limitPlaceholder;
 
   const applyBtn = doc.createElement('button');
