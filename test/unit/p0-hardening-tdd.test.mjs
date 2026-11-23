@@ -122,6 +122,7 @@ function createFakeDomElement(tag = 'div') {
     disabled: false,
     style: {},
     children: [],
+    options: [],
     parentNode: null,
     get firstChild() {
       return this.children[0] || null;
@@ -141,6 +142,7 @@ function createFakeDomElement(tag = 'div') {
     appendChild(child) {
       child.parentNode = this;
       this.children.push(child);
+      if (child.tagName === 'OPTION') this.options.push(child);
       return child;
     },
     removeChild(child) {
@@ -739,7 +741,10 @@ test('TC-P0-09 (ISS-09 & ISS-01): AUX_PANE syncLimitInputs does not leak model l
     'quota-stale-badge', 'quota-groups',
   ];
   const byId = new Map(ids.map((id) => [id, createFakeDomElement('div')]));
-  byId.get('limit-scope-select').value = 'session';
+  const scopeSelect = byId.get('limit-scope-select');
+  scopeSelect.appendChild(createFakeDomElement('option'));
+  scopeSelect.appendChild(createFakeDomElement('option'));
+  scopeSelect.value = 'session';
   const doc = {
     hidden: false,
     documentElement: { lang: 'en' },
