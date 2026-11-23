@@ -1,3 +1,45 @@
+# Release Notes — `v3.1.2` (2026-11-23)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.1.2` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.1.2` resolves a compound defect reproduced on oversized (`>4MB`) live Antigravity Desktop sessions where auto-compaction fired twice in rapid succession after a burst of post-resume tool calls and the agent subsequently stalled without auto-resume when post-checkpoint `RUNNING` ("Working") lasted longer than 12 seconds with zero new steps.
+
+### 2. Defect Fixes & Changes
+- **Fix #1 — Widened Tail Probe & Monotonic Per-Session Checkpoint Memory (`src/adapters/antigravity/ls-transport.mjs`, `src/adapters/antigravity/telemetry-mapper.mjs`)**: Widens the initial `getTailTrajectorySteps` probe from `total - 12` to `total - 40` (`[total-40, total-16, total-4, total-1]`) and maintains a bounded 64-entry LRU monotonic `knownCheckpoints` map in `createAntigravityTelemetryAdapter` so `lastCompactedStep` and checkpoint summary size never regress when a `CHECKPOINT` leaves the tail window before the next LLM metadata arrives.
+- **Fix #2 — Per-Source Metadata Step Tracking (`src/adapters/antigravity/telemetry-mapper.mjs`)**: Tracks `contextWindowEstimatedStepIndex` and `usageStepIndex` independently in `extractLatestUsageMetadata` and enforces `effectiveCheckpointStep >= tokenSourceMetaStep` so partial post-compaction items (`usage: {}`) and checkpoint-step summarization items never leak stale pre-compaction token counts across a completed `CHECKPOINT`.
+- **Fix #3 — Post-Compaction Settlement Cooldown & Out-of-Order Poll Guard (`src/core/app/statusbar-service.mjs`)**: Preserves/refreshes the 90-second settlement cooldown while readings remain synthetic (`usedTokensSource === 'after_compaction'`, covering compactions longer than 90s) and clears it once a real post-compaction below-limit reading arrives. Adds a bounded LRU monotonic `observedProgress` guard so out-of-order stale polls with regressed `stepCount` or `lastCompactedStep` never re-trigger `/compact`.
+- **Fix #4 — Preserve `pendingAutoResume` During Zero-Step `Working` Windows (`src/core/app/statusbar-service.mjs`)**: Requires actual step progress (`runningStepDelta >= 2`) before cancelling `pendingAutoResume` as host self-resume whenever `stepCount` telemetry is available, retaining the 12-second elapsed-time fallback strictly for hosts where `stepCount` is `null`.
+- **Test Hardening (`test/unit/p0-hardening-tdd.test.mjs`, `test/ui/ui-app.test.mjs`)**: Adds TDD regressions `TC-P0-12a`–`TC-P0-12d` covering all four root causes and eliminates a CDP E2E timing race by awaiting server receipt of `POST /api/compact` before asserting `compactCalls`.
+
+### 3. Verification
+- Verified TDD RED → GREEN on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) across `test:static`, `test:unit` (61/61 per OS including `TC-P0-12a`–`TC-P0-12d`), `test:integration`, `test:security`, `test:ui` (5/5 real Headless Chromium Shadow DOM E2E), and `install-plugin.mjs --dry-run`.
+
+---
+
+## [한국어] `v3.1.2` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.1.2`는 `>4MB` 초대형 실세션에서 재현된 **자동 압축 직후 병렬 툴 호출 구간에서 `/compact`가 2회 연속 호출되는 결함**과, **체크포인트 완료 후 새 스텝 진행 없이 `Working`(`RUNNING`) 상태가 12초 이상 지속될 때 자동 재개가 취소되어 에이전트가 정지하는 결함**을 근본 수정한 패치 릴리즈입니다.
+
+### 2. 주요 결함 수정 및 변경 사항
+- **수정 1 — Tail 조회 범위 확장 및 세션별 체크포인트 단조 기억 (`src/adapters/antigravity/ls-transport.mjs`, `src/adapters/antigravity/telemetry-mapper.mjs`)**: `getTailTrajectorySteps`의 초기 조회 오프셋을 `total - 12`에서 `total - 40`(`[total-40, total-16, total-4, total-1]`)으로 확장하고, `createAntigravityTelemetryAdapter`에 최대 64개 LRU 단조 캐시(`knownCheckpoints`)를 도입해 다음 LLM 메타데이터 도착 전 `CHECKPOINT`가 tail window를 벗어나더라도 `lastCompactedStep`과 요약 크기가 역행하지 않도록 수정했습니다.
+- **수정 2 — 메타데이터 토큰 출처 스텝 분리 추적 (`src/adapters/antigravity/telemetry-mapper.mjs`)**: `extractLatestUsageMetadata`에서 `contextWindowEstimatedStepIndex`와 `usageStepIndex`를 분리 기록하고 `effectiveCheckpointStep >= tokenSourceMetaStep` 조건을 적용해, 스트리밍 중인 부분 메타데이터(`usage: {}`)나 체크포인트 요약 호출 자체가 압축 이전 구 토큰을 끌어오지 못하도록 차단했습니다.
+- **수정 3 — 합성 `'after_compaction'` 안정화 쿨다운 유지 및 역순 폴링 가드 (`src/core/app/statusbar-service.mjs`)**: `usedTokensSource === 'after_compaction'`인 합성 측정 구간에서는 90초 안정화 쿨다운을 유지·갱신(90초 초과 장기 압축 대응)하고 실제 압축 이후 `<limit` 응답이 도착할 때만 해제합니다. 또한 단조 진행 가드(`observedProgress`)를 추가해 `stepCount`나 `lastCompactedStep`이 역행한 역순 폴링 응답이 `/compact`를 재발화하지 못하게 막았습니다.
+- **수정 4 — 무진행 `Working` 구간의 `pendingAutoResume` 보존 (`src/core/app/statusbar-service.mjs`)**: `stepCount` 텔레메트리가 존재할 때는 실제 스텝이 `>= 2` 증가한 경우에만 호스트 자체 재개로 간주해 `pendingAutoResume`을 취소하도록 변경했으며, 12초 경과 기반 폴백은 `stepCount`가 `null`일 때만 적용합니다.
+- **테스트 보강 (`test/unit/p0-hardening-tdd.test.mjs`, `test/ui/ui-app.test.mjs`)**: 4개 근본 원인에 대한 회귀 테스트(`TC-P0-12a`–`TC-P0-12d`)를 추가하고, UI CDP E2E에서 `POST /api/compact` 서버 수신을 대기하도록 보강해 Linux CI 레이스를 제거했습니다.
+
+### 3. 검증 근거
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) TDD RED → GREEN 검증: `test:static`, `test:unit`(OS당 61/61, `TC-P0-12a`–`TC-P0-12d` 포함), `test:integration`, `test:security`, `test:ui`(실브라우저 Headless Chromium Shadow DOM E2E 5/5), `install-plugin.mjs --dry-run` 전 항목 100% 통과.
+
+---
+
 # Release Notes — `v3.1.1` (2026-11-23)
 
 > **Document Policy / 문서 작성 기준**
