@@ -57,15 +57,25 @@ export function createBarView({ doc, i18n }) {
   sep2.className = 'agy-inline-sep';
   sep2.textContent = '·';
 
+  const quota5hEl = doc.createElement('span');
+  quota5hEl.className = 'agy-inline-metric';
+  quota5hEl.textContent = `${i18n.t().quota5h} --`;
+
+  const sep3 = doc.createElement('span');
+  sep3.className = 'agy-inline-sep';
+  sep3.textContent = '·';
+
   const quotaEl = doc.createElement('span');
   quotaEl.className = 'agy-inline-metric';
-  quotaEl.textContent = `${i18n.t().quota} --`;
+  quotaEl.textContent = `${i18n.t().quotaWeekly} --`;
 
   leftEl.appendChild(ctxBtn);
   leftEl.appendChild(softBadgeEl);
   leftEl.appendChild(sep1);
   leftEl.appendChild(cacheEl);
   leftEl.appendChild(sep2);
+  leftEl.appendChild(quota5hEl);
+  leftEl.appendChild(sep3);
   leftEl.appendChild(quotaEl);
 
   const rightEl = doc.createElement('div');
@@ -153,7 +163,41 @@ export function createBarView({ doc, i18n }) {
     setText(cacheEl, `${tr.cache} ${cachePct}`);
   }
 
-  function renderQuota(quotaState) {
+  function classifyQuotaWindow(rawWindow) {
+    const w = String(rawWindow || '').trim().toLowerCase();
+    if (
+      w === '5h' ||
+      w.includes('5h') ||
+      w.includes('5-hour') ||
+      w.includes('five hour') ||
+      w.includes('5 hour')
+    ) {
+      return '5h';
+    }
+    if (w === 'weekly' || w.includes('week') || w === '7d') {
+      return 'weekly';
+    }
+    return 'other';
+  }
+
+  function matchQuotaGroupsForModel(groups, modelName) {
+    const lowerModel = typeof modelName === 'string' ? modelName.toLowerCase() : '';
+    if (!lowerModel) return groups;
+    const isThirdParty = /\b(?:claude|gpt|openai|o1|o3|o4)\b/.test(lowerModel);
+    const isGemini = /\b(?:gemini|orchestrator)\b/.test(lowerModel);
+    if (isThirdParty) {
+      const matched = groups.filter((g) =>
+        /\b(?:claude|gpt|3p|openai)\b/i.test(String(g?.label || '')),
+      );
+      if (matched.length > 0) return matched;
+    } else if (isGemini) {
+      const matched = groups.filter((g) => /\bgemini\b/i.test(String(g?.label || '')));
+      if (matched.length > 0) return matched;
+    }
+    return groups;
+  }
+
+  function renderQuota(quotaState, modelName = '') {
     const tr = i18n.t();
     if (quotaState && quotaState.available && Array.isArray(quotaState.groups) && quotaState.groups.length > 0) {
       const allBuckets = [];
@@ -170,16 +214,61 @@ export function createBarView({ doc, i18n }) {
         }
       }
       if (allBuckets.length > 0) {
-        const minPct = Math.min(...allBuckets.map((b) => b.pct));
+        const targetGroups = matchQuotaGroupsForModel(quotaState.groups, modelName);
+        const fiveHourPcts = [];
+        const weeklyPcts = [];
+        const otherPcts = [];
+        for (const g of targetGroups) {
+          const buckets = Array.isArray(g.buckets) ? g.buckets : [];
+          for (const b of buckets) {
+            if (typeof b.remainingPercent !== 'number') continue;
+            const kind = classifyQuotaWindow(b.window);
+            if (kind === '5h') fiveHourPcts.push(b.remainingPercent);
+            else if (kind === 'weekly') weeklyPcts.push(b.remainingPercent);
+            else otherPcts.push(b.remainingPercent);
+          }
+        }
+
+        const fiveHourPct = fiveHourPcts.length > 0 ? Math.min(...fiveHourPcts) : null;
+        const weeklyPct =
+          weeklyPcts.length > 0
+            ? Math.min(...weeklyPcts)
+            : otherPcts.length > 0
+              ? Math.min(...otherPcts)
+              : null;
         const staleTag = quotaState.stale ? ` (${tr.stale})` : '';
-        setText(quotaEl, `${tr.quota} ${Math.round(minPct)}%${staleTag}`);
-        quotaEl.title = allBuckets
+        const tooltip = allBuckets
           .map((b) => `${b.label}${b.window ? ` (${b.window})` : ''}: ${Math.round(b.pct)}%`)
           .join('\n');
+
+        if (fiveHourPct !== null && weeklyPct !== null) {
+          quota5hEl.style.display = '';
+          sep3.style.display = '';
+          quotaEl.style.display = '';
+          setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%`);
+          setText(quotaEl, `${tr.quotaWeekly} ${Math.round(weeklyPct)}%${staleTag}`);
+        } else if (fiveHourPct !== null) {
+          quota5hEl.style.display = '';
+          sep3.style.display = 'none';
+          quotaEl.style.display = 'none';
+          setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%${staleTag}`);
+        } else if (weeklyPct !== null) {
+          quota5hEl.style.display = 'none';
+          sep3.style.display = 'none';
+          quotaEl.style.display = '';
+          setText(quotaEl, `${tr.quotaWeekly} ${Math.round(weeklyPct)}%${staleTag}`);
+        }
+        quota5hEl.title = tooltip;
+        quotaEl.title = tooltip;
         return;
       }
     }
-    setText(quotaEl, `${tr.quota} --`);
+    quota5hEl.style.display = '';
+    sep3.style.display = '';
+    quotaEl.style.display = '';
+    setText(quota5hEl, `${tr.quota5h} --`);
+    setText(quotaEl, `${tr.quotaWeekly} --`);
+    quota5hEl.title = '';
     quotaEl.title = '';
   }
 

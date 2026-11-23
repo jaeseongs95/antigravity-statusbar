@@ -77,6 +77,16 @@ export function createStatusbarService({
     const entry = compactingSessions.get(sessionId);
     const lastError = lastAutoCompactErrors.get(sessionId) ?? null;
     if (!entry) {
+      if (telemetry?.hostCompactionInProgress === true) {
+        return {
+          inProgress: true,
+          status: 'running',
+          startedAt: null,
+          method: 'host',
+          trigger: 'manual',
+          lastError,
+        };
+      }
       return {
         inProgress: false,
         status: 'idle',

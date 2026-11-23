@@ -289,7 +289,7 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   });
   assert.equal(badge.textContent, i18n.t().softLimit);
 
-  // Quota renders minimum across groups + stale tag + multiline tooltip
+  // Quota renders 5h limit on the left + weekly limit on the right + stale tag + model-aware group matching + multiline tooltip
   view.renderQuota({
     available: true,
     stale: true,
@@ -299,10 +299,40 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
     ],
   });
   const metrics = view.barEl.querySelectorAll('.agy-inline-metric');
-  const quotaEl = metrics[metrics.length - 1];
-  assert.equal(quotaEl.textContent, '할당량 41% (오래됨)');
-  assert.ok(quotaEl.title.includes('Pro (5h): 72%'));
-  assert.ok(quotaEl.title.includes('Flash (24h): 41%'));
+  const quota5hEl = metrics[metrics.length - 2];
+  const quotaWeeklyEl = metrics[metrics.length - 1];
+  assert.equal(quota5hEl.textContent, '5시간 한도 72%');
+  assert.equal(quotaWeeklyEl.textContent, '주간한도 41% (오래됨)');
+  assert.ok(quotaWeeklyEl.title.includes('Pro (5h): 72%'));
+  assert.ok(quotaWeeklyEl.title.includes('Flash (24h): 41%'));
+
+  // Model-aware quota group selection: Gemini vs Claude/GPT
+  const multiGroupQuota = {
+    available: true,
+    stale: false,
+    groups: [
+      {
+        label: 'Gemini Models',
+        buckets: [
+          { window: 'weekly', remainingPercent: 73.3 },
+          { window: '5h', remainingPercent: 76.1 },
+        ],
+      },
+      {
+        label: 'Claude and GPT models',
+        buckets: [
+          { window: 'weekly', remainingPercent: 100 },
+          { window: '5h', remainingPercent: 98.4 },
+        ],
+      },
+    ],
+  };
+  view.renderQuota(multiGroupQuota, 'Gemini 4 Neon (High)');
+  assert.equal(quota5hEl.textContent, '5시간 한도 76%');
+  assert.equal(quotaWeeklyEl.textContent, '주간한도 73%');
+  view.renderQuota(multiGroupQuota, 'Claude Opus 5.5');
+  assert.equal(quota5hEl.textContent, '5시간 한도 98%');
+  assert.equal(quotaWeeklyEl.textContent, '주간한도 100%');
 
   // Addon buttons skip disabled persisted items and invoke click callbacks
   const clicks = [];

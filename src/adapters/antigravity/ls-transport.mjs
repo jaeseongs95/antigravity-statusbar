@@ -490,7 +490,13 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     const base = explicitBase > 0 ? explicitBase : cachedBase;
 
     if (base > 0) {
-      const offsets = [Math.max(0, base - 20), Math.max(0, base - 60), Math.max(0, base - 180)];
+      const offsets = [
+        Math.max(0, base - 20),
+        Math.max(0, base - 5),
+        base,
+        Math.max(0, base - 60),
+        Math.max(0, base - 180),
+      ];
       const seenOffsets = new Set();
       for (const offset of offsets) {
         if (seenOffsets.has(offset)) continue;
@@ -583,6 +589,48 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
   }
 
   /**
+   * Bounded tail step reader for GetCascadeTrajectorySteps.
+   * Used when StreamAgentStateUpdates exceeds the 4MB cap so completed or in-progress
+   * CORTEX_STEP_TYPE_CHECKPOINT (/compact) steps are detected immediately before the next LLM turn.
+   *
+   * @param {string} cascadeId
+   * @param {number | null} stepCount
+   * @returns {Promise<{ stepOffset: number, steps: unknown[] }>}
+   */
+  async function getTailTrajectorySteps(cascadeId, stepCount) {
+    const total =
+      typeof stepCount === 'number' && Number.isFinite(stepCount) && stepCount > 0
+        ? Math.floor(stepCount)
+        : 0;
+    if (!cascadeId || total <= 0) {
+      return { stepOffset: 0, steps: [] };
+    }
+
+    const candidateOffsets = [
+      Math.max(0, total - 12),
+      Math.max(0, total - 4),
+      Math.max(0, total - 1),
+    ];
+    const seen = new Set();
+    for (const stepOffset of candidateOffsets) {
+      if (seen.has(stepOffset)) continue;
+      seen.add(stepOffset);
+      try {
+        const resp = await callUnaryRpc('GetCascadeTrajectorySteps', {
+          cascadeId,
+          stepOffset,
+        });
+        const steps = Array.isArray(resp?.steps) ? resp.steps : [];
+        return { stepOffset, steps };
+      } catch {
+        // Retry a narrower tail window if an earlier step contained a >4MB payload
+        continue;
+      }
+    }
+    return { stepOffset: 0, steps: [] };
+  }
+
+  /**
    * Fetches quota summary with 15s TTL cache and exponential backoff on 429.
    */
   async function getQuotaSummaryRaw() {
@@ -619,6 +667,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     callUnaryRpc,
     readFirstStreamFrame,
     getTailGeneratorMetadata,
+    getTailTrajectorySteps,
     getQuotaSummaryRaw,
   };
 }

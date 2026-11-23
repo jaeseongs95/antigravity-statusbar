@@ -204,16 +204,17 @@ export function extractLatestUsageMetadata(metadataList) {
     const chatModel = unwrapChatModel(item);
     if (!chatModel) continue;
 
-    // F2: Read chatModel.chatStartMetadata.startStepIndex first, and last element of stepIndices[]
+    // Real Antigravity LS: `stepIndices[last]` is the actual step produced by this chatModel call,
+    // whereas `chatStartMetadata.startStepIndex` is the context window's start (last checkpoint) index.
     const lastStepFromArray =
       Array.isArray(item?.stepIndices) && item.stepIndices.length > 0
         ? item.stepIndices[item.stepIndices.length - 1]
         : null;
     const stepIdx = toNonNegativeIntOrNull(
-      chatModel?.chatStartMetadata?.startStepIndex ??
+      lastStepFromArray ??
         item?.stepIndex ??
         item?.startStepIndex ??
-        lastStepFromArray,
+        chatModel?.chatStartMetadata?.startStepIndex,
     );
     if (bestStepIndex === null && stepIdx !== null) {
       bestStepIndex = stepIdx;
@@ -281,6 +282,77 @@ export function extractLatestUsageMetadata(metadataList) {
 }
 
 /**
+ * Extracts completed or in-progress compaction checkpoint info from a bounded tail of
+ * GetCascadeTrajectorySteps (CORTEX_STEP_TYPE_CHECKPOINT).
+ *
+ * @param {unknown[]} tailSteps
+ * @param {number} [stepOffset=0]
+ * @returns {{ lastCompletedStep: number | null, summaryChars: number, inProgress: boolean }}
+ */
+export function extractTailCheckpoint(tailSteps, stepOffset = 0) {
+  if (!Array.isArray(tailSteps) || tailSteps.length === 0) {
+    return { lastCompletedStep: null, summaryChars: 0, inProgress: false };
+  }
+  const baseOffset =
+    typeof stepOffset === 'number' && Number.isFinite(stepOffset) && stepOffset >= 0
+      ? Math.floor(stepOffset)
+      : 0;
+
+  let lastCompletedStep = null;
+  let summaryChars = 0;
+  let inProgress = false;
+
+  for (let i = tailSteps.length - 1; i >= 0; i -= 1) {
+    const step = tailSteps[i];
+    if (!step || typeof step !== 'object') continue;
+    const stepType = String(step.type || '').toUpperCase();
+    const isCheckpoint =
+      stepType === 'CORTEX_STEP_TYPE_CHECKPOINT' ||
+      stepType.includes('CHECKPOINT') ||
+      (step.checkpoint && typeof step.checkpoint === 'object');
+    if (!isCheckpoint) continue;
+
+    const status = String(step.status || '').toUpperCase();
+    const isRunning =
+      status.includes('RUNNING') || status.includes('PENDING') || status.includes('IN_PROGRESS');
+    if (isRunning) {
+      inProgress = true;
+      continue;
+    }
+
+    if (
+      lastCompletedStep === null &&
+      (status.includes('DONE') || status.includes('COMPLETE') || !status)
+    ) {
+      const resolvedStep = toNonNegativeIntOrNull(
+        step.stepIndex ??
+          step.metadata?.sourceTrajectoryStepInfo?.stepIndex ??
+          step.checkpoint?.includedStepIndexEnd ??
+          baseOffset + i,
+      );
+      if (resolvedStep !== null) {
+        lastCompletedStep = resolvedStep;
+        summaryChars =
+          typeof step.checkpoint?.sessionSummary === 'string'
+            ? step.checkpoint.sessionSummary.length
+            : 0;
+      }
+    }
+
+    if (lastCompletedStep !== null && inProgress) {
+      break;
+    }
+  }
+
+  return { lastCompletedStep, summaryChars, inProgress };
+}
+
+function isSystemOrToolGroupKey(rawKey) {
+  const key = String(rawKey || '').toUpperCase();
+  return key.includes('SYSTEM') || key.includes('TOOL');
+}
+
+/**
  * Maps StreamAgentStateUpdates 1st frame + tail metadata + trajectory summary
  * into a vendor-neutral ContextTelemetry DTO.
  *
@@ -289,12 +361,16 @@ export function extractLatestUsageMetadata(metadataList) {
  * - F1 repeated-compact guard: requires lastCompactedStep >= latestActivityStep in BOTH boolean and numeric branches.
  * - F4 real LS schema: compactedAtStepIndices[], oneof chatModel, startStepIndex, modelDisplayName,
  *   tokenBreakdown.groups[].source & numTokens.
+ * - Oversized >4MB stream post-compaction sync: detects CORTEX_STEP_TYPE_CHECKPOINT in tailSteps so
+ *   usedTokens, lastCompactedStep, and compaction state update immediately after /compact completes.
  *
  * @param {{
  *   requestedSessionId: string,
  *   streamFrame: any,
  *   trajectorySummary?: any,
  *   generatorMetadata?: unknown[],
+ *   tailSteps?: unknown[],
+ *   tailStepsOffset?: number,
  * }} input
  */
 export function mapSessionTelemetry({
@@ -302,6 +378,8 @@ export function mapSessionTelemetry({
   streamFrame,
   trajectorySummary = null,
   generatorMetadata = [],
+  tailSteps = [],
+  tailStepsOffset = 0,
 }) {
   const update = streamFrame?.update ?? streamFrame ?? {};
 
@@ -317,10 +395,12 @@ export function mapSessionTelemetry({
 
   const latestUsage = extractLatestUsageMetadata(generatorMetadata);
   const lastMetaStepIndex = latestUsage ? latestUsage.stepIndex : null;
+  const tailCheckpoint = extractTailCheckpoint(tailSteps, tailStepsOffset);
 
+  const streamEstimatedUsed = toNonNegativeIntOrNull(cwu.estimatedTokensUsed);
   // F2: Fallback to chatModel.chatStartMetadata.contextWindowMetadata.{estimatedTokensUsed, maxContextTokens}
   const estimatedUsed =
-    toNonNegativeIntOrNull(cwu.estimatedTokensUsed) ??
+    streamEstimatedUsed ??
     latestUsage?.contextWindowEstimatedTokens ??
     null;
   const rawAfterCompact = cwu.estimatedAfterCompaction;
@@ -333,7 +413,11 @@ export function mapSessionTelemetry({
     latestUsage?.contextWindowMaxTokens ??
     null;
   const lastStepIndex = toNonNegativeIntOrNull(cwu.lastStepIndex);
-  const lastCompactedStep = extractLastCompactedStep(update);
+  const streamCompactedStep = extractLastCompactedStep(update);
+  const lastCompactedStep =
+    streamCompactedStep !== null && tailCheckpoint.lastCompletedStep !== null
+      ? Math.max(streamCompactedStep, tailCheckpoint.lastCompletedStep)
+      : streamCompactedStep ?? tailCheckpoint.lastCompletedStep;
 
   const latestActivityStep = Math.max(
     lastMetaStepIndex !== null ? lastMetaStepIndex : -1,
@@ -346,11 +430,56 @@ export function mapSessionTelemetry({
     lastCompactedStep >= 0 &&
     lastCompactedStep >= latestActivityStep;
 
+  // Oversized >4MB stream fallback: when StreamAgentStateUpdates had no contextWindowUsage,
+  // a completed CHECKPOINT step newer than the latest chatModel metadata means /compact just finished
+  // and generatorMetadata still holds stale pre-compaction tokens until the next LLM turn runs.
+  const checkpointNewerThanMeta =
+    streamEstimatedUsed === null &&
+    tailCheckpoint.lastCompletedStep !== null &&
+    (lastMetaStepIndex === null || tailCheckpoint.lastCompletedStep > lastMetaStepIndex);
+
   let usedTokens = null;
   let usedTokensSource = 'unavailable';
   let compactionJustCompleted = false;
+  let postCompactBreakdownOverride = null;
 
-  if (afterCompactBool === true && estimatedUsed !== null) {
+  if (checkpointNewerThanMeta) {
+    let systemTokens = 0;
+    const prevGroups = Array.isArray(latestUsage?.tokenBreakdownGroups)
+      ? latestUsage.tokenBreakdownGroups
+      : [];
+    for (const g of prevGroups) {
+      const key = g?.source ?? g?.groupType ?? g?.type ?? g?.name ?? g?.category ?? '';
+      const toks = toNonNegativeIntOrNull(g?.numTokens ?? g?.estimatedTokens ?? g?.tokens ?? g?.tokenCount);
+      if (toks !== null && toks > 0 && isSystemOrToolGroupKey(key)) {
+        systemTokens += toks;
+      }
+    }
+    const summaryTokens =
+      tailCheckpoint.summaryChars > 0 ? Math.ceil(tailCheckpoint.summaryChars / 3) : 0;
+    const postCompactTotal = systemTokens + summaryTokens;
+    usedTokens =
+      postCompactTotal > 0
+        ? estimatedUsed !== null
+          ? Math.min(postCompactTotal, estimatedUsed)
+          : postCompactTotal
+        : null;
+    usedTokensSource = 'after_compaction';
+    compactionJustCompleted = true;
+    postCompactBreakdownOverride = [];
+    if (systemTokens > 0) {
+      postCompactBreakdownOverride.push({
+        source: 'TOKEN_SOURCE_SYSTEM',
+        numTokens: systemTokens,
+      });
+    }
+    if (summaryTokens > 0) {
+      postCompactBreakdownOverride.push({
+        source: 'TOKEN_TYPE_CHAT_MESSAGES',
+        numTokens: summaryTokens,
+      });
+    }
+  } else if (afterCompactBool === true && estimatedUsed !== null) {
     usedTokens = estimatedUsed;
     usedTokensSource = compactionIsCurrent ? 'after_compaction' : 'estimated';
     compactionJustCompleted = compactionIsCurrent;
@@ -363,20 +492,23 @@ export function mapSessionTelemetry({
     usedTokensSource = 'estimated';
   }
 
-  const cacheHitPercent = latestUsage
-    ? computeCacheHitPercent({
-        cacheReadTokens: latestUsage.cacheReadTokens,
-        inputTokens: latestUsage.inputTokens,
-        inputIncludesCache: providerInputIncludesCache(latestUsage.apiProvider),
-      })
-    : null;
+  const cacheHitPercent =
+    checkpointNewerThanMeta || !latestUsage
+      ? null
+      : computeCacheHitPercent({
+          cacheReadTokens: latestUsage.cacheReadTokens,
+          inputTokens: latestUsage.inputTokens,
+          inputIncludesCache: providerInputIncludesCache(latestUsage.apiProvider),
+        });
 
   const rawGroups =
-    Array.isArray(latestUsage?.tokenBreakdownGroups) && latestUsage.tokenBreakdownGroups.length > 0
-      ? latestUsage.tokenBreakdownGroups
-      : Array.isArray(cwu.tokenGroups)
-        ? cwu.tokenGroups
-        : [];
+    postCompactBreakdownOverride !== null
+      ? postCompactBreakdownOverride
+      : Array.isArray(latestUsage?.tokenBreakdownGroups) && latestUsage.tokenBreakdownGroups.length > 0
+        ? latestUsage.tokenBreakdownGroups
+        : Array.isArray(cwu.tokenGroups)
+          ? cwu.tokenGroups
+          : [];
 
   const tokenBreakdown = normalizeTokenGroups(
     rawGroups.map((g) => ({
@@ -406,11 +538,12 @@ export function mapSessionTelemetry({
     usedTokensSource,
     maxContextTokens,
     cacheHitPercent,
-    cacheReadTokens: latestUsage?.cacheReadTokens ?? null,
-    inputTokens: latestUsage?.inputTokens ?? null,
+    cacheReadTokens: checkpointNewerThanMeta ? null : (latestUsage?.cacheReadTokens ?? null),
+    inputTokens: checkpointNewerThanMeta ? null : (latestUsage?.inputTokens ?? null),
     lastCompactedStep,
     estimatedAfterCompaction: afterCompactBool !== null ? afterCompactBool : afterCompactTokens,
     compactionJustCompleted,
+    hostCompactionInProgress: Boolean(tailCheckpoint.inProgress),
     tokenBreakdown,
   };
 }
@@ -538,15 +671,27 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
           trajectorySummary?.generatorMetadataLength,
       );
 
-      const generatorMetadata = await lsTransport
-        .getTailGeneratorMetadata(sessionId, totalMetaLen)
-        .catch(() => []);
+      const needTailSteps =
+        !streamOutcome.ok &&
+        typeof lsTransport.getTailTrajectorySteps === 'function' &&
+        toNonNegativeIntOrNull(trajectorySummary?.stepCount) !== null;
+
+      const [generatorMetadata, tailStepsResult] = await Promise.all([
+        lsTransport.getTailGeneratorMetadata(sessionId, totalMetaLen).catch(() => []),
+        needTailSteps
+          ? lsTransport
+              .getTailTrajectorySteps(sessionId, toNonNegativeIntOrNull(trajectorySummary?.stepCount))
+              .catch(() => ({ stepOffset: 0, steps: [] }))
+          : Promise.resolve({ stepOffset: 0, steps: [] }),
+      ]);
 
       return mapSessionTelemetry({
         requestedSessionId: sessionId,
         streamFrame,
         trajectorySummary,
         generatorMetadata,
+        tailSteps: tailStepsResult.steps,
+        tailStepsOffset: tailStepsResult.stepOffset,
       });
     },
 

@@ -535,7 +535,7 @@ export function createBarController({
         );
       }
     }
-    barView.renderQuota(sharedState.quotaState);
+    barView.renderQuota(sharedState.quotaState, state.snapshot?.modelName || '');
     if (globalModalView && state.modalOpen) {
       renderGlobalModal(false);
     }

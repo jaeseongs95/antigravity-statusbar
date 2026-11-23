@@ -10,7 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { installPlugin, parseArgs } from '../../scripts/install-plugin.mjs';
 import { createAntigravityCompactionAdapter, resolveSafeAgentApiExe } from '../../src/adapters/antigravity/compaction-adapter.mjs';
 import { createLsTransport, encodeConnectFrame, parseLoopbackLsAddress } from '../../src/adapters/antigravity/ls-transport.mjs';
-import { mapQuotaSummary, mapSessionTelemetry, normalizeResetTime } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
+import {
+  extractLatestUsageMetadata,
+  extractTailCheckpoint,
+  mapQuotaSummary,
+  mapSessionTelemetry,
+  normalizeResetTime,
+} from '../../src/adapters/antigravity/telemetry-mapper.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -427,6 +433,99 @@ test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parse
   assert.equal(oneofSchema.cacheHitPercent, 90);
   assert.equal(oneofSchema.tokenBreakdown[0].key, 'TOKEN_GROUP_FILES');
   assert.equal(oneofSchema.tokenBreakdown[0].tokens, 6500);
+
+  // 5. Real oversized >4MB session post-compaction sync:
+  //    `stepIndices[last]` (18861) takes precedence over `chatStartMetadata.startStepIndex` (18527),
+  //    and a completed CORTEX_STEP_TYPE_CHECKPOINT (18866 > 18861) immediately drops stale pre-compaction tokens!
+  const preCompactMeta = [
+    {
+      stepIndices: [18861],
+      chatModel: {
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        usage: {
+          apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+          inputTokens: '2832',
+          cacheReadTokens: '350492',
+        },
+        chatStartMetadata: {
+          startStepIndex: 18527,
+          contextWindowMetadata: {
+            estimatedTokensUsed: 324_643,
+            maxContextTokens: 512_000,
+            tokenBreakdown: {
+              groups: [
+                { source: 'TOKEN_SOURCE_SYSTEM', numTokens: '26360' },
+                { source: 'TOKEN_TYPE_CHAT_MESSAGES', numTokens: '298283' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  ];
+  assert.equal(extractLatestUsageMetadata(preCompactMeta)?.stepIndex, 18861);
+
+  const postCompactOversized = mapSessionTelemetry({
+    requestedSessionId: 'sess-oversized',
+    streamFrame: { update: { conversationId: 'sess-oversized', status: 'CASCADE_RUN_STATUS_IDLE' } },
+    trajectorySummary: { summary: 'Big', stepCount: 18867, status: 'CASCADE_RUN_STATUS_IDLE' },
+    generatorMetadata: preCompactMeta,
+    tailStepsOffset: 18860,
+    tailSteps: [
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        metadata: { sourceTrajectoryStepInfo: { stepIndex: 18866 } },
+        checkpoint: { includedStepIndexEnd: 18866, sessionSummary: 'x'.repeat(15_718) },
+      },
+    ],
+  });
+  assert.equal(postCompactOversized.lastCompactedStep, 18866);
+  assert.equal(postCompactOversized.compactionJustCompleted, true);
+  assert.equal(postCompactOversized.usedTokensSource, 'after_compaction');
+  assert.equal(postCompactOversized.usedTokens, 31_600);
+  assert.equal(postCompactOversized.cacheHitPercent, null);
+  assert.equal(postCompactOversized.hostCompactionInProgress, false);
+
+  // Once the next post-compaction PLANNER_RESPONSE runs (stepIndices [18872] > 18866),
+  // switch seamlessly back to live cwmEst even though startStepIndex stays 18866.
+  const nextTurnAfterCompact = mapSessionTelemetry({
+    requestedSessionId: 'sess-oversized',
+    streamFrame: { update: { conversationId: 'sess-oversized', status: 'CASCADE_RUN_STATUS_IDLE' } },
+    trajectorySummary: { summary: 'Big', stepCount: 18873, status: 'CASCADE_RUN_STATUS_IDLE' },
+    generatorMetadata: [
+      ...preCompactMeta,
+      {
+        stepIndices: [18872],
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (High)',
+          usage: { apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', inputTokens: '33061', cacheReadTokens: '0' },
+          chatStartMetadata: {
+            startStepIndex: 18866,
+            contextWindowMetadata: { estimatedTokensUsed: 41_065, maxContextTokens: 512_000 },
+          },
+        },
+      },
+    ],
+    tailStepsOffset: 18866,
+    tailSteps: [
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        checkpoint: { includedStepIndexEnd: 18866, sessionSummary: 'x'.repeat(15_718) },
+      },
+    ],
+  });
+  assert.equal(nextTurnAfterCompact.usedTokens, 41_065);
+  assert.equal(nextTurnAfterCompact.usedTokensSource, 'estimated');
+  assert.equal(nextTurnAfterCompact.compactionJustCompleted, false);
+
+  // Running CHECKPOINT step surfaces hostCompactionInProgress: true
+  const runningCp = extractTailCheckpoint([
+    { type: 'CORTEX_STEP_TYPE_CHECKPOINT', status: 'CORTEX_STEP_STATUS_RUNNING' },
+  ], 18866);
+  assert.equal(runningCp.inProgress, true);
+  assert.equal(runningCp.lastCompletedStep, null);
 });
 
 test('F1 & R2-F4 & NB2: mapQuotaSummary parses real response.groups, displayName, remaining.case, and protobuf Timestamp resetTime', () => {

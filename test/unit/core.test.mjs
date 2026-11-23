@@ -375,6 +375,13 @@ test('large-session compaction detects completion via significant token drop whe
   const snap2 = await service.getSessionSnapshot('sess-large');
   assert.equal(snap2.compaction.inProgress, false);
   assert.equal(snap2.compaction.status, 'completed');
+
+  // Host-initiated /compact (typed directly in chat) surfaces compaction.inProgress via hostCompactionInProgress
+  telemetry = { ...telemetry, hostCompactionInProgress: true };
+  const snapHostRunning = await service.getSessionSnapshot('sess-large');
+  assert.equal(snapHostRunning.compaction.inProgress, true);
+  assert.equal(snapHostRunning.compaction.status, 'running');
+  assert.equal(snapHostRunning.compaction.method, 'host');
 });
 
 test('compactPrompt validates bounds, persists via updateSettings, and forwards to compactSession', async () => {
