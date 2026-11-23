@@ -690,6 +690,9 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
       dlg.setAttribute('data-addon-host-modal-dialog', '1');
       dlg.setAttribute('data-addon-host-owner', pluginId);
       dlg.setAttribute('data-addon-host-slot', slotId);
+      // Mirror real host modal-portal.js:224 titleBarOverlay inset
+      dlg.style.marginTop = 'max(env(titlebar-area-height, 36px), 36px)';
+      dlg.style.zIndex = '2147483001';
       const bodyEl = new MockElement('div', doc);
       bodyEl.className = 'addon-host-slot-root';
       dlg.appendChild(bodyEl);
@@ -787,7 +790,7 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   // 2. Clicking ctxBtn opens host v2 `openPopover` portal (NOT inline child of barEl)
   const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
   assert.ok(ctxBtn);
-  ctxBtn.getBoundingClientRect = () => ({ top: 860, right: 420, width: 120, height: 24 });
+  ctxBtn.getBoundingClientRect = () => ({ left: 545, top: 860, right: 735, width: 190, height: 24 });
   ctxBtn.click();
   const popPortal = portals.find((p) => p.kind === 'popover');
   assert.ok(popPortal, 'Popover must open via host v2 openPopover');
@@ -801,6 +804,9 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   const popEl = popPortal.bodyEl.querySelector('.agy-inline-popover');
   assert.ok(popEl && popEl.classList.contains('agy-inline-popover-portal'));
   assert.equal(popPortal.element.style.position, 'fixed');
+  assert.equal(popPortal.element.style.left, '545px', 'ctxBtn popover must align left to ctxBtn within viewport bounds');
+  assert.equal(popPortal.element.style.right, 'auto');
+  assert.equal(popPortal.element.style.width, 'fit-content');
 
   // 3. Clicking Global Limit Modal button inside popover closes popover portal & opens host v2 `<dialog>` openModal
   const modalTrigger = popEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('전역'));
@@ -811,6 +817,17 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   assert.ok(modalPortal, 'Global Limit Modal must open via host v2 openModal');
   assert.equal(modalPortal.slotId, 'antigravity-statusbar.global-limit-modal');
   assert.equal(modalPortal.element.tagName, 'DIALOG');
+  assert.equal(modalPortal.element.style.position, 'fixed');
+  assert.equal(modalPortal.element.style.top, 'max(env(titlebar-area-height, 36px), 36px)');
+  assert.equal(modalPortal.element.style.right, '0');
+  assert.equal(modalPortal.element.style.bottom, '0');
+  assert.equal(modalPortal.element.style.left, '0');
+  assert.equal(modalPortal.element.style.margin, 'auto');
+  assert.equal(modalPortal.element.style.marginTop, 'auto', 'Must override host marginTop so <dialog> centers vertically & horizontally');
+  assert.equal(modalPortal.element.style.marginLeft, 'auto');
+  assert.equal(modalPortal.element.style.marginRight, 'auto');
+  assert.equal(modalPortal.element.style.width, 'fit-content');
+  assert.equal(modalPortal.element.style.height, 'fit-content');
   assert.ok(
     styleRecords.some((r) => r.styleId === 'statusbar-main:modal' && r.slotId === 'antigravity-statusbar.global-limit-modal'),
     'Modal style must route to modal slotId',
@@ -820,6 +837,18 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   // Backdrop click on `<dialog>` element closes modal portal cleanly
   modalPortal.element.dispatchEvent({ type: 'click', target: modalPortal.element });
   assert.equal(modalPortal.isClosed(), true, 'Backdrop click on <dialog> must close modal portal');
+
+  // Clicking settingsBtn opens right-anchored popover clamped inside viewport bounds
+  const rightBtnsV2 = rootRec.rootEl.querySelector('.agy-inline-right').querySelectorAll('.agy-inline-btn');
+  const settingsBtnV2 = rightBtnsV2[rightBtnsV2.length - 1];
+  assert.ok(settingsBtnV2);
+  settingsBtnV2.getBoundingClientRect = () => ({ left: 1100, top: 860, right: 1132, width: 32, height: 24 });
+  settingsBtnV2.click();
+  const settingsPopPortal = portals.filter((p) => p.kind === 'popover').pop();
+  assert.ok(settingsPopPortal && !settingsPopPortal.isClosed());
+  assert.equal(settingsPopPortal.element.style.left, 'auto');
+  assert.equal(settingsPopPortal.element.style.right, '308px');
+  settingsPopPortal.close();
 
   // 4. Switching active conversation tab unmounts old v1.box slot and remounts into v2.box!
   v2.editor.focus();

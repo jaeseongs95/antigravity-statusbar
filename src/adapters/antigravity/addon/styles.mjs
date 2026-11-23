@@ -240,6 +240,7 @@ export const STATUSBAR_STYLES = `
   color: rgba(255, 255, 255, 0.6);
 }
 .agy-inline-popover {
+  box-sizing: border-box;
   position: absolute;
   bottom: calc(100% + 8px);
   right: 8px;
@@ -519,9 +520,10 @@ export const STATUSBAR_STYLES = `
   display: none;
 }
 .agy-inline-modal {
+  box-sizing: border-box;
   width: 440px;
   max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 48px);
+  max-height: calc(100vh - 72px);
   overflow-y: auto;
   background: #1a1b1f;
   color: #e6e7ea;

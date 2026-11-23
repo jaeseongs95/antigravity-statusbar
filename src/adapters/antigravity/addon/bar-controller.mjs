@@ -38,6 +38,7 @@ export function createBarController({
     popOpen: false,
     modalOpen: false,
     popoverPortalHandle: null,
+    popoverResizeListener: null,
     modalPortalHandle: null,
     modalBackdropListener: null,
     activeTab: 'context',
@@ -75,9 +76,40 @@ export function createBarController({
     return doc.activeElement === el;
   }
 
+  function getViewportWindow() {
+    return win || (typeof window !== 'undefined' ? window : null);
+  }
+
+  function applyModalPortalLayout(dialogEl) {
+    if (!dialogEl || !dialogEl.style) return;
+    dialogEl.style.position = 'fixed';
+    dialogEl.style.inset = '0';
+    dialogEl.style.top = '36px';
+    dialogEl.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
+    dialogEl.style.right = '0';
+    dialogEl.style.bottom = '0';
+    dialogEl.style.left = '0';
+    dialogEl.style.margin = 'auto';
+    dialogEl.style.marginTop = 'auto';
+    dialogEl.style.marginRight = 'auto';
+    dialogEl.style.marginBottom = 'auto';
+    dialogEl.style.marginLeft = 'auto';
+    dialogEl.style.width = 'fit-content';
+    dialogEl.style.height = 'fit-content';
+    dialogEl.style.padding = '0';
+    dialogEl.style.border = 'none';
+    dialogEl.style.background = 'transparent';
+    dialogEl.style.color = 'inherit';
+    dialogEl.style.overflow = 'visible';
+    dialogEl.style.maxWidth = 'calc(100vw - 32px)';
+    dialogEl.style.maxHeight = 'calc(100vh - 72px)';
+  }
+
   function positionPopoverPortal(portalEl, anchorEl) {
     if (!portalEl || !portalEl.style) return;
-    const viewWin = win || (typeof window !== 'undefined' ? window : null);
+    const POPOVER_WIDTH = 352;
+    const VIEWPORT_MARGIN = 8;
+    const viewWin = getViewportWindow();
     const vw =
       viewWin && typeof viewWin.innerWidth === 'number' && viewWin.innerWidth > 0
         ? viewWin.innerWidth
@@ -90,19 +122,30 @@ export function createBarController({
     if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
       try {
         const r = anchorEl.getBoundingClientRect();
-        if (r && (r.width > 0 || r.height > 0 || r.top > 0 || r.right > 0)) {
+        if (r && (r.width > 0 || r.height > 0 || r.top > 0 || r.right > 0 || r.left > 0)) {
           rect = r;
         }
       } catch {}
     }
     portalEl.style.top = 'auto';
-    portalEl.style.left = 'auto';
     if (rect) {
-      const bottomPx = Math.max(8, Math.min(vh - 64, Math.round(vh - rect.top + 8)));
-      const rightPx = Math.max(8, Math.min(vw - 260, Math.round(vw - rect.right)));
+      const bottomPx = Math.max(VIEWPORT_MARGIN, Math.min(vh - 80, Math.round(vh - rect.top + 8)));
+      const maxEdgeOffset = Math.max(VIEWPORT_MARGIN, vw - POPOVER_WIDTH - VIEWPORT_MARGIN);
       portalEl.style.bottom = `${bottomPx}px`;
-      portalEl.style.right = `${rightPx}px`;
+      if (anchorEl === barView.ctxBtn && typeof rect.left === 'number') {
+        const leftPx = Math.max(VIEWPORT_MARGIN, Math.min(maxEdgeOffset, Math.round(rect.left)));
+        portalEl.style.left = `${leftPx}px`;
+        portalEl.style.right = 'auto';
+      } else {
+        const rightPx = Math.max(
+          VIEWPORT_MARGIN,
+          Math.min(maxEdgeOffset, Math.round(vw - rect.right)),
+        );
+        portalEl.style.left = 'auto';
+        portalEl.style.right = `${rightPx}px`;
+      }
     } else {
+      portalEl.style.left = 'auto';
       portalEl.style.bottom = '48px';
       portalEl.style.right = '12px';
     }
@@ -234,7 +277,19 @@ export function createBarController({
     barView.setExpandedState({ open: state.popOpen, activeTab: state.activeTab });
   }
 
+  function detachPopoverResizeListener() {
+    if (!state.popoverResizeListener) return;
+    const viewWin = getViewportWindow();
+    if (viewWin && typeof viewWin.removeEventListener === 'function') {
+      try {
+        viewWin.removeEventListener('resize', state.popoverResizeListener);
+      } catch {}
+    }
+    state.popoverResizeListener = null;
+  }
+
   function finalizePopoverClosed() {
+    detachPopoverResizeListener();
     state.popoverPortalHandle = null;
     state.popOpen = false;
     popoverView.setVisible(false);
@@ -264,6 +319,12 @@ export function createBarController({
           state.popoverPortalHandle = handle;
           if (handle.element && handle.element.style) {
             handle.element.style.margin = '0';
+            handle.element.style.marginTop = '0';
+            handle.element.style.marginRight = '0';
+            handle.element.style.marginBottom = '0';
+            handle.element.style.marginLeft = '0';
+            handle.element.style.width = 'fit-content';
+            handle.element.style.height = 'fit-content';
             handle.element.style.padding = '0';
             handle.element.style.border = 'none';
             handle.element.style.background = 'transparent';
@@ -273,6 +334,22 @@ export function createBarController({
             handle.element.style.inset = 'auto';
           }
           positionPopoverPortal(handle.element, state.lastTriggerEl || barView.barEl);
+          detachPopoverResizeListener();
+          const viewWin = getViewportWindow();
+          if (viewWin && typeof viewWin.addEventListener === 'function') {
+            const onResize = () => {
+              if (!state.disposed && state.popOpen && state.popoverPortalHandle?.element) {
+                positionPopoverPortal(
+                  state.popoverPortalHandle.element,
+                  state.lastTriggerEl || barView.barEl,
+                );
+              }
+            };
+            state.popoverResizeListener = onResize;
+            try {
+              viewWin.addEventListener('resize', onResize);
+            } catch {}
+          }
           if (typeof portalHost.syncStyle === 'function') {
             portalHost.syncStyle('popover');
           }
@@ -521,15 +598,7 @@ export function createBarController({
         });
         if (!handle) return;
         state.modalPortalHandle = handle;
-        if (handle.element && handle.element.style) {
-          handle.element.style.padding = '0';
-          handle.element.style.border = 'none';
-          handle.element.style.background = 'transparent';
-          handle.element.style.color = 'inherit';
-          handle.element.style.overflow = 'visible';
-          handle.element.style.maxWidth = 'calc(100vw - 32px)';
-          handle.element.style.maxHeight = 'calc(100vh - 56px)';
-        }
+        applyModalPortalLayout(handle.element);
         const onDialogBackdropClick = (e) => {
           if (e && e.target === handle.element) {
             closeGlobalModal(true);
@@ -1086,6 +1155,7 @@ export function createBarController({
       } catch {}
       finalizePopoverClosed();
     }
+    detachPopoverResizeListener();
     doc.removeEventListener('keydown', onKeyDown);
     doc.removeEventListener('pointerdown', onDocPointerDown);
     try {
