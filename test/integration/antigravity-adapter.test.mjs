@@ -10,7 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { installPlugin, parseArgs } from '../../scripts/install-plugin.mjs';
 import { createAntigravityCompactionAdapter, resolveSafeAgentApiExe } from '../../src/adapters/antigravity/compaction-adapter.mjs';
 import { createLsTransport, encodeConnectFrame, parseLoopbackLsAddress } from '../../src/adapters/antigravity/ls-transport.mjs';
-import { mapQuotaSummary, mapSessionTelemetry, normalizeResetTime } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
+import {
+  extractLatestUsageMetadata,
+  extractTailCheckpoint,
+  mapQuotaSummary,
+  mapSessionTelemetry,
+  normalizeResetTime,
+} from '../../src/adapters/antigravity/telemetry-mapper.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -198,6 +204,51 @@ test('compaction-adapter rejects UNC exe paths and runs bounded spawn fallback o
   await adapter.dispose();
 });
 
+test('compaction-adapter appends custom compact prompt to SendUserCascadeMessage items and agentapi fallback', async () => {
+  const rpcCalls = [];
+  let rpcShouldFail = false;
+  const fakeTransport = {
+    callUnaryRpc: async (method, payload) => {
+      rpcCalls.push({ method, payload });
+      if (rpcShouldFail) throw new Error('RPC unavailable');
+      return {};
+    },
+  };
+
+  const spawnArgsList = [];
+  const adapter = createAntigravityCompactionAdapter({
+    lsTransport: fakeTransport,
+    agentApiExePath: process.execPath,
+    spawnFn: (_exe, args, opts) => {
+      spawnArgsList.push(args);
+      return spawn(process.execPath, ['-e', 'process.exit(0)'], {
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        signal: opts.signal,
+      });
+    },
+  });
+
+  // 1. Primary RPC with custom prompt appends { text: ' <prompt>' } after slashCommand
+  const res1 = await adapter.compactSession('sess-p', { prompt: '핵심 결정사항만 유지해줘' });
+  assert.equal(res1.accepted, true);
+  assert.equal(rpcCalls.length, 1);
+  assert.equal(rpcCalls[0].method, 'SendUserCascadeMessage');
+  assert.equal(rpcCalls[0].payload.items.length, 2);
+  assert.equal(rpcCalls[0].payload.items[0].item.slashCommand.info.name, 'compact');
+  assert.deepEqual(rpcCalls[0].payload.items[1], { text: ' 핵심 결정사항만 유지해줘' });
+
+  // 2. Fallback spawn receives `/compact <prompt>`
+  rpcShouldFail = true;
+  const res2 = await adapter.compactSession('sess-p', { prompt: '핵심 결정사항만 유지해줘' });
+  assert.equal(res2.accepted, true);
+  assert.equal(res2.method, 'agentapi');
+  assert.deepEqual(spawnArgsList[0], ['agentapi', 'send-message', 'sess-p', '/compact 핵심 결정사항만 유지해줘']);
+
+  await adapter.dispose();
+});
+
 test('R4-F1 (D-0020): async dispose() terminates live SIGTERM-trapping child via SIGKILL escalation', async () => {
   let spawnedChild = null;
   const adapter = createAntigravityCompactionAdapter({
@@ -382,6 +433,99 @@ test('F1: mapSessionTelemetry is Fail-Closed on missing conversationId and parse
   assert.equal(oneofSchema.cacheHitPercent, 90);
   assert.equal(oneofSchema.tokenBreakdown[0].key, 'TOKEN_GROUP_FILES');
   assert.equal(oneofSchema.tokenBreakdown[0].tokens, 6500);
+
+  // 5. Real oversized >4MB session post-compaction sync:
+  //    `stepIndices[last]` (18861) takes precedence over `chatStartMetadata.startStepIndex` (18527),
+  //    and a completed CORTEX_STEP_TYPE_CHECKPOINT (18866 > 18861) immediately drops stale pre-compaction tokens!
+  const preCompactMeta = [
+    {
+      stepIndices: [18861],
+      chatModel: {
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        usage: {
+          apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+          inputTokens: '2832',
+          cacheReadTokens: '350492',
+        },
+        chatStartMetadata: {
+          startStepIndex: 18527,
+          contextWindowMetadata: {
+            estimatedTokensUsed: 324_643,
+            maxContextTokens: 512_000,
+            tokenBreakdown: {
+              groups: [
+                { source: 'TOKEN_SOURCE_SYSTEM', numTokens: '26360' },
+                { source: 'TOKEN_TYPE_CHAT_MESSAGES', numTokens: '298283' },
+              ],
+            },
+          },
+        },
+      },
+    },
+  ];
+  assert.equal(extractLatestUsageMetadata(preCompactMeta)?.stepIndex, 18861);
+
+  const postCompactOversized = mapSessionTelemetry({
+    requestedSessionId: 'sess-oversized',
+    streamFrame: { update: { conversationId: 'sess-oversized', status: 'CASCADE_RUN_STATUS_IDLE' } },
+    trajectorySummary: { summary: 'Big', stepCount: 18867, status: 'CASCADE_RUN_STATUS_IDLE' },
+    generatorMetadata: preCompactMeta,
+    tailStepsOffset: 18860,
+    tailSteps: [
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        metadata: { sourceTrajectoryStepInfo: { stepIndex: 18866 } },
+        checkpoint: { includedStepIndexEnd: 18866, sessionSummary: 'x'.repeat(15_718) },
+      },
+    ],
+  });
+  assert.equal(postCompactOversized.lastCompactedStep, 18866);
+  assert.equal(postCompactOversized.compactionJustCompleted, true);
+  assert.equal(postCompactOversized.usedTokensSource, 'after_compaction');
+  assert.equal(postCompactOversized.usedTokens, 31_600);
+  assert.equal(postCompactOversized.cacheHitPercent, null);
+  assert.equal(postCompactOversized.hostCompactionInProgress, false);
+
+  // Once the next post-compaction PLANNER_RESPONSE runs (stepIndices [18872] > 18866),
+  // switch seamlessly back to live cwmEst even though startStepIndex stays 18866.
+  const nextTurnAfterCompact = mapSessionTelemetry({
+    requestedSessionId: 'sess-oversized',
+    streamFrame: { update: { conversationId: 'sess-oversized', status: 'CASCADE_RUN_STATUS_IDLE' } },
+    trajectorySummary: { summary: 'Big', stepCount: 18873, status: 'CASCADE_RUN_STATUS_IDLE' },
+    generatorMetadata: [
+      ...preCompactMeta,
+      {
+        stepIndices: [18872],
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (High)',
+          usage: { apiProvider: 'API_PROVIDER_GOOGLE_GEMINI', inputTokens: '33061', cacheReadTokens: '0' },
+          chatStartMetadata: {
+            startStepIndex: 18866,
+            contextWindowMetadata: { estimatedTokensUsed: 41_065, maxContextTokens: 512_000 },
+          },
+        },
+      },
+    ],
+    tailStepsOffset: 18866,
+    tailSteps: [
+      {
+        type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+        status: 'CORTEX_STEP_STATUS_DONE',
+        checkpoint: { includedStepIndexEnd: 18866, sessionSummary: 'x'.repeat(15_718) },
+      },
+    ],
+  });
+  assert.equal(nextTurnAfterCompact.usedTokens, 41_065);
+  assert.equal(nextTurnAfterCompact.usedTokensSource, 'estimated');
+  assert.equal(nextTurnAfterCompact.compactionJustCompleted, false);
+
+  // Running CHECKPOINT step surfaces hostCompactionInProgress: true
+  const runningCp = extractTailCheckpoint([
+    { type: 'CORTEX_STEP_TYPE_CHECKPOINT', status: 'CORTEX_STEP_STATUS_RUNNING' },
+  ], 18866);
+  assert.equal(runningCp.inProgress, true);
+  assert.equal(runningCp.lastCompletedStep, null);
 });
 
 test('F1 & R2-F4 & NB2: mapQuotaSummary parses real response.groups, displayName, remaining.case, and protobuf Timestamp resetTime', () => {
@@ -673,9 +817,20 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.0.0');
+    assert.equal(manifest.version, '3.1.0');
+    const addonManifest = JSON.parse(
+      await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
+    );
+    assert.equal(addonManifest.schemaVersion, 2);
+    assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
+    assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');
 
-    // 3. R3-F3: Boot installed sidecar directly from destDir (verifies node_modules resolution, zero ERR_MODULE_NOT_FOUND)
+    const installedRendererPath = path.join(destDir, 'runtime', 'statusbar-renderer.js');
+    const standbySource = await fs.readFile(installedRendererPath, 'utf8');
+    assert.ok(standbySource.includes('startStandbyStatusbar'));
+    assert.equal(standbySource.includes('installed-dest-token-32-chars-ok'), false);
+
+    // 3. R3-F3: Boot installed sidecar directly from destDir (verifies node_modules resolution & confined runtime bundle publish)
     const installedChild = spawn(
       process.execPath,
       [path.join(destDir, 'sidecars', 'statusbar', 'main.mjs')],
@@ -713,6 +868,9 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
       const ready = JSON.parse(readyLine);
       assert.equal(ready.type, 'sidecar_ready');
       assert.ok(ready.port > 0);
+      const liveRendererSource = await fs.readFile(installedRendererPath, 'utf8');
+      assert.ok(liveRendererSource.includes(`http://127.0.0.1:${ready.port}`));
+      assert.ok(liveRendererSource.includes('startAddonStatusbar'));
     } finally {
       installedChild.kill('SIGTERM');
       await new Promise((resolve) => installedChild.once('exit', resolve));

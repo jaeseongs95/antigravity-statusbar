@@ -84,7 +84,7 @@ test('src/ui has zero vendor references, zero innerHTML, zero ../core imports, a
   }
 });
 
-test('no runtime source code touches app.asar, hooks.json, or SetMendelFlagOverrides', () => {
+test('no runtime source code touches app.asar, hooks.json, SetMendelFlagOverrides, or legacy statusbar_autoinject', () => {
   const runtimeDirs = [
     path.join(REPO_ROOT, 'src'),
     path.join(REPO_ROOT, 'sidecars'),
@@ -97,6 +97,7 @@ test('no runtime source code touches app.asar, hooks.json, or SetMendelFlagOverr
     /SetMendelFlagOverrides/,
     /SidecarApp\.sendMessage/,
     /execFileSync/,
+    /statusbar_autoinject/i,
   ];
   for (const dir of runtimeDirs) {
     for (const file of walkFiles(dir)) {
@@ -113,18 +114,115 @@ test('no runtime source code touches app.asar, hooks.json, or SetMendelFlagOverr
   }
 });
 
+test('TC-ADDON-06: addon renderer modules never create <style> tags directly, use innerHTML, or expose addonHost/token on window', () => {
+  const addonDir = path.join(REPO_ROOT, 'src', 'adapters', 'antigravity', 'addon');
+  const files = walkFiles(addonDir);
+  assert.ok(files.length >= 10, `Expected SOLID addon modules in ${addonDir}, got ${files.length}`);
+
+  const bannedInAddon = [
+    /\binnerHTML\b/,
+    /\bouterHTML\b/,
+    /\binsertAdjacentHTML\b/,
+    /\bdocument\.write\b/,
+    /createElement\s*\(\s*['"]style['"]\s*\)/,
+    /document\.head\.appendChild/,
+    /window\.__agyStatusbarInline/,
+  ];
+
+  for (const file of files) {
+    const content = fs.readFileSync(file, 'utf8');
+    const rel = path.relative(REPO_ROOT, file);
+    for (const pattern of bannedInAddon) {
+      assert.equal(
+        pattern.test(content),
+        false,
+        `Forbidden AddonManifest.v1 pattern ${pattern} matched in ${rel}`,
+      );
+    }
+  }
+});
+
 test('json-settings-store.mjs has zero direct process.env reads (F10)', () => {
   const storeFile = path.join(REPO_ROOT, 'src', 'adapters', 'storage', 'json-settings-store.mjs');
   const content = fs.readFileSync(storeFile, 'utf8');
   assert.equal(/process\.env/.test(content), false, 'json-settings-store.mjs must inject dataDir');
 });
 
-test('plugin.json and sidecars/statusbar/sidecar.json declare AUX_PANE entrypoint', () => {
+test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v2.json declare official schemas', () => {
   const pluginManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'plugin.json'), 'utf8'));
   const sidecarManifest = JSON.parse(
     fs.readFileSync(path.join(REPO_ROOT, 'sidecars', 'statusbar', 'sidecar.json'), 'utf8'),
   );
+  const addonManifest = JSON.parse(
+    fs.readFileSync(path.join(REPO_ROOT, 'addon-manifest.v2.json'), 'utf8'),
+  );
   assert.equal(pluginManifest.name, 'antigravity-statusbar');
-  assert.equal(pluginManifest.version, '3.0.0');
-  assert.equal(sidecarManifest.ui.entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
+  assert.equal(pluginManifest.version, '3.1.0');
+  assert.equal(sidecarManifest.has_web_ui, true);
+  assert.equal(sidecarManifest.ui_config?.views?.[0]?.path, '/');
+  assert.equal(sidecarManifest.ui_config?.views?.[0]?.entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
+
+  assert.equal(addonManifest.schemaVersion, 2);
+  assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
+  assert.equal(addonManifest.version, '3.1.0');
+  assert.equal(addonManifest.trustLevel, 'restricted');
+  assert.equal(addonManifest.compatibility?.minHostVersion, '2.0.0');
+  assert.deepEqual(addonManifest.capabilities, ['renderer']);
+  assert.equal(addonManifest.entry?.rendererScript, 'runtime/statusbar-renderer.js');
+  assert.equal(addonManifest.entry?.mainHookScript, null);
+  assert.equal(addonManifest.uiSlots.length, 3);
+  assert.ok(addonManifest.uiSlots.every((s) => s.shadow === true));
+  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'status-bar')?.exclusive, true);
+  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'overlay')?.exclusive, false);
+  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'modal')?.exclusive, false);
+  assert.equal(addonManifest.loadOrder, 50);
+});
+
+test('STATUSBAR_STYLES complies with addon-host v2.0.0 strict owner-CSS security rules', async () => {
+  const { STATUSBAR_STYLES } = await import('../../src/adapters/antigravity/addon/styles.mjs');
+  const allowedAtRules = new Set([
+    '@media',
+    '@supports',
+    '@keyframes',
+    '@-webkit-keyframes',
+    '@layer',
+  ]);
+  const atMatches = STATUSBAR_STYLES.match(/@[a-z-]+/gi) || [];
+  for (const rule of atMatches) {
+    assert.ok(
+      allowedAtRules.has(rule.toLowerCase()),
+      `Forbidden @-rule in STATUSBAR_STYLES: ${rule}`,
+    );
+  }
+  assert.equal(/:\s*has\s*\(/i.test(STATUSBAR_STYLES), false, ':has() is forbidden in owner CSS');
+  assert.equal(/&[^;{}]*[+~]/.test(STATUSBAR_STYLES), false, 'Nested sibling selector forbidden');
+  assert.equal(/<\s*\/\s*style/i.test(STATUSBAR_STYLES), false, 'Closing style tag forbidden');
+
+  // Verify balanced {}, (), []
+  const stack = [];
+  let quote = null;
+  for (let i = 0; i < STATUSBAR_STYLES.length; i += 1) {
+    const ch = STATUSBAR_STYLES[i];
+    if (quote) {
+      if (ch === '\\') {
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '{') {
+      stack.push('}');
+    } else if (ch === '(') {
+      stack.push(')');
+    } else if (ch === '[') {
+      stack.push(']');
+    } else if (ch === '}' || ch === ')' || ch === ']') {
+      assert.equal(stack.pop(), ch, `Unbalanced delimiter ${ch} at offset ${i}`);
+    }
+  }
+  assert.equal(quote, null, 'Unclosed string literal in STATUSBAR_STYLES');
+  assert.equal(stack.length, 0, 'Unclosed block delimiter in STATUSBAR_STYLES');
 });

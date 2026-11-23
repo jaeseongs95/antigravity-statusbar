@@ -96,7 +96,7 @@ export function createAntigravityCompactionAdapter({
   /** @type {Set<import('node:child_process').ChildProcess>} */
   const activeChildren = new Set();
 
-  function runFallbackSpawn(realExe, sessionId) {
+  function runFallbackSpawn(realExe, sessionId, messageText = '/compact') {
     return new Promise((resolve) => {
       const controller = new AbortController();
       const timer = setTimeout(() => {
@@ -106,9 +106,10 @@ export function createAntigravityCompactionAdapter({
       let child;
       try {
         // F6: shell: false, windowsHide: true, ignore stdin, pipe stdout/stderr, AbortSignal
+        // Matches official sidecar_sdk invocation: `<ANTIGRAVITY_AGENTAPI_EXE> agentapi send-message <cid> <msg>`
         child = spawnFn(
           realExe,
-          ['--compact', '--cascade-id', sessionId],
+          ['agentapi', 'send-message', sessionId, messageText],
           {
             shell: false,
             windowsHide: true,
@@ -159,24 +160,30 @@ export function createAntigravityCompactionAdapter({
   }
 
   return {
-    async compactSession(sessionId) {
+    async compactSession(sessionId, options = {}) {
+      const prompt = typeof options?.prompt === 'string' ? options.prompt.trim() : '';
+      const items = [
+        {
+          item: {
+            slashCommand: {
+              info: {
+                name: 'compact',
+                type: 'SLASH_COMMAND_TYPE_SYSTEM',
+                icon: 'collapse_all',
+              },
+            },
+          },
+        },
+      ];
+      if (prompt) {
+        items.push({ text: ` ${prompt}` });
+      }
+
       // 1. Primary path: async SendUserCascadeMessage RPC with structured slashCommand ContextScopeItem (F1)
       try {
         await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
           cascadeId: sessionId,
-          items: [
-            {
-              item: {
-                slashCommand: {
-                  info: {
-                    name: 'compact',
-                    type: 'SLASH_COMMAND_TYPE_SYSTEM',
-                    icon: 'collapse_all',
-                  },
-                },
-              },
-            },
-          ],
+          items,
         });
         return { accepted: true, method: 'rpc' };
       } catch (rpcErr) {
@@ -190,7 +197,8 @@ export function createAntigravityCompactionAdapter({
           };
         }
 
-        const fallbackResult = await runFallbackSpawn(realExe, sessionId);
+        const fallbackMsg = prompt ? `/compact ${prompt}` : '/compact';
+        const fallbackResult = await runFallbackSpawn(realExe, sessionId, fallbackMsg);
         if (fallbackResult.accepted) {
           return fallbackResult;
         }
@@ -198,6 +206,66 @@ export function createAntigravityCompactionAdapter({
           accepted: false,
           method: 'agentapi',
           reason: `${rpcErr?.message || 'RPC failed'}; fallback: ${fallbackResult.reason}`,
+        };
+      }
+    },
+
+    async sendCommand(sessionId, commandText) {
+      const trimmed = String(commandText || '').trim();
+      if (trimmed === '/compact') {
+        return this.compactSession(sessionId);
+      }
+      if (trimmed.startsWith('/compact ')) {
+        return this.compactSession(sessionId, { prompt: trimmed.slice(9).trim() });
+      }
+      // ISS-00: For plain-text messages (e.g. guarded auto-resume continuation), prefer direct
+      // SendUserCascadeMessage RPC first (no child spawn, UTF-8 safe on Windows); fall back to agentapi.
+      if (!trimmed.startsWith('/')) {
+        try {
+          await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
+            cascadeId: sessionId,
+            items: [{ text: trimmed }],
+          });
+          return { accepted: true, method: 'rpc' };
+        } catch (rpcErr) {
+          const realExe = resolveSafeAgentApiExe(agentApiExePath);
+          if (!realExe) {
+            return {
+              accepted: false,
+              method: 'rpc',
+              reason: rpcErr?.message || 'Failed to send continuation message.',
+            };
+          }
+          const fallbackRes = await runFallbackSpawn(realExe, sessionId, trimmed);
+          if (fallbackRes.accepted) {
+            return fallbackRes;
+          }
+          return {
+            accepted: false,
+            method: 'agentapi',
+            reason: `${rpcErr?.message || 'RPC failed'}; fallback: ${fallbackRes.reason}`,
+          };
+        }
+      }
+
+      const realExe = resolveSafeAgentApiExe(agentApiExePath);
+      if (realExe) {
+        const res = await runFallbackSpawn(realExe, sessionId, trimmed);
+        if (res.accepted) {
+          return res;
+        }
+      }
+      try {
+        await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
+          cascadeId: sessionId,
+          items: [{ text: trimmed }],
+        });
+        return { accepted: true, method: 'rpc' };
+      } catch (rpcErr) {
+        return {
+          accepted: false,
+          method: 'rpc',
+          reason: rpcErr?.message || 'Failed to send custom command.',
         };
       }
     },

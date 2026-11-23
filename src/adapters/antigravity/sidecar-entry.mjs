@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { createStatusbarService } from '../../core/app/statusbar-service.mjs';
 import { DomainError } from '../../core/i18n/error-codes.mjs';
 import { createJsonSettingsStore } from '../storage/json-settings-store.mjs';
+import { assertRendererPublisherPort } from './addon/ports.mjs';
+import { createAddonRuntimePublisher } from './addon/runtime-publisher.mjs';
 import { createAntigravityCompactionAdapter } from './compaction-adapter.mjs';
 import { createLsTransport } from './ls-transport.mjs';
 import { createAntigravityTelemetryAdapter } from './telemetry-mapper.mjs';
@@ -15,7 +17,7 @@ import { renderUiBridgeScript } from './ui-bridge.mjs';
 
 const MIN_TOKEN_LENGTH = 16;
 const MAX_BODY_BYTES = 16 * 1024; // 16KB hard cap
-const DEFAULT_FRAME_ANCESTORS = "'self' vscode-webview: vscode-file: file:";
+const DEFAULT_FRAME_ANCESTORS = "'self' vscode-webview: vscode-file: file: http://127.0.0.1:* http://localhost:*";
 
 const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -38,19 +40,25 @@ function timingSafeTokenMatch(expectedDigest, candidate) {
   return crypto.timingSafeEqual(expectedDigest, candidateDigest);
 }
 
-function isAllowedLoopbackHostHeader(hostHeader, boundPort) {
+const LOOPBACK_HOST_RE = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::(\d{1,5}))?$/;
+const ALLOWED_ORIGIN_RE =
+  /^(?:https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])|https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google\.com)(?::(\d{1,5}))?$/;
+
+function isValidPortString(portStr) {
+  if (portStr === undefined) return true;
+  const n = Number(portStr);
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+
+function isAllowedLoopbackHostHeader(hostHeader) {
   if (typeof hostHeader !== 'string' || !hostHeader.trim()) {
     return false;
   }
-  const normalized = hostHeader.trim().toLowerCase();
-  return (
-    normalized === `127.0.0.1:${boundPort}` ||
-    normalized === `localhost:${boundPort}` ||
-    normalized === `[::1]:${boundPort}`
-  );
+  const match = LOOPBACK_HOST_RE.exec(hostHeader.trim().toLowerCase());
+  return Boolean(match && isValidPortString(match[1]));
 }
 
-function isAllowedSameOrigin(originHeader, boundPort) {
+function isAllowedLoopbackOrigin(originHeader) {
   if (typeof originHeader !== 'string' || !originHeader.trim()) {
     return false;
   }
@@ -58,11 +66,8 @@ function isAllowedSameOrigin(originHeader, boundPort) {
   if (normalized === 'null') {
     return false;
   }
-  return (
-    normalized === `http://127.0.0.1:${boundPort}` ||
-    normalized === `http://localhost:${boundPort}` ||
-    normalized === `http://[::1]:${boundPort}`
-  );
+  const match = ALLOWED_ORIGIN_RE.exec(normalized);
+  return Boolean(match && isValidPortString(match[1]));
 }
 
 /**
@@ -260,31 +265,63 @@ export function createSidecarServer({
   }
 
   async function handleApiRequest(req, res, pathname) {
-    // F8-F9: Non-POST on /api/* -> 405 Method Not Allowed, ZERO CORS headers
+    const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    const originAllowed = isAllowedLoopbackOrigin(rawOrigin);
+
+    // Loopback-only CORS preflight for cross-port Antigravity desktop renderer
+    if (req.method === 'OPTIONS') {
+      if (!originAllowed) {
+        sendJson(res, 403, {
+          error: { code: 'FORBIDDEN_ORIGIN', message: 'Invalid or missing Origin header.' },
+        });
+        return;
+      }
+      applySecurityHeaders(res);
+      res.writeHead(204, {
+        'access-control-allow-origin': rawOrigin,
+        vary: 'Origin',
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': 'content-type, x-statusbar-token',
+        'access-control-allow-private-network': 'true',
+        'access-control-max-age': '600',
+      });
+      res.end();
+      return;
+    }
+
+    // Non-POST on /api/* -> 405 Method Not Allowed, ZERO CORS headers
     if (req.method !== 'POST') {
       sendJson(
         res,
         405,
         { error: { code: 'METHOD_NOT_ALLOWED', message: 'API endpoints require POST.' } },
-        { allow: 'POST' },
+        { allow: 'POST, OPTIONS' },
       );
       return;
     }
 
-    // Strict exact same-origin check (missing or 'null' or foreign -> 403)
-    if (!isAllowedSameOrigin(req.headers.origin, boundPort)) {
+    // Strict loopback Origin check (missing or 'null' or foreign -> 403, ZERO CORS headers)
+    if (!originAllowed) {
       sendJson(res, 403, {
         error: { code: 'FORBIDDEN_ORIGIN', message: 'Invalid or missing Origin header.' },
       });
       return;
     }
 
+    const corsHeaders = {
+      'access-control-allow-origin': rawOrigin,
+      vary: 'Origin',
+    };
+
     // SHA-256 32-byte timingSafeEqual token validation
     const suppliedToken = req.headers['x-statusbar-token'];
     if (!timingSafeTokenMatch(expectedTokenDigest, suppliedToken)) {
-      sendJson(res, 401, {
-        error: { code: 'UNAUTHORIZED', message: 'Invalid authentication token.' },
-      });
+      sendJson(
+        res,
+        401,
+        { error: { code: 'UNAUTHORIZED', message: 'Invalid authentication token.' } },
+        corsHeaders,
+      );
       return;
     }
 
@@ -294,7 +331,7 @@ export function createSidecarServer({
     } catch (err) {
       const status = err.httpStatus || 400;
       // NB1: Close keep-alive connection on 413 after pausing unread oversized payload
-      const extraHeaders = status === 413 ? { connection: 'close' } : {};
+      const extraHeaders = status === 413 ? { ...corsHeaders, connection: 'close' } : corsHeaders;
       sendJson(
         res,
         status,
@@ -307,47 +344,83 @@ export function createSidecarServer({
     try {
       if (pathname === '/api/sessions') {
         const result = await service.listSessions();
-        sendJson(res, 200, result);
+        sendJson(res, 200, result, corsHeaders);
         return;
       }
       if (pathname === '/api/snapshot') {
         const result = await service.getSessionSnapshot(body.sessionId);
-        sendJson(res, 200, result);
+        sendJson(res, 200, result, corsHeaders);
         return;
       }
       if (pathname === '/api/quota') {
         const result = await service.getQuotaSummary();
-        sendJson(res, 200, result);
+        sendJson(res, 200, result, corsHeaders);
         return;
       }
       if (pathname === '/api/settings/get') {
         const result = await service.getSettings();
-        sendJson(res, 200, result);
+        sendJson(res, 200, result, corsHeaders);
         return;
       }
       if (pathname === '/api/settings/update') {
         const result = await service.updateSettings(body);
-        sendJson(res, 200, result);
+        sendJson(res, 200, result, corsHeaders);
         return;
       }
       if (pathname === '/api/compact') {
-        const result = await service.requestCompaction(body.sessionId);
-        sendJson(res, 200, result);
+        const result = await service.requestCompaction(
+          body.sessionId,
+          body.prompt !== undefined ? { prompt: body.prompt } : undefined,
+        );
+        sendJson(res, 200, result, corsHeaders);
         return;
       }
-      sendJson(res, 404, {
-        error: { code: 'NOT_FOUND', message: `Unknown API endpoint: ${pathname}` },
-      });
+      if (pathname === '/api/command') {
+        const result = await service.runCustomCommand(body.sessionId, body.command);
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
+      if (pathname === '/api/addons/upsert') {
+        const result = await service.upsertAddon(body);
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
+      if (pathname === '/api/addons/toggle') {
+        const result = await service.setAddonEnabled(
+          body.id,
+          Boolean(body.enabled),
+          Boolean(body.runtime),
+        );
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
+      if (pathname === '/api/addons/remove') {
+        const result = await service.removeAddon(body.id);
+        sendJson(res, 200, result, corsHeaders);
+        return;
+      }
+      sendJson(
+        res,
+        404,
+        { error: { code: 'NOT_FOUND', message: `Unknown API endpoint: ${pathname}` } },
+        corsHeaders,
+      );
     } catch (err) {
       if (err instanceof DomainError) {
-        sendJson(res, err.httpStatus, {
-          error: { code: err.code, message: err.message, details: err.details },
-        });
+        sendJson(
+          res,
+          err.httpStatus,
+          { error: { code: err.code, message: err.message, details: err.details } },
+          corsHeaders,
+        );
         return;
       }
-      sendJson(res, 500, {
-        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
-      });
+      sendJson(
+        res,
+        500,
+        { error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' } },
+        corsHeaders,
+      );
     }
   }
 
@@ -466,7 +539,7 @@ export function createSidecarServer({
 /**
  * Production sidecar entrypoint invoked by sidecars/statusbar/main.mjs.
  */
-export async function startSidecar(env = process.env) {
+export async function startSidecar(env = process.env, deps = {}) {
   const token = env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '';
   if (token.length < MIN_TOKEN_LENGTH) {
     throw new Error(
@@ -474,13 +547,16 @@ export async function startSidecar(env = process.env) {
     );
   }
 
+  const defaultPluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const pluginRootDir = env.ANTIGRAVITY_PLUGIN_ROOT_DIR || defaultPluginRoot;
+
   const dataDir =
     env.ANTIGRAVITY_PLUGIN_DATA_DIR ||
     path.join(os.homedir(), '.gemini', 'config', 'plugins', 'antigravity-statusbar', 'data');
 
   const lsTransport = createLsTransport({
     lsAddress: env.ANTIGRAVITY_LS_ADDRESS || '',
-    csrfToken: env.ANTIGRAVITY_LS_CSRF_TOKEN || '',
+    csrfToken: env.ANTIGRAVITY_CSRF_TOKEN || env.ANTIGRAVITY_LS_CSRF_TOKEN || '',
   });
 
   const telemetryPort = createAntigravityTelemetryAdapter(lsTransport);
@@ -500,10 +576,29 @@ export async function startSidecar(env = process.env) {
     token,
     service,
     frameAncestors: env.STATUSBAR_FRAME_ANCESTORS || DEFAULT_FRAME_ANCESTORS,
-    port: Number(env.ANTIGRAVITY_SIDECAR_PORT || 0) || 0,
+    port: Number(env.ANTIGRAVITY_SIDECAR_WEB_PORT || env.ANTIGRAVITY_SIDECAR_PORT || 0) || 0,
   });
 
   const { port, url } = await sidecar.listen();
+
+  const addonPublishDisabled = env.STATUSBAR_DISABLE_ADDON_PUBLISH === '1';
+  let rendererPublisher = null;
+  if (!addonPublishDisabled) {
+    try {
+      rendererPublisher = assertRendererPublisherPort(
+        deps.rendererPublisher ||
+          createAddonRuntimePublisher({
+            pluginRootDir,
+          }),
+      );
+      await rendererPublisher.publish({ baseUrl: url, token });
+    } catch (pubErr) {
+      // Non-fatal: AUX_PANE remains available even if plugin runtime directory is read-only
+      process.stderr.write(
+        `[statusbar-sidecar] addon renderer publish warning: ${pubErr?.message || String(pubErr)}\n`,
+      );
+    }
+  }
 
   // Announce readiness to Antigravity Sidecar host (JSON line on stdout)
   process.stdout.write(
@@ -514,18 +609,80 @@ export async function startSidecar(env = process.env) {
     })}\n`,
   );
 
+  // Background active-session sweep protects non-focused RUNNING tabs under global/model limits
+  let sweepInFlight = false;
+  const sweepIntervalMs = Math.max(
+    1_000,
+    Number(env.STATUSBAR_SWEEP_INTERVAL_MS) || 5_000,
+  );
+  const sweepTimer = setInterval(() => {
+    if (shuttingDown || sweepInFlight) return;
+    sweepInFlight = true;
+    service
+      .sweepActiveSessions()
+      .catch(() => {})
+      .finally(() => {
+        sweepInFlight = false;
+      });
+  }, sweepIntervalMs);
+  if (typeof sweepTimer.unref === 'function') {
+    sweepTimer.unref();
+  }
+
+  let rendererCleanedUp = false;
   let shuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearInterval(sweepTimer);
+    if (rendererPublisher && !rendererCleanedUp) {
+      try {
+        await rendererPublisher.teardown();
+        rendererCleanedUp = true;
+      } catch {
+        // Best-effort credential cleanup on shutdown; exit handler tries teardownSync
+      }
+    }
     await compactionPort.dispose();
     await sidecar.close();
-    process.exit(0);
+    process.exit(typeof exitCode === 'number' ? exitCode : 0);
   };
 
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', () => {
+    void shutdown(0);
+  });
+  process.once('SIGINT', () => {
+    void shutdown(0);
+  });
+  process.once('SIGBREAK', () => {
+    void shutdown(0);
+  });
+  if (process.stdin && typeof process.stdin.on === 'function') {
+    process.stdin.once('end', () => {
+      void shutdown(0);
+    });
+    process.stdin.once('close', () => {
+      void shutdown(0);
+    });
+  }
+  process.once('uncaughtException', (err) => {
+    process.stderr.write(`[statusbar-sidecar] uncaughtException: ${err?.stack || err?.message || String(err)}\n`);
+    if (rendererPublisher && !rendererCleanedUp && typeof rendererPublisher.teardownSync === 'function') {
+      try {
+        rendererPublisher.teardownSync();
+        rendererCleanedUp = true;
+      } catch {}
+    }
+    compactionPort.disposeSync();
+    process.exit(1);
+  });
   process.once('exit', () => {
+    if (rendererPublisher && !rendererCleanedUp && typeof rendererPublisher.teardownSync === 'function') {
+      try {
+        rendererPublisher.teardownSync();
+        rendererCleanedUp = true;
+      } catch {}
+    }
     compactionPort.disposeSync();
   });
 

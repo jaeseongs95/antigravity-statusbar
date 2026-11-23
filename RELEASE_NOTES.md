@@ -1,3 +1,39 @@
+# Release Notes — `v3.1.0` (2026-11-23)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.1.0` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.1.0` introduces the official **`AddonManifest.v2` Shadow DOM Inline Statusbar** directly beneath the Antigravity chat input box (with `AUX_PANE` retained as a lightweight fallback), 4-tier context limits (`session > model > default > host`), 5h & weekly account quota display, editable `/compact` prompt, `StatusbarAddon.v1` custom command buttons, and full **P0 hardening (`ISS-00`–`ISS-14`)** verified by strict TDD + real Headless Chromium Shadow DOM E2E on 2-OS CI.
+
+### 2. Key Enhancements & P0 Defect Fixes
+- **`ISS-00` (Mid-Work Auto-Compaction Task Interruption Fix)**: Added `autoCompactWhileRunning` (`'resume'` default / `'defer'`). When a `RUNNING` session reaches its custom limit and auto-compacts into `IDLE`, a single-shot guarded continuation prompt is dispatched via `SendUserCascadeMessage` RPC (never for manual `/compact`, `IDLE` sessions, cancelled/errored runs, or after manual user input; capped by a 3-run circuit breaker).
+- **`ISS-01`, `ISS-06`, `ISS-07` (Data-Loss & Silent Reset Prevention)**: Replaced `type="number"` inputs with `type="text" inputmode="numeric"` + `badInput` guard; hardened `scripts/install-plugin.mjs` (`lstat` symlink fail-fast, atomic fallback preserving live renderer, fail-fast rollback); moved `StatusbarAddon.v1` mutations into atomic in-lock delta patches (`addonUpsert`/`addonToggle`/`addonRemove`) with strict CLI flag validation.
+- **`ISS-03`, `ISS-04`, `ISS-05`, `ISS-14` (State Machine & Transport Hardening)**: Preserved per-session 300s host compaction locks across cross-session polling and `<4MB` tail step checks; restricted `ls-transport.mjs` retries strictly to `RESPONSE_CAP_EXCEEDED` (eliminating 12× timeout amplification); guarded against transient `usedTokens: null` cooldown wipes and low-limit (`32K`) compaction loops; excluded identifiable subagent cascades from background auto-compact sweeps by default.
+- **`ISS-08`, `ISS-09`, `ISS-10`, `ISS-13` (UI, Connectivity, Focus & Credential Teardown)**: Added synchronous `teardownSync()` on `SIGBREAK`/`stdin`/`uncaughtException`/`exit`; fixed `AUX_PANE` model-limit leak into session input; fixed `24h` quota labeling, `99.7%` → `99%` non-exceeded rounding, stale-snapshot disconnect visibility, Shadow DOM `composedPath()` outside clicks, modal `modelListEl` focus preservation across polls, `Escape` focus return, non-writable `window.statusbarAddons`, and command tooltips.
+- **`ISS-02`, `ISS-11` (Real-Browser Shadow DOM E2E & Documentation Sync)**: Added `test/ui/addon-browser-e2e.test.mjs` running in real Headless Chromium/Edge on both `ubuntu-latest` and `windows-latest` CI.
+
+---
+
+## [한국어] `v3.1.0` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.1.0`은 Antigravity 채팅 입력창 바로 아래에 렌더링되는 공식 **`AddonManifest.v2` Shadow DOM 인라인 상태바**(우측 `AUX_PANE` 폴백 유지), 4단계 컨텍스트 한도(`현재 세션 > 모델별 전역 > 일괄 전역 > 호스트 기본값`), 5시간·주간 계정 한도 표시, 편집 가능한 `/compact` 요약 문구, `StatusbarAddon.v1` 커스텀 버튼, 그리고 **P0 결함 일괄 수정(`ISS-00`~`ISS-14`)**을 엄격한 TDD 및 2-OS 실브라우저 Shadow DOM E2E CI 검증과 함께 제공합니다.
+
+### 2. 주요 개선 및 P0 결함 수정
+- **`ISS-00` (에이전트 작업 중 자동 압축 시 작업 영구 중단 버그 수정)**: `autoCompactWhileRunning` (`'resume'` 기본값 / `'defer'`) 정책을 도입했습니다. `RUNNING` 중 자동 압축 완료 후 `IDLE`로 종료되면 1회성 가드된 이어하기 프롬프트를 `SendUserCascadeMessage` RPC로 전송해 작업 중단을 방지합니다(수동 `/compact`, 기존 `IDLE` 세션, 취소·오류, 사용자 수동 입력 개입, 연속 3회 서킷 브레이커 초과 시 미전송).
+- **`ISS-01`, `ISS-06`, `ISS-07` (데이터 손실 및 무음 초기화 차단)**: 모든 한도 입력칸을 `type="text" inputmode="numeric"`으로 전환해 `badInput` 무음 초기화 차단; `scripts/install-plugin.mjs` 심볼릭 링크 fail-fast 및 안전한 롤백·원자적 폴백 보강; 애드온 CRUD를 파일 락 내부 원자적 델타 패치(`addonUpsert`/`addonToggle`/`addonRemove`)로 전환하고 CLI 플래그 검증 강화.
+- **`ISS-03`, `ISS-04`, `ISS-05`, `ISS-14` (상태 머신 및 전송 계층 안정화)**: 다중 세션 폴링 중 300초 호스트 압축 락 조기 만료 차단 및 `<4MB` 세션 tail step 관측 보강; `ls-transport.mjs` 4MB 초과(`RESPONSE_CAP_EXCEEDED`) 외 타임아웃/502 증폭 차단; 일시적 `usedTokens: null` 쿨다운 증발 및 저한도(`32K`) 무한 압축 루프 차단; 백그라운드 스윕에서 서브에이전트 기본 제외.
+- **`ISS-08`, `ISS-09`, `ISS-10`, `ISS-13` (UI·연결 상태·포커스·종료 토큰 회수)**: `SIGBREAK`/`stdin`/`uncaughtException`/`exit` 경로에 동기 `teardownSync()` 토큰 회수 추가; `AUX_PANE` 모델 한도→세션 입력칸 오표시 수정; `24h` 버킷 오분류 제거, `99.7%` → `99%` 반올림 보정, 연결 끊김 배지 노출, Shadow DOM `composedPath()` 판정, 모달 `modelListEl` 폴링 중 포커스 보존, `Escape` 포커스 복원, `window.statusbarAddons` 불변 정의, 커스텀 버튼 툴팁 명령 표시.
+- **`ISS-02`, `ISS-11` (실브라우저 Shadow DOM E2E CI 및 문서 동기화)**: `ubuntu-latest`·`windows-latest` 양 OS에서 실제 Headless Chromium/Edge로 인라인 Shadow DOM 번들을 검증하는 `test/ui/addon-browser-e2e.test.mjs`를 CI에 편입했습니다.
+
+---
+
 # Release Notes — `v3.0.0` (2026-11-19)
 
 > **Document Policy / 문서 작성 기준**
