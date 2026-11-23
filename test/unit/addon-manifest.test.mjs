@@ -73,14 +73,14 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
     {
       slot: 'overlay',
       slotId: 'antigravity-statusbar.popover',
-      exclusive: true,
+      exclusive: false,
       scope: 'addon-owned-slot',
       shadow: true,
     },
     {
       slot: 'modal',
       slotId: 'antigravity-statusbar.global-limit-modal',
-      exclusive: true,
+      exclusive: false,
       scope: 'addon-owned-slot',
       shadow: true,
     },

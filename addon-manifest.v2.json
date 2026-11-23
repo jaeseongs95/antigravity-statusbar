@@ -27,14 +27,14 @@
     {
       "slot": "overlay",
       "slotId": "antigravity-statusbar.popover",
-      "exclusive": true,
+      "exclusive": false,
       "scope": "addon-owned-slot",
       "shadow": true
     },
     {
       "slot": "modal",
       "slotId": "antigravity-statusbar.global-limit-modal",
-      "exclusive": true,
+      "exclusive": false,
       "scope": "addon-owned-slot",
       "shadow": true
     }

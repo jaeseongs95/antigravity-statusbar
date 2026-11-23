@@ -171,7 +171,10 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v2.json d
   assert.equal(addonManifest.entry?.rendererScript, 'runtime/statusbar-renderer.js');
   assert.equal(addonManifest.entry?.mainHookScript, null);
   assert.equal(addonManifest.uiSlots.length, 3);
-  assert.ok(addonManifest.uiSlots.every((s) => s.shadow === true && s.exclusive === true));
+  assert.ok(addonManifest.uiSlots.every((s) => s.shadow === true));
+  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'status-bar')?.exclusive, true);
+  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'overlay')?.exclusive, false);
+  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'modal')?.exclusive, false);
   assert.equal(addonManifest.loadOrder, 50);
 });
 
