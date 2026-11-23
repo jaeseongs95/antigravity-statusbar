@@ -720,8 +720,9 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
     assert.equal(manifest.version, '3.1.0');
     const addonManifest = JSON.parse(
-      await fs.readFile(path.join(destDir, 'addon-manifest.v1.json'), 'utf8'),
+      await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
     );
+    assert.equal(addonManifest.schemaVersion, 2);
     assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
     assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');
 

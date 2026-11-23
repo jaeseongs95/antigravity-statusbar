@@ -264,6 +264,16 @@ export const STATUSBAR_STYLES = `
 .agy-inline-popover.hidden {
   display: none;
 }
+.agy-inline-popover.agy-inline-popover-portal {
+  position: static;
+  bottom: auto;
+  right: auto;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 56px);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  line-height: 1.4;
+}
 .agy-inline-pop-head {
   display: flex;
   align-items: center;

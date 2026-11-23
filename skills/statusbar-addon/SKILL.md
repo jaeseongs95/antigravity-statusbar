@@ -47,7 +47,7 @@ Run from the installed plugin directory (`~/.gemini/config/plugins/antigravity-s
 
 ## 2. Runtime Plugin Bridge (`window.statusbarAddons`)
 
-Peer `AddonManifest.v1` UI plugins running in the shared native addon host Isolated World (`999`) can attach live interactive buttons without touching Sidecar credentials or host capability handles:
+Peer `AddonManifest.v2` UI plugins running in the shared native addon host Isolated World (`998`) can attach live interactive buttons without touching Sidecar credentials or host capability handles:
 
 ```js
 window.statusbarAddons?.register({

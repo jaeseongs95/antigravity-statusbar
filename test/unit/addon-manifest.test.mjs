@@ -11,6 +11,7 @@ import { createSidecarApiClient } from '../../src/adapters/antigravity/addon/api
 import { createInlineI18n } from '../../src/adapters/antigravity/addon/i18n.mjs';
 import {
   assertAddonRegistryPort,
+  assertPortalHostPort,
   assertRendererHostPort,
   assertRendererPublisherPort,
   assertStatusbarApiPort,
@@ -23,9 +24,9 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const TEST_TOKEN = 'addon-unit-test-token-32-chars-ok';
 
-test('TC-ADDON-01: addon-manifest.v1.json conforms strictly to AddonManifest.v1 schema & reference profile', async () => {
+test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 schema & reference profile', async () => {
   const manifest = JSON.parse(
-    await fs.readFile(path.join(REPO_ROOT, 'addon-manifest.v1.json'), 'utf8'),
+    await fs.readFile(path.join(REPO_ROOT, 'addon-manifest.v2.json'), 'utf8'),
   );
 
   const allowedTopKeys = new Set([
@@ -34,9 +35,11 @@ test('TC-ADDON-01: addon-manifest.v1.json conforms strictly to AddonManifest.v1 
     'pluginId',
     'displayName',
     'version',
+    'trustLevel',
     'compatibility',
     'capabilities',
     'entry',
+    'integrity',
     'uiSlots',
     'isolation',
     'loadOrder',
@@ -45,13 +48,14 @@ test('TC-ADDON-01: addon-manifest.v1.json conforms strictly to AddonManifest.v1 
     assert.ok(allowedTopKeys.has(key), `Unexpected manifest top-level property: ${key}`);
   }
 
-  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.schemaVersion, 2);
   assert.equal(manifest.pluginId, 'antigravity-statusbar');
   assert.equal(manifest.displayName, 'Antigravity Statusbar');
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(manifest.trustLevel, 'restricted');
   assert.deepEqual(manifest.compatibility, {
     hostProfile: 'antigravity-desktop',
-    minHostVersion: '1.0.1',
+    minHostVersion: '2.0.0',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {
@@ -64,6 +68,21 @@ test('TC-ADDON-01: addon-manifest.v1.json conforms strictly to AddonManifest.v1 
       slotId: 'antigravity-statusbar.root',
       exclusive: true,
       scope: 'addon-owned-slot',
+      shadow: true,
+    },
+    {
+      slot: 'overlay',
+      slotId: 'antigravity-statusbar.popover',
+      exclusive: true,
+      scope: 'addon-owned-slot',
+      shadow: true,
+    },
+    {
+      slot: 'modal',
+      slotId: 'antigravity-statusbar.global-limit-modal',
+      exclusive: true,
+      scope: 'addon-owned-slot',
+      shadow: true,
     },
   ]);
   assert.deepEqual(manifest.isolation, {
@@ -86,6 +105,14 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
     onDispose() {},
   };
   assert.equal(assertRendererHostPort(validHost), validHost);
+  assert.throws(
+    () => assertRendererHostPort({ ...validHost, openModal: 'not-fn' }),
+    /invalid_openModal/,
+  );
+
+  assert.throws(() => assertPortalHostPort(validHost), /missing_openModal/);
+  const validPortal = { openModal() {}, openPopover() {} };
+  assert.equal(assertPortalHostPort(validPortal), validPortal);
 
   assert.throws(() => assertStatusbarApiPort({}), /missing_post/);
   const validApi = { post() {}, isConnected() {}, abortAll() {} };
@@ -97,13 +124,14 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
   assert.equal(assertRendererPublisherPort(validPublisher), validPublisher);
 });
 
-test('TC-ADDON-03: addon-host-adapter.mjs delegates exclusively to scoped addonHost handle and fails closed', () => {
+test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM / { container } / openModal / openPopover contracts', () => {
   assert.throws(() => createAddonHostAdapter(null), /ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE/);
   assert.throws(() => createAddonHostAdapter({ mountSlot() {} }), /ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE/);
 
+  // 1. Legacy v1 host compatibility
   const calls = [];
   const fakeEl = { id: 'slot-div' };
-  const fakeHost = {
+  const fakeHostV1 = {
     pluginId: 'antigravity-statusbar',
     mountSlot(slotId, parentEl) {
       calls.push(['mountSlot', slotId, parentEl]);
@@ -125,12 +153,15 @@ test('TC-ADDON-03: addon-host-adapter.mjs delegates exclusively to scoped addonH
     },
   };
 
-  const port = assertRendererHostPort(createAddonHostAdapter(fakeHost, 'antigravity-statusbar.root'));
-  assert.equal(port.mountSlot('BOX'), fakeEl);
-  port.injectStyle('statusbar-main', '.x{}');
-  port.onDispose(() => {});
-  assert.equal(port.unmountSlot(), true);
-  assert.equal(port.removeStyle('statusbar-main'), true);
+  const portV1 = assertRendererHostPort(createAddonHostAdapter(fakeHostV1, 'antigravity-statusbar.root'));
+  assert.equal(portV1.schemaVersion, 1);
+  assert.equal(portV1.openModal, undefined);
+  assert.equal(portV1.openPopover, undefined);
+  assert.equal(portV1.mountSlot('BOX'), fakeEl);
+  portV1.injectStyle('statusbar-main', '.x{}');
+  portV1.onDispose(() => {});
+  assert.equal(portV1.unmountSlot(), true);
+  assert.equal(portV1.removeStyle('statusbar-main'), true);
 
   assert.deepEqual(calls, [
     ['mountSlot', 'antigravity-statusbar.root', 'BOX'],
@@ -138,6 +169,70 @@ test('TC-ADDON-03: addon-host-adapter.mjs delegates exclusively to scoped addonH
     ['onDispose', 'function'],
     ['unmountSlot', 'antigravity-statusbar.root'],
     ['removeStyle', 'statusbar-main'],
+  ]);
+
+  // 2. Host v2.0.0 contract: { container }, container-switch unmount/remount, slotId style routing, openPopover/openModal
+  const v2Calls = [];
+  const box1 = { id: 'box-1' };
+  const box2 = { id: 'box-2' };
+  const fakeHostV2 = {
+    pluginId: 'antigravity-statusbar',
+    schemaVersion: 2,
+    mountSlot(slotId, opts) {
+      v2Calls.push(['mountSlot', slotId, opts]);
+      return { id: `shadow-root-inner-${opts?.container?.id || 'none'}` };
+    },
+    unmountSlot(slotId) {
+      v2Calls.push(['unmountSlot', slotId]);
+      return true;
+    },
+    injectStyle(styleId, css, opts) {
+      v2Calls.push(['injectStyle', styleId, css, opts]);
+    },
+    removeStyle(styleId) {
+      v2Calls.push(['removeStyle', styleId]);
+      return true;
+    },
+    openPopover(slotId, opts) {
+      v2Calls.push(['openPopover', slotId, opts]);
+      return { id: 'pop-1', element: {}, bodyEl: {}, close() {} };
+    },
+    openModal(slotId, opts) {
+      v2Calls.push(['openModal', slotId, opts]);
+      return { id: 'modal-1', element: {}, bodyEl: {}, close() {} };
+    },
+    onDispose(fn) {
+      v2Calls.push(['onDispose', typeof fn]);
+    },
+  };
+
+  const portV2 = assertPortalHostPort(
+    assertRendererHostPort(
+      createAddonHostAdapter(fakeHostV2, {
+        root: 'antigravity-statusbar.root',
+        popover: 'antigravity-statusbar.popover',
+        modal: 'antigravity-statusbar.global-limit-modal',
+      }),
+    ),
+  );
+  assert.equal(portV2.schemaVersion, 2);
+  portV2.mountSlot(box1);
+  // Same container -> no unmount before mount
+  portV2.mountSlot(box1);
+  // Different container (tab switch) -> unmounts old slot before mounting into new container
+  portV2.mountSlot(box2);
+  portV2.injectStyle('statusbar-main', '.x{}', { slotId: 'antigravity-statusbar.root' });
+  portV2.openPopover({ ignoreOutsideClickEls: [] });
+  portV2.openModal({});
+
+  assert.deepEqual(v2Calls, [
+    ['mountSlot', 'antigravity-statusbar.root', { container: box1 }],
+    ['mountSlot', 'antigravity-statusbar.root', { container: box1 }],
+    ['unmountSlot', 'antigravity-statusbar.root'],
+    ['mountSlot', 'antigravity-statusbar.root', { container: box2 }],
+    ['injectStyle', 'statusbar-main', '.x{}', { slotId: 'antigravity-statusbar.root' }],
+    ['openPopover', 'antigravity-statusbar.popover', { ignoreOutsideClickEls: [] }],
+    ['openModal', 'antigravity-statusbar.global-limit-modal', {}],
   ]);
 });
 

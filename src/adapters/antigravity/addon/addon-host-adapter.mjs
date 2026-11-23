@@ -2,13 +2,17 @@
  * Adapter translating the Antigravity native-addon-host scoped capability handle (`addonHost`)
  * into the segregated `RendererHostPort` abstraction (DIP / LSP).
  *
+ * Supports AddonManifest.v2 (v2.0.0+ Shadow DOM slots, `{ container }` mount options,
+ * ShadowRoot-routed `injectStyle(..., { slotId })`, and host `openModal`/`openPopover` portals)
+ * while retaining backward-compatible behavior for v1 test doubles / hosts.
+ *
  * Security & Isolation Invariants:
  * - Never exposes `addonHost` on `window` or DOM.
- * - Never creates `<style>` tags or appends directly to host containers;
- *   all DOM slots, styles, and lifecycle cleanup delegate exclusively to `addonHost`.
+ * - Never creates style tags or appends directly to host containers;
+ *   all DOM slots, styles, portals, and lifecycle cleanup delegate exclusively to `addonHost`.
  */
 
-export function createAddonHostAdapter(addonHost, slotId = 'antigravity-statusbar.root') {
+export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-statusbar.root') {
   if (
     !addonHost ||
     typeof addonHost !== 'object' ||
@@ -20,22 +24,67 @@ export function createAddonHostAdapter(addonHost, slotId = 'antigravity-statusba
   ) {
     throw new Error('ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE');
   }
-  if (typeof slotId !== 'string' || !slotId.trim()) {
+
+  let rootSlotId = '';
+  let popoverSlotId = 'antigravity-statusbar.popover';
+  let modalSlotId = 'antigravity-statusbar.global-limit-modal';
+
+  if (typeof slotSpec === 'string') {
+    rootSlotId = slotSpec.trim();
+  } else if (slotSpec && typeof slotSpec === 'object') {
+    rootSlotId = typeof slotSpec.root === 'string' ? slotSpec.root.trim() : '';
+    if (typeof slotSpec.popover === 'string' && slotSpec.popover.trim()) {
+      popoverSlotId = slotSpec.popover.trim();
+    }
+    if (typeof slotSpec.modal === 'string' && slotSpec.modal.trim()) {
+      modalSlotId = slotSpec.modal.trim();
+    }
+  }
+
+  if (!rootSlotId) {
     throw new Error('ERR_INVALID_SLOT_ID');
   }
 
-  const ownedSlotId = slotId.trim();
+  const isV2Host =
+    addonHost.schemaVersion === 2 ||
+    typeof addonHost.openModal === 'function' ||
+    typeof addonHost.openPopover === 'function';
 
-  return Object.freeze({
+  let lastMountedContainer = null;
+
+  const adapter = {
     pluginId: typeof addonHost.pluginId === 'string' ? addonHost.pluginId : 'antigravity-statusbar',
-    slotId: ownedSlotId,
+    schemaVersion: isV2Host ? 2 : 1,
+    slotId: rootSlotId,
+    popoverSlotId,
+    modalSlotId,
     mountSlot(parentEl) {
-      return addonHost.mountSlot(ownedSlotId, parentEl);
+      if (isV2Host) {
+        if (lastMountedContainer && parentEl && lastMountedContainer !== parentEl) {
+          try {
+            addonHost.unmountSlot(rootSlotId);
+          } catch {}
+          lastMountedContainer = null;
+        }
+        const mounted = addonHost.mountSlot(
+          rootSlotId,
+          parentEl ? { container: parentEl } : {},
+        );
+        lastMountedContainer = mounted ? parentEl || null : null;
+        return mounted;
+      }
+      const mounted = addonHost.mountSlot(rootSlotId, parentEl);
+      lastMountedContainer = mounted ? parentEl || null : null;
+      return mounted;
     },
     unmountSlot() {
-      return addonHost.unmountSlot(ownedSlotId);
+      lastMountedContainer = null;
+      return addonHost.unmountSlot(rootSlotId);
     },
-    injectStyle(styleId, cssText) {
+    injectStyle(styleId, cssText, opts) {
+      if (opts !== undefined) {
+        return addonHost.injectStyle(styleId, cssText, opts);
+      }
       return addonHost.injectStyle(styleId, cssText);
     },
     removeStyle(styleId) {
@@ -46,5 +95,14 @@ export function createAddonHostAdapter(addonHost, slotId = 'antigravity-statusba
         addonHost.onDispose(fn);
       }
     },
-  });
+  };
+
+  if (typeof addonHost.openPopover === 'function') {
+    adapter.openPopover = (opts = {}) => addonHost.openPopover(popoverSlotId, opts);
+  }
+  if (typeof addonHost.openModal === 'function') {
+    adapter.openModal = (opts = {}) => addonHost.openModal(modalSlotId, opts);
+  }
+
+  return Object.freeze(adapter);
 }

@@ -10,7 +10,7 @@ import { DEFAULT_RENDERER_ENTRY } from '../src/adapters/antigravity/addon/runtim
 const PLUGIN_NAME = 'antigravity-statusbar';
 const INCLUDE_ENTRIES = [
   'plugin.json',
-  'addon-manifest.v1.json',
+  'addon-manifest.v2.json',
   'package.json',
   'package-lock.json',
   'sidecars',
@@ -142,7 +142,7 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       await copySafe(path.join(repoRoot, rel), path.join(stagingDir, rel));
     }
 
-    // Seed credential-free AddonManifest.v1 standby renderer script inside confined runtime/
+    // Seed credential-free AddonManifest.v2 standby renderer script inside confined runtime/
     const stagedRendererPath = path.join(stagingDir, DEFAULT_RENDERER_ENTRY);
     await fs.mkdir(path.dirname(stagedRendererPath), { recursive: true });
     await fs.writeFile(stagedRendererPath, renderAddonStandbyStub(), {

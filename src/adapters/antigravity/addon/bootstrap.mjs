@@ -1,8 +1,9 @@
 /**
- * AddonManifest.v1 lifecycle bootstrap & single-slot coordinator (SRP / DIP).
+ * AddonManifest.v2 lifecycle bootstrap & slot/portal coordinator (SRP / DIP).
  *
- * Strictly uses `RendererHostPort` (mountSlot / unmountSlot / injectStyle / removeStyle / onDispose).
- * Never creates `<style>` tags directly and never exposes `addonHost` or Sidecar credentials on `window`.
+ * Strictly uses `RendererHostPort` (mountSlot / unmountSlot / injectStyle / removeStyle / onDispose
+ * plus optional v2 openPopover / openModal portals).
+ * Never injects raw style tags directly and never exposes `addonHost` or Sidecar credentials on `window`.
  */
 
 export function startAddonStatusbar({
@@ -45,7 +46,39 @@ export function startAddonStatusbar({
     fallbackSessionId: '',
   };
 
-  hostPort.injectStyle(styleId, cssText || '');
+  const isV2Host = hostPort.schemaVersion === 2;
+  if (isV2Host && hostPort.slotId) {
+    hostPort.injectStyle(styleId, cssText || '', { slotId: hostPort.slotId });
+  } else {
+    hostPort.injectStyle(styleId, cssText || '');
+  }
+
+  const portalHost =
+    typeof hostPort.openPopover === 'function' || typeof hostPort.openModal === 'function'
+      ? Object.freeze({
+          openPopover:
+            typeof hostPort.openPopover === 'function'
+              ? (opts) => hostPort.openPopover(opts)
+              : undefined,
+          openModal:
+            typeof hostPort.openModal === 'function'
+              ? (opts) => hostPort.openModal(opts)
+              : undefined,
+          syncStyle(kind) {
+            const targetSlotId =
+              kind === 'popover'
+                ? hostPort.popoverSlotId
+                : kind === 'modal'
+                  ? hostPort.modalSlotId
+                  : hostPort.slotId;
+            if (targetSlotId) {
+              hostPort.injectStyle(`${styleId}:${kind}`, cssText || '', {
+                slotId: targetSlotId,
+              });
+            }
+          },
+        })
+      : null;
 
   const barView = createBarViewFn({ doc, i18n });
   const popoverView = createPopoverViewFn({ doc, i18n });
@@ -96,12 +129,14 @@ export function startAddonStatusbar({
 
   const controller = createBarControllerFn({
     doc,
+    win,
     api,
     i18n,
     addons,
     barView,
     popoverView,
     globalModalView,
+    portalHost,
     sharedState,
     onSettingsChanged(updated) {
       applySettingsPayload(updated);
@@ -162,6 +197,7 @@ export function startAddonStatusbar({
 
     activeBoxEl = boxEl;
     const slotEl = hostPort.mountSlot(boxEl);
+    if (!slotEl) return false;
     currentSlotEl = slotEl;
     if (controller.rootEl.parentNode !== slotEl) {
       slotEl.appendChild(controller.rootEl);
@@ -233,6 +269,19 @@ export function startAddonStatusbar({
     return false;
   }
 
+  function isOwnMutation(m) {
+    if (isOwnNode(m.target)) return true;
+    if (m.type === 'childList') {
+      const added = m.addedNodes ? Array.from(m.addedNodes) : [];
+      const removed = m.removedNodes ? Array.from(m.removedNodes) : [];
+      const changed = added.concat(removed);
+      if (changed.length > 0 && changed.every((n) => isOwnNode(n))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   const onFocusIn = () => {
     if (disposed) return;
     mountToActiveBox();
@@ -245,7 +294,7 @@ export function startAddonStatusbar({
       let sawCascadeAttr = false;
       let sawExternalChange = false;
       for (const m of mutations) {
-        if (isOwnNode(m.target)) continue;
+        if (isOwnMutation(m)) continue;
         sawExternalChange = true;
         if (m.type === 'attributes' && m.attributeName === 'data-cascade-id') {
           sawCascadeAttr = true;
@@ -267,7 +316,7 @@ export function startAddonStatusbar({
     });
   }
 
-  // Expose ONLY the frozen, credential-free StatusbarAddon.v1 registry in Isolated World 999
+  // Expose ONLY the frozen, credential-free StatusbarAddon.v1 registry in Isolated World 998
   if (win && typeof win === 'object') {
     try {
       win.statusbarAddons = addons.publicApi;
@@ -297,6 +346,12 @@ export function startAddonStatusbar({
     } catch {}
     try {
       hostPort.removeStyle(styleId);
+    } catch {}
+    try {
+      hostPort.removeStyle(`${styleId}:popover`);
+    } catch {}
+    try {
+      hostPort.removeStyle(`${styleId}:modal`);
     } catch {}
   }
 
@@ -331,7 +386,11 @@ export function startStandbyStatusbar({
   let observer = null;
   let currentSlotEl = null;
 
-  hostPort.injectStyle(styleId, cssText || '');
+  if (hostPort.schemaVersion === 2 && hostPort.slotId) {
+    hostPort.injectStyle(styleId, cssText || '', { slotId: hostPort.slotId });
+  } else {
+    hostPort.injectStyle(styleId, cssText || '');
+  }
 
   const barEl = doc.createElement('div');
   barEl.className = 'agy-inline-statusbar';
@@ -369,6 +428,7 @@ export function startStandbyStatusbar({
     if (boxes.length === 0) return false;
     const boxEl = boxes[boxes.length - 1];
     const slotEl = hostPort.mountSlot(boxEl);
+    if (!slotEl) return false;
     currentSlotEl = slotEl;
     if (barEl.parentNode !== slotEl) {
       slotEl.appendChild(barEl);
@@ -379,7 +439,13 @@ export function startStandbyStatusbar({
   if (typeof MutationObserver !== 'undefined' && doc.body) {
     observer = new MutationObserver(() => {
       if (disposed) return;
-      if (!currentSlotEl || !doc.contains(currentSlotEl)) {
+      const connected = Boolean(
+        currentSlotEl &&
+          (currentSlotEl.isConnected !== undefined
+            ? currentSlotEl.isConnected
+            : doc.contains(currentSlotEl)),
+      );
+      if (!connected) {
         mountIfFound();
       }
     });

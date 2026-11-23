@@ -1,12 +1,13 @@
 {
-  "$schema": "https://github.com/jaeseongs95/antigravity-native-addon-host/schemas/addon-manifest.v1.schema.json",
-  "schemaVersion": 1,
+  "$schema": "https://github.com/jaeseongs95/antigravity-native-addon-host/schemas/addon-manifest.v2.schema.json",
+  "schemaVersion": 2,
   "pluginId": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
   "version": "3.1.0",
+  "trustLevel": "restricted",
   "compatibility": {
     "hostProfile": "antigravity-desktop",
-    "minHostVersion": "1.0.1"
+    "minHostVersion": "2.0.0"
   },
   "capabilities": [
     "renderer"
@@ -20,7 +21,22 @@
       "slot": "status-bar",
       "slotId": "antigravity-statusbar.root",
       "exclusive": true,
-      "scope": "addon-owned-slot"
+      "scope": "addon-owned-slot",
+      "shadow": true
+    },
+    {
+      "slot": "overlay",
+      "slotId": "antigravity-statusbar.popover",
+      "exclusive": true,
+      "scope": "addon-owned-slot",
+      "shadow": true
+    },
+    {
+      "slot": "modal",
+      "slotId": "antigravity-statusbar.global-limit-modal",
+      "exclusive": true,
+      "scope": "addon-owned-slot",
+      "shadow": true
     }
   ],
   "isolation": {

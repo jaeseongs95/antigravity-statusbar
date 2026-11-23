@@ -5,12 +5,14 @@
 
 export function createBarController({
   doc,
+  win = null,
   api,
   i18n,
   addons,
   barView,
   popoverView,
   globalModalView = null,
+  portalHost = null,
   sharedState,
   onSettingsChanged,
   onBurstRequested,
@@ -20,8 +22,13 @@ export function createBarController({
     ? presets
     : [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
 
-  barView.barEl.appendChild(popoverView.popEl);
-  if (globalModalView && globalModalView.backdropEl) {
+  const hasPopoverPortal = Boolean(portalHost && typeof portalHost.openPopover === 'function');
+  const hasModalPortal = Boolean(portalHost && typeof portalHost.openModal === 'function');
+
+  if (!hasPopoverPortal) {
+    barView.barEl.appendChild(popoverView.popEl);
+  }
+  if (!hasModalPortal && globalModalView && globalModalView.backdropEl) {
     barView.barEl.appendChild(globalModalView.backdropEl);
   }
 
@@ -30,6 +37,9 @@ export function createBarController({
     viewEl: null,
     popOpen: false,
     modalOpen: false,
+    popoverPortalHandle: null,
+    modalPortalHandle: null,
+    modalBackdropListener: null,
     activeTab: 'context',
     lastTriggerEl: barView.settingsBtn,
     modalTriggerEl: barView.settingsBtn,
@@ -51,6 +61,52 @@ export function createBarController({
     syncedPromptVal: null,
     lastAutoErrAt: 0,
   };
+
+  function isElementFocused(el) {
+    if (!el) return false;
+    if (typeof el.getRootNode === 'function') {
+      try {
+        const root = el.getRootNode();
+        if (root && root !== doc && 'activeElement' in root) {
+          return root.activeElement === el;
+        }
+      } catch {}
+    }
+    return doc.activeElement === el;
+  }
+
+  function positionPopoverPortal(portalEl, anchorEl) {
+    if (!portalEl || !portalEl.style) return;
+    const viewWin = win || (typeof window !== 'undefined' ? window : null);
+    const vw =
+      viewWin && typeof viewWin.innerWidth === 'number' && viewWin.innerWidth > 0
+        ? viewWin.innerWidth
+        : 1280;
+    const vh =
+      viewWin && typeof viewWin.innerHeight === 'number' && viewWin.innerHeight > 0
+        ? viewWin.innerHeight
+        : 800;
+    let rect = null;
+    if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
+      try {
+        const r = anchorEl.getBoundingClientRect();
+        if (r && (r.width > 0 || r.height > 0 || r.top > 0 || r.right > 0)) {
+          rect = r;
+        }
+      } catch {}
+    }
+    portalEl.style.top = 'auto';
+    portalEl.style.left = 'auto';
+    if (rect) {
+      const bottomPx = Math.max(8, Math.min(vh - 64, Math.round(vh - rect.top + 8)));
+      const rightPx = Math.max(8, Math.min(vw - 260, Math.round(vw - rect.right)));
+      portalEl.style.bottom = `${bottomPx}px`;
+      portalEl.style.right = `${rightPx}px`;
+    } else {
+      portalEl.style.bottom = '48px';
+      portalEl.style.right = '12px';
+    }
+  }
 
   function getSessionId() {
     if (state.viewEl && typeof state.viewEl.getAttribute === 'function') {
@@ -145,8 +201,8 @@ export function createBarController({
       if (state.limitDirty) return;
       if (state.syncedLimitKey === nextKey) return;
       if (
-        doc.activeElement === popoverView.customInput ||
-        doc.activeElement === popoverView.presetSelect
+        isElementFocused(popoverView.customInput) ||
+        isElementFocused(popoverView.presetSelect)
       ) {
         return;
       }
@@ -163,7 +219,7 @@ export function createBarController({
     if (!force) {
       if (state.promptDirty) return;
       if (state.syncedPromptVal === sharedState.compactPrompt) return;
-      if (doc.activeElement === popoverView.compactPromptInput) return;
+      if (isElementFocused(popoverView.compactPromptInput)) return;
     }
     state.syncedPromptVal = sharedState.compactPrompt;
     state.promptDirty = false;
@@ -178,11 +234,82 @@ export function createBarController({
     barView.setExpandedState({ open: state.popOpen, activeTab: state.activeTab });
   }
 
+  function finalizePopoverClosed() {
+    state.popoverPortalHandle = null;
+    state.popOpen = false;
+    popoverView.setVisible(false);
+    popoverView.popEl.classList.remove('agy-inline-popover-portal');
+    if (hasPopoverPortal) {
+      try {
+        popoverView.popEl.remove();
+      } catch {}
+    }
+    barView.setExpandedState({ open: false, activeTab: state.activeTab });
+  }
+
   function setPopoverOpen(open, tab, triggerEl) {
     const nextOpen = Boolean(open);
     const wasOpen = state.popOpen;
     if (triggerEl) state.lastTriggerEl = triggerEl;
     if (tab) setActiveTab(tab);
+
+    if (hasPopoverPortal) {
+      if (nextOpen) {
+        if (!state.popoverPortalHandle) {
+          const handle = portalHost.openPopover({
+            ignoreOutsideClickEls: [barView.ctxBtn, barView.settingsBtn],
+            onClose: finalizePopoverClosed,
+          });
+          if (!handle) return;
+          state.popoverPortalHandle = handle;
+          if (handle.element && handle.element.style) {
+            handle.element.style.margin = '0';
+            handle.element.style.padding = '0';
+            handle.element.style.border = 'none';
+            handle.element.style.background = 'transparent';
+            handle.element.style.color = 'inherit';
+            handle.element.style.overflow = 'visible';
+            handle.element.style.position = 'fixed';
+            handle.element.style.inset = 'auto';
+          }
+          positionPopoverPortal(handle.element, state.lastTriggerEl || barView.barEl);
+          if (typeof portalHost.syncStyle === 'function') {
+            portalHost.syncStyle('popover');
+          }
+          popoverView.popEl.classList.add('agy-inline-popover-portal');
+          const mountTarget = handle.bodyEl || handle.element;
+          if (mountTarget && popoverView.popEl.parentNode !== mountTarget) {
+            mountTarget.appendChild(popoverView.popEl);
+          }
+        } else {
+          positionPopoverPortal(
+            state.popoverPortalHandle.element,
+            state.lastTriggerEl || barView.barEl,
+          );
+        }
+        state.popOpen = true;
+        popoverView.setVisible(true);
+        barView.setExpandedState({ open: true, activeTab: state.activeTab });
+        if (!wasOpen) {
+          showFeedback('', false);
+          syncLimitControls(true);
+          syncCompactPrompt(true);
+        }
+      } else if (state.popoverPortalHandle) {
+        const handle = state.popoverPortalHandle;
+        state.popoverPortalHandle = null;
+        try {
+          handle.close();
+        } catch {}
+        if (state.popOpen) {
+          finalizePopoverClosed();
+        }
+      } else {
+        finalizePopoverClosed();
+      }
+      return;
+    }
+
     state.popOpen = nextOpen;
     popoverView.setVisible(state.popOpen);
     barView.setExpandedState({ open: state.popOpen, activeTab: state.activeTab });
@@ -363,10 +490,72 @@ export function createBarController({
     });
   }
 
+  function finalizeModalClosed() {
+    if (state.modalBackdropListener && state.modalPortalHandle?.element) {
+      try {
+        state.modalPortalHandle.element.removeEventListener('click', state.modalBackdropListener);
+      } catch {}
+    }
+    state.modalBackdropListener = null;
+    state.modalPortalHandle = null;
+    state.modalOpen = false;
+    if (hasModalPortal && globalModalView && globalModalView.dialogEl) {
+      try {
+        globalModalView.dialogEl.remove();
+      } catch {}
+    }
+  }
+
   function openGlobalModal(triggerEl) {
     if (!globalModalView) return;
-    state.modalTriggerEl = triggerEl || barView.settingsBtn;
+    const returnTarget = hasPopoverPortal && state.popOpen
+      ? state.lastTriggerEl || barView.settingsBtn
+      : triggerEl || barView.settingsBtn;
+    state.modalTriggerEl = returnTarget;
     setPopoverOpen(false);
+
+    if (hasModalPortal) {
+      if (!state.modalPortalHandle) {
+        const handle = portalHost.openModal({
+          onClose: finalizeModalClosed,
+        });
+        if (!handle) return;
+        state.modalPortalHandle = handle;
+        if (handle.element && handle.element.style) {
+          handle.element.style.padding = '0';
+          handle.element.style.border = 'none';
+          handle.element.style.background = 'transparent';
+          handle.element.style.color = 'inherit';
+          handle.element.style.overflow = 'visible';
+          handle.element.style.maxWidth = 'calc(100vw - 32px)';
+          handle.element.style.maxHeight = 'calc(100vh - 56px)';
+        }
+        const onDialogBackdropClick = (e) => {
+          if (e && e.target === handle.element) {
+            closeGlobalModal(true);
+          }
+        };
+        if (handle.element && typeof handle.element.addEventListener === 'function') {
+          handle.element.addEventListener('click', onDialogBackdropClick);
+          state.modalBackdropListener = onDialogBackdropClick;
+        }
+        if (typeof portalHost.syncStyle === 'function') {
+          portalHost.syncStyle('modal');
+        }
+        const mountTarget = handle.bodyEl || handle.element;
+        if (mountTarget && globalModalView.dialogEl.parentNode !== mountTarget) {
+          mountTarget.appendChild(globalModalView.dialogEl);
+        }
+      }
+      state.modalOpen = true;
+      showModalFeedback('', false);
+      renderGlobalModal(true);
+      try {
+        globalModalView.defaultInput.focus();
+      } catch {}
+      return;
+    }
+
     state.modalOpen = true;
     showModalFeedback('', false);
     renderGlobalModal(true);
@@ -378,6 +567,21 @@ export function createBarController({
 
   function closeGlobalModal(returnFocus = true) {
     if (!globalModalView || !state.modalOpen) return;
+    if (hasModalPortal && state.modalPortalHandle) {
+      const handle = state.modalPortalHandle;
+      try {
+        handle.close();
+      } catch {}
+      if (state.modalOpen) {
+        finalizeModalClosed();
+      }
+      if (returnFocus) {
+        try {
+          (state.modalTriggerEl || barView.settingsBtn).focus();
+        } catch {}
+      }
+      return;
+    }
     state.modalOpen = false;
     globalModalView.setVisible(false);
     if (returnFocus) {
@@ -651,10 +855,13 @@ export function createBarController({
   const onKeyDown = (e) => {
     if (e.key === 'Escape') {
       if (state.modalOpen) {
+        // When host v2 ModalPortal owns the modal, host capture-phase Escape closes it (LIFO).
+        if (state.modalPortalHandle) return;
         closeGlobalModal(true);
         return;
       }
       if (state.popOpen) {
+        if (state.popoverPortalHandle) return;
         setPopoverOpen(false);
         try {
           (state.lastTriggerEl || barView.settingsBtn).focus();
@@ -663,7 +870,7 @@ export function createBarController({
     }
   };
   const onDocPointerDown = (e) => {
-    if (!state.popOpen) return;
+    if (!state.popOpen || state.popoverPortalHandle) return;
     const target = e.target;
     if (
       popoverView.popEl.contains(target) ||
@@ -867,6 +1074,18 @@ export function createBarController({
     if (state.modalFeedbackTimer) clearTimeout(state.modalFeedbackTimer);
     if (state.noteTimer) clearTimeout(state.noteTimer);
     if (state.abortCtrl) state.abortCtrl.abort();
+    if (state.modalPortalHandle) {
+      try {
+        state.modalPortalHandle.close();
+      } catch {}
+      finalizeModalClosed();
+    }
+    if (state.popoverPortalHandle) {
+      try {
+        state.popoverPortalHandle.close();
+      } catch {}
+      finalizePopoverClosed();
+    }
     doc.removeEventListener('keydown', onKeyDown);
     doc.removeEventListener('pointerdown', onDocPointerDown);
     try {

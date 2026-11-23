@@ -591,3 +591,244 @@ test('TC-ADDON-08: standby stub mounts via addonHost with zero credentials, trig
   assert.equal(host.slots.size, 0);
   assert.equal(host.styles.size, 0);
 });
+
+test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { container }, routes styles per slotId, and uses host v2 openPopover & openModal portals cleanly', async () => {
+  const { doc, MockElement, createConversationView } = createMockDom();
+  const v1 = createConversationView('sess-v2-alpha');
+  const v2 = createConversationView('sess-v2-beta');
+  v1.editor.focus();
+
+  const pluginId = 'antigravity-statusbar';
+  const allowedSlots = new Map([
+    ['antigravity-statusbar.root', 'status-bar'],
+    ['antigravity-statusbar.popover', 'overlay'],
+    ['antigravity-statusbar.global-limit-modal', 'modal'],
+  ]);
+  const mountedSlots = new Map();
+  const styleRecords = [];
+  const portals = [];
+  const disposers = [];
+  let disposed = false;
+
+  const v2HostHandle = Object.freeze({
+    pluginId,
+    version: '3.1.0',
+    trustLevel: 'restricted',
+    schemaVersion: 2,
+    sourceSchemaVersion: 2,
+    mountSlot(slotId, opts = {}) {
+      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
+      if (!allowedSlots.has(slotId)) throw new Error(`ERR_UNDECLARED_SLOT:${pluginId}:${slotId}`);
+      const existing = mountedSlots.get(slotId);
+      if (existing && existing.hostEl.parentNode) {
+        return existing.rootEl;
+      }
+      // Strictly enforces v2 `{ container }` contract (bare HTMLElement has no `.container` -> returns null!)
+      const container = opts && opts.container ? opts.container : null;
+      if (!container) return null;
+      const hostEl = new MockElement('div', doc);
+      hostEl.setAttribute('data-addon-host-owner', pluginId);
+      hostEl.setAttribute('data-addon-host-slot', slotId);
+      hostEl.setAttribute('translate', 'no');
+      container.appendChild(hostEl);
+      // Simulate open ShadowRoot inner `<div class="addon-host-slot-root">`
+      const rootEl = new MockElement('div', doc);
+      rootEl.className = 'addon-host-slot-root';
+      rootEl.setAttribute('data-addon-host-owner', pluginId);
+      rootEl.setAttribute('data-addon-host-slot', slotId);
+      rootEl.isConnected = true;
+      mountedSlots.set(slotId, { hostEl, rootEl, container });
+      return rootEl;
+    },
+    unmountSlot(slotId) {
+      const rec = mountedSlots.get(slotId);
+      if (!rec) return false;
+      rec.hostEl.remove();
+      rec.rootEl.isConnected = false;
+      mountedSlots.delete(slotId);
+      return true;
+    },
+    injectStyle(styleId, cssText, opts = {}) {
+      styleRecords.push({ styleId, slotId: opts.slotId || null, length: String(cssText || '').length });
+      return { styleId };
+    },
+    removeStyle(styleId) {
+      return Boolean(styleId);
+    },
+    openPopover(slotId, opts = {}) {
+      if (allowedSlots.get(slotId) !== 'overlay') throw new Error(`ERR_INVALID_POPOVER_SLOT_KIND:${slotId}`);
+      const pop = new MockElement('div', doc);
+      pop.setAttribute('popover', 'manual');
+      pop.setAttribute('data-addon-host-popover', '1');
+      pop.setAttribute('data-addon-host-owner', pluginId);
+      pop.setAttribute('data-addon-host-slot', slotId);
+      const bodyEl = new MockElement('div', doc);
+      bodyEl.className = 'addon-host-slot-root';
+      pop.appendChild(bodyEl);
+      doc.body.appendChild(pop);
+      let closed = false;
+      const entry = {
+        kind: 'popover',
+        slotId,
+        element: pop,
+        bodyEl,
+        ignoreOutsideClickEls: opts.ignoreOutsideClickEls || [],
+        isClosed: () => closed,
+        close() {
+          if (closed) return;
+          closed = true;
+          pop.remove();
+          if (typeof opts.onClose === 'function') opts.onClose();
+        },
+      };
+      portals.push(entry);
+      return Object.freeze({ id: `popover-${portals.length}`, element: pop, bodyEl, close: entry.close });
+    },
+    openModal(slotId, opts = {}) {
+      if (allowedSlots.get(slotId) !== 'modal') throw new Error(`ERR_INVALID_MODAL_SLOT_KIND:${slotId}`);
+      const dlg = new MockElement('dialog', doc);
+      dlg.setAttribute('data-addon-host-modal-dialog', '1');
+      dlg.setAttribute('data-addon-host-owner', pluginId);
+      dlg.setAttribute('data-addon-host-slot', slotId);
+      const bodyEl = new MockElement('div', doc);
+      bodyEl.className = 'addon-host-slot-root';
+      dlg.appendChild(bodyEl);
+      doc.body.appendChild(dlg);
+      let closed = false;
+      const entry = {
+        kind: 'modal',
+        slotId,
+        element: dlg,
+        bodyEl,
+        isClosed: () => closed,
+        close() {
+          if (closed) return;
+          closed = true;
+          dlg.remove();
+          if (typeof opts.onClose === 'function') opts.onClose();
+        },
+      };
+      portals.push(entry);
+      return Object.freeze({ id: `modal-${portals.length}`, element: dlg, bodyEl, close: entry.close });
+    },
+    onDispose(fn) {
+      disposers.push(fn);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const fn of disposers.splice(0)) fn();
+      for (const p of portals) p.close();
+      for (const slotId of Array.from(mountedSlots.keys())) {
+        mountedSlots.get(slotId).hostEl.remove();
+      }
+      mountedSlots.clear();
+    },
+  });
+
+  const sandboxWindow = { innerWidth: 1440, innerHeight: 900, location: { reload() {} } };
+  const bundleSource = renderAddonRendererBundle({
+    baseUrl: 'http://127.0.0.1:45555',
+    token: TEST_TOKEN,
+  });
+
+  vm.runInNewContext(
+    `(function(addonHost){\n${bundleSource}\n})(addonHost);`,
+    {
+      window: sandboxWindow,
+      document: doc,
+      addonHost: v2HostHandle,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      fetch: async (url) => {
+        const pathname = new URL(url).pathname;
+        if (pathname === '/api/settings/get') {
+          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, defaultCustomLimit: 200000, modelLimits: [], sessions: [], customButtons: [], disabledRuntimeAddonIds: [] }; } };
+        }
+        if (pathname === '/api/quota') {
+          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+        }
+        if (pathname === '/api/sessions') {
+          return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-v2-alpha' }] }; } };
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              sessionId: 'sess-v2-alpha',
+              modelName: 'Gemini 4 Neon',
+              usedTokens: 64000,
+              effectiveLimit: 200000,
+              maxContextTokens: 512000,
+              limitSource: 'default',
+              usagePercent: 32,
+              compaction: { inProgress: false, lastError: null },
+            };
+          },
+        };
+      },
+    },
+  );
+  await flushMicrotasks();
+
+  // 1. Mounted inside ShadowRoot slot via `{ container: v1.box }` & root CSS routed to slotId
+  const rootRec = mountedSlots.get('antigravity-statusbar.root');
+  assert.ok(rootRec, 'v2 mountSlot({ container }) must mount root slot');
+  assert.equal(rootRec.container, v1.box);
+  assert.ok(
+    styleRecords.some((r) => r.styleId === 'statusbar-main' && r.slotId === 'antigravity-statusbar.root'),
+    'Root style must route to root slotId',
+  );
+
+  // 2. Clicking ctxBtn opens host v2 `openPopover` portal (NOT inline child of barEl)
+  const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
+  assert.ok(ctxBtn);
+  ctxBtn.getBoundingClientRect = () => ({ top: 860, right: 420, width: 120, height: 24 });
+  ctxBtn.click();
+  const popPortal = portals.find((p) => p.kind === 'popover');
+  assert.ok(popPortal, 'Popover must open via host v2 openPopover');
+  assert.equal(popPortal.slotId, 'antigravity-statusbar.popover');
+  assert.equal(popPortal.isClosed(), false);
+  assert.ok(popPortal.ignoreOutsideClickEls.includes(ctxBtn));
+  assert.ok(
+    styleRecords.some((r) => r.styleId === 'statusbar-main:popover' && r.slotId === 'antigravity-statusbar.popover'),
+    'Popover style must route to popover slotId',
+  );
+  const popEl = popPortal.bodyEl.querySelector('.agy-inline-popover');
+  assert.ok(popEl && popEl.classList.contains('agy-inline-popover-portal'));
+  assert.equal(popPortal.element.style.position, 'fixed');
+
+  // 3. Clicking Global Limit Modal button inside popover closes popover portal & opens host v2 `<dialog>` openModal
+  const modalTrigger = popEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('전역'));
+  assert.ok(modalTrigger);
+  modalTrigger.click();
+  assert.equal(popPortal.isClosed(), true, 'Popover portal must close when opening Global Limit modal');
+  const modalPortal = portals.find((p) => p.kind === 'modal');
+  assert.ok(modalPortal, 'Global Limit Modal must open via host v2 openModal');
+  assert.equal(modalPortal.slotId, 'antigravity-statusbar.global-limit-modal');
+  assert.equal(modalPortal.element.tagName, 'DIALOG');
+  assert.ok(
+    styleRecords.some((r) => r.styleId === 'statusbar-main:modal' && r.slotId === 'antigravity-statusbar.global-limit-modal'),
+    'Modal style must route to modal slotId',
+  );
+  assert.ok(modalPortal.bodyEl.querySelector('.agy-inline-modal'));
+
+  // Backdrop click on `<dialog>` element closes modal portal cleanly
+  modalPortal.element.dispatchEvent({ type: 'click', target: modalPortal.element });
+  assert.equal(modalPortal.isClosed(), true, 'Backdrop click on <dialog> must close modal portal');
+
+  // 4. Switching active conversation tab unmounts old v1.box slot and remounts into v2.box!
+  v2.editor.focus();
+  doc.dispatchEvent({ type: 'focusin', target: v2.editor });
+  const movedRec = mountedSlots.get('antigravity-statusbar.root');
+  assert.equal(movedRec.container, v2.box, 'Tab switch must unmount and remount v2 Shadow slot into new active box');
+
+  // 5. Dispose cleans up slots and portals
+  v2HostHandle.dispose();
+  assert.equal(mountedSlots.size, 0);
+  assert.equal(sandboxWindow.statusbarAddons, undefined);
+});
