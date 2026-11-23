@@ -4,12 +4,14 @@ import test from 'node:test';
 import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
 import { DomainError, ERROR_CODES } from '../../src/core/i18n/error-codes.mjs';
 import {
+  MAX_COMPACT_PROMPT_LEN,
   MAX_CUSTOM_LIMIT,
   MAX_SESSION_OVERRIDES,
   MIN_CUSTOM_LIMIT,
   evaluateContextThreshold,
   pruneSessionOverrides,
   resolveEffectiveLimit,
+  validateCompactPrompt,
   validateCustomLimit,
   validateSessionId,
 } from '../../src/core/model/context-policy.mjs';
@@ -104,6 +106,7 @@ test('statusbar-service enforces cross-session isolation (D-0033) and releases m
 
   const settingsState = {
     locale: 'en',
+    autoCompact: false,
     defaultCustomLimit: null,
     sessions: new Map([['sess-A', { limit: 128_000, updatedAt: 100 }]]),
   };
@@ -252,4 +255,191 @@ test('R2-F1: repeated /compact does NOT prematurely clear mutex when lastCompact
   const snap2 = await service.getSessionSnapshot('sess-repeat');
   assert.equal(snap2.compaction.inProgress, false);
   assert.equal(snap2.compaction.status, 'completed');
+});
+
+test('auto-compact fires immediately while RUNNING without looping and re-arms after drop', async () => {
+  let now = 5_000_000;
+  let compactCalls = 0;
+  let telemetry = {
+    sessionId: 'sess-auto',
+    status: 'CASCADE_RUN_STATUS_RUNNING',
+    stepCount: 10,
+    usedTokens: 280_000,
+    maxContextTokens: 512_000,
+    lastCompactedStep: null,
+    compactionJustCompleted: false,
+    tokenBreakdown: [],
+  };
+
+  const service = createStatusbarService({
+    clock: () => now,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => telemetry,
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: now }),
+    },
+    compactionPort: {
+      compactSession: async () => {
+        compactCalls += 1;
+        return { accepted: true, method: 'rpc' };
+      },
+    },
+    settingsPort: {
+      read: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        defaultCustomLimit: null,
+        sessions: new Map([['sess-auto', { limit: 256_000, updatedAt: 100 }]]),
+      }),
+      update: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        defaultCustomLimit: null,
+        sessions: new Map([['sess-auto', { limit: 256_000, updatedAt: 100 }]]),
+      }),
+    },
+  });
+
+  // 1. Crossing limit while RUNNING -> queues auto-compact IMMEDIATELY once
+  const snapRunning = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapRunning.autoCompactTriggered, true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(compactCalls, 1);
+
+  // 2. Transitioning to IDLE while still waiting for drop -> MUST NOT double-fire
+  telemetry = { ...telemetry, status: 'CASCADE_RUN_STATUS_IDLE' };
+  const snapIdle1 = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapIdle1.autoCompactTriggered, false);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(compactCalls, 1);
+
+  // 3. Even after 120s cooldown, if tokens stayed stuck at 280K without dropping or growing -> MUST NOT loop!
+  now += 120_000;
+  const snapIdle2 = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapIdle2.autoCompactTriggered, false);
+  assert.equal(compactCalls, 1);
+
+  // 4. After tokens drop below limit (120K < 256K), auto-compact re-arms
+  telemetry = { ...telemetry, usedTokens: 120_000, stepCount: 12 };
+  const snapDropped = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapDropped.exceededSoftLimit, false);
+  assert.equal(snapDropped.autoCompactTriggered, false);
+
+  // 5. Crossing limit again after re-arm -> fires ONCE
+  telemetry = { ...telemetry, usedTokens: 260_000, stepCount: 20 };
+  const snapCrossAgain = await service.getSessionSnapshot('sess-auto');
+  assert.equal(snapCrossAgain.autoCompactTriggered, true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(compactCalls, 2);
+});
+
+test('large-session compaction detects completion via significant token drop when lastCompactedStep is null', async () => {
+  let now = 6_000_000;
+  let telemetry = {
+    sessionId: 'sess-large',
+    status: 'CASCADE_RUN_STATUS_IDLE',
+    stepCount: 17_500,
+    usedTokens: 298_000,
+    maxContextTokens: 512_000,
+    lastCompactedStep: null,
+    compactionJustCompleted: false,
+    tokenBreakdown: [],
+  };
+
+  const service = createStatusbarService({
+    clock: () => now,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => telemetry,
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: now }),
+    },
+    compactionPort: {
+      compactSession: async () => ({ accepted: true, method: 'rpc' }),
+    },
+    settingsPort: {
+      read: async () => ({ locale: 'ko', autoCompact: false, defaultCustomLimit: null, sessions: new Map() }),
+      update: async () => ({ locale: 'ko', autoCompact: false, defaultCustomLimit: null, sessions: new Map() }),
+    },
+  });
+
+  const req = await service.requestCompaction('sess-large');
+  assert.equal(req.accepted, true);
+  assert.equal(req.trigger, 'manual');
+
+  // Before token drop -> still inProgress
+  const snap1 = await service.getSessionSnapshot('sess-large');
+  assert.equal(snap1.compaction.inProgress, true);
+  assert.equal(snap1.compaction.trigger, 'manual');
+
+  // After token drop (298K -> 108K) -> immediately clears mutex and reports completed
+  telemetry = { ...telemetry, usedTokens: 108_000 };
+  const snap2 = await service.getSessionSnapshot('sess-large');
+  assert.equal(snap2.compaction.inProgress, false);
+  assert.equal(snap2.compaction.status, 'completed');
+
+  // Host-initiated /compact (typed directly in chat) surfaces compaction.inProgress via hostCompactionInProgress
+  telemetry = { ...telemetry, hostCompactionInProgress: true };
+  const snapHostRunning = await service.getSessionSnapshot('sess-large');
+  assert.equal(snapHostRunning.compaction.inProgress, true);
+  assert.equal(snapHostRunning.compaction.status, 'running');
+  assert.equal(snapHostRunning.compaction.method, 'host');
+});
+
+test('compactPrompt validates bounds, persists via updateSettings, and forwards to compactSession', async () => {
+  assert.equal(validateCompactPrompt(null), '');
+  assert.equal(validateCompactPrompt('  요약해줘  '), '요약해줘');
+  assert.throws(
+    () => validateCompactPrompt('a'.repeat(MAX_COMPACT_PROMPT_LEN + 1)),
+    (err) => err instanceof DomainError && err.code === ERROR_CODES.INVALID_SETTINGS_PATCH,
+  );
+  assert.throws(
+    () => validateCompactPrompt('bad\0null'),
+    (err) => err instanceof DomainError && err.code === ERROR_CODES.INVALID_SETTINGS_PATCH,
+  );
+
+  const settingsState = {
+    locale: 'ko',
+    autoCompact: true,
+    compactPrompt: '',
+    defaultCustomLimit: null,
+    sessions: new Map(),
+  };
+  const receivedPrompts = [];
+
+  const service = createStatusbarService({
+    clock: () => 7_000_000,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async () => ({
+        sessionId: 'sess-prompt',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        usedTokens: 50_000,
+        maxContextTokens: 512_000,
+        lastCompactedStep: null,
+        tokenBreakdown: [],
+      }),
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: 0 }),
+    },
+    compactionPort: {
+      compactSession: async (_sid, opts) => {
+        receivedPrompts.push(opts?.prompt ?? '');
+        return { accepted: true, method: 'rpc' };
+      },
+    },
+    settingsPort: {
+      read: async () => settingsState,
+      update: async (patch) => {
+        if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
+          settingsState.compactPrompt = patch.compactPrompt;
+        }
+        return settingsState;
+      },
+    },
+  });
+
+  const updated = await service.updateSettings({ compactPrompt: '  수정 중인 파일 위주로 요약  ' });
+  assert.equal(updated.compactPrompt, '수정 중인 파일 위주로 요약');
+
+  await service.requestCompaction('sess-prompt');
+  assert.deepEqual(receivedPrompts, ['수정 중인 파일 위주로 요약']);
 });

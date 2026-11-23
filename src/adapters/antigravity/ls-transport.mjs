@@ -194,6 +194,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
                 ERROR_CODES.TELEMETRY_UNAVAILABLE,
                 502,
                 `LS RPC ${method} exceeded 4MB response cap.`,
+                { reason: 'RESPONSE_CAP_EXCEEDED' },
               ),
             );
             return;
@@ -433,64 +434,217 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     });
   }
 
+  const MAX_TAIL_CACHE = 64;
+  const tailOffsetCache = new Map();
+
+  function rememberTailEnd(cascadeId, endOffset) {
+    if (!cascadeId || !Number.isFinite(endOffset) || endOffset <= 0) return;
+    if (tailOffsetCache.has(cascadeId)) tailOffsetCache.delete(cascadeId);
+    tailOffsetCache.set(cascadeId, Math.floor(endOffset));
+    while (tailOffsetCache.size > MAX_TAIL_CACHE) {
+      const oldest = tailOffsetCache.keys().next().value;
+      if (oldest === undefined) break;
+      tailOffsetCache.delete(oldest);
+    }
+  }
+
+  function isOversizeResponseError(err) {
+    return Boolean(
+      err?.details?.reason === 'RESPONSE_CAP_EXCEEDED' ||
+        (typeof err?.message === 'string' && err.message.includes('4MB')),
+    );
+  }
+
   /**
    * Bounded overshoot tail reader for GetCascadeTrajectoryGeneratorMetadata (-20/-60/-180).
-   * F2: When approxIndex is missing/<=0, probes offset=0 first and falls back to bounded tail
-   * probes (e.g. if offset=0 exceeds 4MB on a large trajectory).
+   * F2: When approxIndex is missing/<=0, uses cached tail offset for O(1) subsequent polls;
+   * on cache miss, probes offset=0 first and falls back to bounded exponential + binary
+   * search to land cleanly on the final <4MB tail window in O(log N) calls.
+   * ISS-04: Only probes/falls back on RESPONSE_CAP_EXCEEDED (>4MB); non-oversize errors
+   * (504 timeouts, connection failures, 502 upstream errors) propagate immediately.
    *
    * @param {string} cascadeId
    * @param {number | null} approxIndex
    */
   async function getTailGeneratorMetadata(cascadeId, approxIndex) {
-    const base =
+    const hasUsefulChatModel = (list) =>
+      list.some((item) => {
+        const cm =
+          item?.chatModel ||
+          (item?.metadata?.case === 'chatModel' ? item.metadata.value : null);
+        if (!cm) return false;
+        const hasNonEmptyUsage = Boolean(
+          cm.usage && (cm.usage.inputTokens != null || cm.usage.cacheReadTokens != null),
+        );
+        return Boolean(
+          hasNonEmptyUsage ||
+            cm.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups ||
+            cm.modelDisplayName ||
+            cm.model,
+        );
+      });
+
+    async function fetchOffset(offset) {
+      const resp = await callUnaryRpc('GetCascadeTrajectoryGeneratorMetadata', {
+        cascadeId,
+        generatorMetadataOffset: offset,
+      });
+      return Array.isArray(resp?.generatorMetadata) ? resp.generatorMetadata : [];
+    }
+
+    const explicitBase =
       typeof approxIndex === 'number' && Number.isFinite(approxIndex) && approxIndex > 0
         ? Math.floor(approxIndex)
         : 0;
+    const cachedBase = explicitBase === 0 ? tailOffsetCache.get(cascadeId) || 0 : 0;
+    const base = explicitBase > 0 ? explicitBase : cachedBase;
 
-    const offsets =
-      base > 0
-        ? [Math.max(0, base - 20), Math.max(0, base - 60), Math.max(0, base - 180)]
-        : [0, 1000, 500, 200, 50];
-
-    const seenOffsets = new Set();
-    for (const offset of offsets) {
-      if (seenOffsets.has(offset)) continue;
-      seenOffsets.add(offset);
-
-      let resp;
-      try {
-        resp = await callUnaryRpc('GetCascadeTrajectoryGeneratorMetadata', {
-          cascadeId,
-          generatorMetadataOffset: offset,
-        });
-      } catch {
-        // Continue probing smaller tail offsets if offset=0 overflowed 4MB cap
-        continue;
-      }
-      const list = Array.isArray(resp?.generatorMetadata) ? resp.generatorMetadata : [];
-      if (list.length > 0) {
-        // F4 & NB1: Accept items carrying non-empty usage, chatStartMetadata, modelDisplayName, or model
-        const hasUsefulChatModel = list.some((item) => {
-          const cm =
-            item?.chatModel ||
-            (item?.metadata?.case === 'chatModel' ? item.metadata.value : null);
-          if (!cm) return false;
-          const hasNonEmptyUsage = Boolean(
-            cm.usage && (cm.usage.inputTokens != null || cm.usage.cacheReadTokens != null),
-          );
-          return Boolean(
-            hasNonEmptyUsage ||
-              cm.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown?.groups ||
-              cm.modelDisplayName ||
-              cm.model,
-          );
-        });
-        if (hasUsefulChatModel || offset === 0) {
+    if (base > 0) {
+      const offsets = [
+        Math.max(0, base - 20),
+        Math.max(0, base - 5),
+        base,
+        Math.max(0, base - 60),
+        Math.max(0, base - 180),
+      ];
+      const seenOffsets = new Set();
+      for (const offset of offsets) {
+        if (seenOffsets.has(offset)) continue;
+        seenOffsets.add(offset);
+        let list;
+        try {
+          list = await fetchOffset(offset);
+        } catch (err) {
+          if (!isOversizeResponseError(err)) throw err;
+          continue;
+        }
+        if (list.length > 0 && (hasUsefulChatModel(list) || offset === 0)) {
+          rememberTailEnd(cascadeId, offset + list.length);
           return list;
         }
       }
+      if (cachedBase > 0) {
+        tailOffsetCache.delete(cascadeId);
+      } else {
+        return [];
+      }
     }
+
+    // Fast path for normal trajectories: offset = 0
+    try {
+      const list = await fetchOffset(0);
+      if (list.length > 0) {
+        rememberTailEnd(cascadeId, list.length);
+        return list;
+      }
+      return [];
+    } catch (err) {
+      if (!isOversizeResponseError(err)) throw err;
+      // offset = 0 overflowed 4MB cap -> exponential + binary tail search
+    }
+
+    let lowOverflow = 0;
+    let highEmpty = null;
+    let probe = 256;
+    const MAX_PROBE = 262_144;
+
+    while (probe <= MAX_PROBE) {
+      try {
+        const list = await fetchOffset(probe);
+        if (list.length > 0) {
+          if (hasUsefulChatModel(list)) {
+            rememberTailEnd(cascadeId, probe + list.length);
+            return list;
+          }
+          // Step back slightly if tail slice only had non-chatModel entries
+          const backOffset = Math.max(lowOverflow + 1, probe - 64);
+          try {
+            const wider = await fetchOffset(backOffset);
+            if (wider.length > 0) {
+              rememberTailEnd(cascadeId, backOffset + wider.length);
+              return wider;
+            }
+          } catch (backErr) {
+            if (!isOversizeResponseError(backErr)) throw backErr;
+          }
+          rememberTailEnd(cascadeId, probe + list.length);
+          return list;
+        }
+        highEmpty = probe;
+        break;
+      } catch (err) {
+        if (!isOversizeResponseError(err)) throw err;
+        lowOverflow = probe;
+        probe *= 2;
+      }
+    }
+
+    if (highEmpty === null) {
+      return [];
+    }
+
+    // Binary search between lowOverflow (exceeds 4MB) and highEmpty (0 items)
+    let lo = lowOverflow;
+    let hi = highEmpty;
+    for (let iter = 0; iter < 12 && hi - lo > 1; iter += 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      try {
+        const list = await fetchOffset(mid);
+        if (list.length > 0) {
+          rememberTailEnd(cascadeId, mid + list.length);
+          return list;
+        }
+        hi = mid;
+      } catch (err) {
+        if (!isOversizeResponseError(err)) throw err;
+        lo = mid;
+      }
+    }
+
     return [];
+  }
+
+  /**
+   * Bounded tail step reader for GetCascadeTrajectorySteps.
+   * Used when StreamAgentStateUpdates exceeds the 4MB cap so completed or in-progress
+   * CORTEX_STEP_TYPE_CHECKPOINT (/compact) steps are detected immediately before the next LLM turn.
+   *
+   * @param {string} cascadeId
+   * @param {number | null} stepCount
+   * @returns {Promise<{ stepOffset: number, steps: unknown[] }>}
+   */
+  async function getTailTrajectorySteps(cascadeId, stepCount) {
+    const total =
+      typeof stepCount === 'number' && Number.isFinite(stepCount) && stepCount > 0
+        ? Math.floor(stepCount)
+        : 0;
+    if (!cascadeId || total <= 0) {
+      return { stepOffset: 0, steps: [] };
+    }
+
+    const candidateOffsets = [
+      Math.max(0, total - 12),
+      Math.max(0, total - 4),
+      Math.max(0, total - 1),
+    ];
+    const seen = new Set();
+    for (const stepOffset of candidateOffsets) {
+      if (seen.has(stepOffset)) continue;
+      seen.add(stepOffset);
+      try {
+        const resp = await callUnaryRpc('GetCascadeTrajectorySteps', {
+          cascadeId,
+          stepOffset,
+        });
+        const steps = Array.isArray(resp?.steps) ? resp.steps : [];
+        return { stepOffset, steps };
+      } catch (err) {
+        if (!isOversizeResponseError(err)) throw err;
+        // Retry a narrower tail window only if an earlier step contained a >4MB payload
+        continue;
+      }
+    }
+    return { stepOffset: 0, steps: [] };
   }
 
   /**
@@ -530,6 +684,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     callUnaryRpc,
     readFirstStreamFrame,
     getTailGeneratorMetadata,
+    getTailTrajectorySteps,
     getQuotaSummaryRaw,
   };
 }

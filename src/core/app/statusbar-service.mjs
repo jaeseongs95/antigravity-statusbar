@@ -1,10 +1,20 @@
 import { DomainError, ERROR_CODES, normalizeLocale } from '../i18n/error-codes.mjs';
 import {
+  MAX_BUTTON_COMMAND_LEN,
   MAX_SESSION_OVERRIDES,
   PRESET_LIMITS,
+  buildAutoResumePrompt,
   evaluateContextThreshold,
+  normalizeAutoCompactWhileRunning,
   resolveEffectiveLimit,
+  resolveModelCustomLimit,
+  validateAddonDescriptor,
+  validateAddonId,
+  validateCompactPrompt,
+  validateCustomButtons,
   validateCustomLimit,
+  validateDisabledAddonIds,
+  validateModelName,
   validateSessionId,
 } from '../model/context-policy.mjs';
 import {
@@ -14,6 +24,36 @@ import {
 } from '../ports/contracts.mjs';
 
 const DEFAULT_COMPACT_COOLDOWN_MS = 15_000;
+const HOST_COMPACT_MAX_LOCK_MS = 300_000;
+const AUTO_COMPACT_COOLDOWN_MS = 90_000;
+const AUTO_COMPACT_RUNNING_RETRY_MS = 10_000;
+const AUTO_COMPACT_RETRIGGER_TOKEN_DELTA = 20_000;
+const AUTO_RESUME_WINDOW_MS = 300_000;
+const AUTO_RESUME_CIRCUIT_WINDOW_MS = 600_000;
+const MAX_CONSECUTIVE_AUTO_RESUMES = 3;
+const MAX_BACKGROUND_SWEEP_SESSIONS = 5;
+const BACKGROUND_RECENT_WINDOW_MS = 60_000;
+
+function isRunningStatus(status) {
+  return typeof status === 'string' && status.toUpperCase().includes('RUNNING');
+}
+
+function isIdleStatus(status) {
+  if (typeof status !== 'string') return false;
+  const upper = status.toUpperCase();
+  return upper.includes('IDLE') || upper.includes('WAITING') || upper.includes('COMPLETED');
+}
+
+function isCancelledOrErrorStatus(status) {
+  if (typeof status !== 'string') return false;
+  const upper = status.toUpperCase();
+  return (
+    upper.includes('CANCEL') ||
+    upper.includes('ABORT') ||
+    upper.includes('ERROR') ||
+    upper.includes('FAIL')
+  );
+}
 
 /**
  * Core application service orchestrating session telemetry, quota, settings,
@@ -32,13 +72,48 @@ export function createStatusbarService({
   assertCompactionPort(compactionPort);
   assertSettingsPort(settingsPort);
 
-  /** @type {Map<string, { attemptToken: string, startedAt: number, acceptedAt: number | null, method: string | null, baselineCompactedStep: number | null, status: 'pending' | 'accepted' }>} */
+  /** @type {Map<string, { attemptToken: string, startedAt: number, acceptedAt: number | null, lastHostCompactingAt: number | null, method: string | null, trigger: 'manual' | 'auto', baselineCompactedStep: number | null, baselineUsedTokens: number | null, baselineStepCount: number | null, status: 'pending' | 'accepted' }>} */
   const compactingSessions = new Map();
+  /** @type {Map<string, { cooldownUntil: number, waitingForDrop: boolean, lastTriggeredTokens: number | null, lastTriggeredStep: number | null, lastTriggeredCompactedStep: number | null, failedWhileRunning: boolean }>} */
+  const autoCompactState = new Map();
+  /** @type {Map<string, { attemptToken: string, triggeredAt: number, baselineCompactedStep: number | null, baselineUsedTokens: number | null, baselineStepCount: number | null, locale: string, dispatched: boolean }>} */
+  const pendingAutoResume = new Map();
+  /** @type {Map<string, { count: number, windowStartedAt: number }>} */
+  const autoResumeCircuit = new Map();
+  /** @type {Set<string>} */
+  const deferredAutoCompactSessions = new Set();
+  /** @type {Map<string, { code: string, message: string, at: number }>} */
+  const lastAutoCompactErrors = new Map();
   let attemptSeq = 0;
 
-  function pruneCompactingSessions(now) {
+  function formatModelLimits(modelLimitsMap) {
+    if (!(modelLimitsMap instanceof Map)) return [];
+    return Array.from(modelLimitsMap.entries()).map(([model, entry]) => ({
+      model,
+      limit: entry.limit,
+      updatedAt: entry.updatedAt,
+    }));
+  }
+
+  function pruneCompactingSessions(now, observedSessionId = null, observedHostRunning = false) {
     for (const [sid, entry] of compactingSessions.entries()) {
-      if (entry.status === 'accepted' && now - entry.startedAt >= compactCooldownMs) {
+      if (sid === observedSessionId) {
+        if (observedHostRunning) {
+          entry.lastHostCompactingAt = now;
+        } else if (
+          entry.status === 'accepted' &&
+          now - (entry.acceptedAt ?? entry.startedAt) >= compactCooldownMs
+        ) {
+          entry.lastHostCompactingAt = null;
+        }
+      }
+      const hasActiveHostLease =
+        (sid === observedSessionId && observedHostRunning) ||
+        (entry.lastHostCompactingAt !== null &&
+          now - entry.lastHostCompactingAt < HOST_COMPACT_MAX_LOCK_MS);
+      const ttl = hasActiveHostLease ? HOST_COMPACT_MAX_LOCK_MS : compactCooldownMs;
+      const baseTs = entry.acceptedAt ?? entry.startedAt;
+      if (entry.status === 'accepted' && now - baseTs >= ttl) {
         compactingSessions.delete(sid);
       }
     }
@@ -50,45 +125,78 @@ export function createStatusbarService({
   }
 
   function getCompactionState(sessionId, telemetry, now) {
-    pruneCompactingSessions(now);
+    const hostRunning = telemetry?.hostCompactionInProgress === true;
+    const preEntry = compactingSessions.get(sessionId);
+
+    // Detect post-acceptance compaction completion (F1 & F5) BEFORE TTL pruning so
+    // long compactions (>15s) that just completed still report `status: 'completed'`.
+    if (preEntry && preEntry.status === 'accepted' && telemetry && !hostRunning) {
+      const currentCompactedStep =
+        typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
+      const stepAdvanced =
+        currentCompactedStep !== null &&
+        (preEntry.baselineCompactedStep === null
+          ? currentCompactedStep >= 0 &&
+            (telemetry.compactionJustCompleted === true ||
+              (typeof preEntry.baselineStepCount === 'number' &&
+                currentCompactedStep >= preEntry.baselineStepCount))
+          : currentCompactedStep > preEntry.baselineCompactedStep);
+
+      const tokenDroppedSignificantly =
+        currentCompactedStep === null &&
+        preEntry.baselineCompactedStep === null &&
+        typeof preEntry.baselineUsedTokens === 'number' &&
+        preEntry.baselineUsedTokens >= 20_000 &&
+        typeof telemetry.usedTokens === 'number' &&
+        telemetry.usedTokens < preEntry.baselineUsedTokens * 0.75 &&
+        preEntry.baselineUsedTokens - telemetry.usedTokens >= 10_000;
+
+      if (stepAdvanced || tokenDroppedSignificantly) {
+        compactingSessions.delete(sessionId);
+        lastAutoCompactErrors.delete(sessionId);
+        pruneCompactingSessions(now, sessionId, false);
+        return {
+          inProgress: false,
+          status: 'completed',
+          startedAt: preEntry.startedAt,
+          method: preEntry.method,
+          trigger: preEntry.trigger,
+          lastError: null,
+        };
+      }
+    }
+
+    pruneCompactingSessions(now, sessionId, hostRunning);
     const entry = compactingSessions.get(sessionId);
+    const lastError = lastAutoCompactErrors.get(sessionId) ?? null;
     if (!entry) {
+      if (hostRunning) {
+        return {
+          inProgress: true,
+          status: 'running',
+          startedAt: null,
+          method: 'host',
+          trigger: 'manual',
+          lastError,
+        };
+      }
       return {
         inProgress: false,
         status: 'idle',
         startedAt: null,
         method: null,
+        trigger: null,
+        lastError,
       };
-    }
-
-    // Detect post-acceptance compaction completion (F1 & F5):
-    // Require strict step progression past baselineCompactedStep so repeated /compact calls
-    // cannot prematurely clear the mutex or return false 'completed' on the first poll.
-    if (entry.status === 'accepted' && telemetry) {
-      const currentCompactedStep =
-        typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
-      const stepAdvanced =
-        currentCompactedStep !== null &&
-        (entry.baselineCompactedStep === null
-          ? currentCompactedStep >= 0 && telemetry.compactionJustCompleted === true
-          : currentCompactedStep > entry.baselineCompactedStep);
-
-      if (stepAdvanced) {
-        compactingSessions.delete(sessionId);
-        return {
-          inProgress: false,
-          status: 'completed',
-          startedAt: entry.startedAt,
-          method: entry.method,
-        };
-      }
     }
 
     return {
       inProgress: true,
-      status: entry.status,
+      status: hostRunning ? 'running' : entry.status,
       startedAt: entry.startedAt,
       method: entry.method,
+      trigger: entry.trigger,
+      lastError,
     };
   }
 
@@ -103,8 +211,12 @@ export function createStatusbarService({
 
     async getSessionSnapshot(rawSessionId) {
       const sessionId = validateSessionId(rawSessionId);
+      const needsTailCheck =
+        compactingSessions.has(sessionId) || pendingAutoResume.has(sessionId);
       const [telemetry, settings] = await Promise.all([
-        telemetryPort.getSessionTelemetry(sessionId),
+        needsTailCheck
+          ? telemetryPort.getSessionTelemetry(sessionId, { includeTailSteps: true })
+          : telemetryPort.getSessionTelemetry(sessionId),
         settingsPort.read(),
       ]);
 
@@ -123,9 +235,11 @@ export function createStatusbarService({
       }
 
       const sessionOverrideEntry = settings.sessions.get(sessionId) ?? null;
+      const modelCustomLimit = resolveModelCustomLimit(settings.modelLimits, telemetry.modelName);
       const limitInfo = resolveEffectiveLimit({
         hostMaxTokens: telemetry.maxContextTokens,
         sessionCustomLimit: sessionOverrideEntry ? sessionOverrideEntry.limit : null,
+        modelCustomLimit,
         defaultCustomLimit: settings.defaultCustomLimit,
       });
 
@@ -136,6 +250,265 @@ export function createStatusbarService({
 
       const now = clock();
       const compaction = getCompactionState(sessionId, telemetry, now);
+      // A-4: Keep autoCompact default consistent with getSettings() (enabled unless explicitly false)
+      const autoCompactEnabled = settings.autoCompact !== false;
+      const autoCompactWhileRunning =
+        settings.autoCompactWhileRunning === 'defer' ? 'defer' : 'resume';
+      let autoCompactTriggered = false;
+      let autoCompactDeferred = false;
+      let autoResumeTriggered = false;
+
+      const isRunning = isRunningStatus(telemetry.status);
+      const currentCompactedStep =
+        typeof telemetry.lastCompactedStep === 'number' ? telemetry.lastCompactedStep : null;
+
+      // ISS-00: Guarded single-shot Auto-Resume for RUNNING sessions interrupted by auto-compact
+      const resumeEntry = pendingAutoResume.get(sessionId);
+      if (resumeEntry) {
+        const resumeExpired = now - resumeEntry.triggeredAt > AUTO_RESUME_WINDOW_MS;
+        const cancelledOrError = isCancelledOrErrorStatus(telemetry.status);
+        const resumeStepAdvanced =
+          currentCompactedStep !== null &&
+          (resumeEntry.baselineCompactedStep === null
+            ? currentCompactedStep >= 0 &&
+              (telemetry.compactionJustCompleted === true ||
+                (typeof resumeEntry.baselineStepCount === 'number' &&
+                  currentCompactedStep >= resumeEntry.baselineStepCount))
+            : currentCompactedStep > resumeEntry.baselineCompactedStep);
+        const resumeTokenDropped =
+          currentCompactedStep === null &&
+          resumeEntry.baselineCompactedStep === null &&
+          typeof resumeEntry.baselineUsedTokens === 'number' &&
+          resumeEntry.baselineUsedTokens >= 20_000 &&
+          typeof telemetry.usedTokens === 'number' &&
+          telemetry.usedTokens < resumeEntry.baselineUsedTokens * 0.75 &&
+          resumeEntry.baselineUsedTokens - telemetry.usedTokens >= 10_000;
+        const compactionDoneForResume =
+          compaction.status === 'completed' || resumeStepAdvanced || resumeTokenDropped;
+
+        if (resumeExpired || cancelledOrError || resumeEntry.dispatched) {
+          pendingAutoResume.delete(sessionId);
+        } else if (compactionDoneForResume && telemetry.hostCompactionInProgress !== true) {
+          const manualUserIntervened =
+            telemetry.compactionJustCompleted !== true &&
+            currentCompactedStep !== null &&
+            typeof telemetry.stepCount === 'number' &&
+            telemetry.stepCount > currentCompactedStep + 2;
+
+          if (isRunning || manualUserIntervened) {
+            // Host already resumed or user manually sent a follow-up message
+            pendingAutoResume.delete(sessionId);
+          } else if (isIdleStatus(telemetry.status)) {
+            const circuit = autoResumeCircuit.get(sessionId);
+            const circuitCount =
+              circuit && now - circuit.windowStartedAt < AUTO_RESUME_CIRCUIT_WINDOW_MS
+                ? circuit.count
+                : 0;
+            const circuitWindowStart =
+              circuit && now - circuit.windowStartedAt < AUTO_RESUME_CIRCUIT_WINDOW_MS
+                ? circuit.windowStartedAt
+                : now;
+
+            // Synchronously mark dispatched and remove BEFORE any await to prevent double-send
+            resumeEntry.dispatched = true;
+            pendingAutoResume.delete(sessionId);
+
+            if (
+              circuitCount < MAX_CONSECUTIVE_AUTO_RESUMES &&
+              typeof compactionPort.sendCommand === 'function'
+            ) {
+              autoResumeCircuit.set(sessionId, {
+                count: circuitCount + 1,
+                windowStartedAt: circuitWindowStart,
+              });
+              while (autoResumeCircuit.size > MAX_SESSION_OVERRIDES) {
+                const oldestKey = autoResumeCircuit.keys().next().value;
+                if (oldestKey === undefined) break;
+                autoResumeCircuit.delete(oldestKey);
+              }
+              autoResumeTriggered = true;
+              const resumePrompt = buildAutoResumePrompt(resumeEntry.locale);
+              Promise.resolve(compactionPort.sendCommand(sessionId, resumePrompt)).catch(() => {
+                // Best-effort single-shot resume: never loop on send failure
+              });
+            }
+          }
+        }
+      }
+
+      const prevAuto = autoCompactState.get(sessionId) || {
+        cooldownUntil: 0,
+        waitingForDrop: false,
+        lastTriggeredTokens: null,
+        lastTriggeredStep: null,
+        lastTriggeredCompactedStep: null,
+        failedWhileRunning: false,
+      };
+
+      const compactionAdvanced =
+        currentCompactedStep !== null &&
+        (prevAuto.lastTriggeredCompactedStep === null
+          ? telemetry.compactionJustCompleted === true ||
+            (typeof prevAuto.lastTriggeredStep === 'number' &&
+              currentCompactedStep >= prevAuto.lastTriggeredStep)
+          : currentCompactedStep > prevAuto.lastTriggeredCompactedStep);
+
+      if (
+        compactionAdvanced &&
+        (prevAuto.waitingForDrop || prevAuto.cooldownUntil > 0 || prevAuto.failedWhileRunning)
+      ) {
+        const hasNumericTokens = typeof telemetry.usedTokens === 'number';
+        const droppedBelowLimit = hasNumericTokens && !threshold.exceededSoftLimit;
+        const reducedMeaningfully =
+          hasNumericTokens &&
+          typeof prevAuto.lastTriggeredTokens === 'number' &&
+          prevAuto.lastTriggeredTokens - telemetry.usedTokens >= 10_000 &&
+          telemetry.usedTokens <= prevAuto.lastTriggeredTokens * 0.85;
+
+        if (droppedBelowLimit || reducedMeaningfully) {
+          prevAuto.waitingForDrop = false;
+          prevAuto.cooldownUntil = 0;
+          prevAuto.failedWhileRunning = false;
+          prevAuto.lastTriggeredTokens = null;
+          prevAuto.lastTriggeredStep = null;
+          prevAuto.lastTriggeredCompactedStep = currentCompactedStep;
+        } else {
+          // ISS-05: Low custom limit (e.g. 32K) where post-compaction context still exceeds limit:
+          // retain cooldown + token-growth guard so it never enters an infinite compaction loop.
+          prevAuto.waitingForDrop = true;
+          prevAuto.cooldownUntil = now + AUTO_COMPACT_COOLDOWN_MS;
+          prevAuto.failedWhileRunning = false;
+          prevAuto.lastTriggeredTokens = hasNumericTokens
+            ? telemetry.usedTokens
+            : prevAuto.lastTriggeredTokens;
+          prevAuto.lastTriggeredStep =
+            typeof telemetry.stepCount === 'number'
+              ? telemetry.stepCount
+              : prevAuto.lastTriggeredStep;
+          prevAuto.lastTriggeredCompactedStep = currentCompactedStep;
+        }
+        autoCompactState.set(sessionId, prevAuto);
+      }
+
+      if (typeof telemetry.usedTokens === 'number' && !threshold.exceededSoftLimit) {
+        deferredAutoCompactSessions.delete(sessionId);
+        autoResumeCircuit.delete(sessionId);
+        if (prevAuto.waitingForDrop || prevAuto.failedWhileRunning || prevAuto.cooldownUntil > 0) {
+          prevAuto.waitingForDrop = false;
+          prevAuto.failedWhileRunning = false;
+          prevAuto.cooldownUntil = 0;
+          autoCompactState.set(sessionId, prevAuto);
+        }
+        if (lastAutoCompactErrors.has(sessionId)) {
+          lastAutoCompactErrors.delete(sessionId);
+          compaction.lastError = null;
+        }
+      } else if (threshold.exceededSoftLimit) {
+        if (!isRunning && prevAuto.failedWhileRunning) {
+          prevAuto.failedWhileRunning = false;
+          prevAuto.cooldownUntil = 0;
+          autoCompactState.set(sessionId, prevAuto);
+        }
+
+        const cooldownExpired = prevAuto.cooldownUntil <= now;
+        const stepAdvancedSinceLast =
+          typeof telemetry.stepCount === 'number' &&
+          (prevAuto.lastTriggeredStep === null || telemetry.stepCount > prevAuto.lastTriggeredStep);
+        const tokensGrewSinceLast =
+          typeof telemetry.usedTokens === 'number' &&
+          typeof prevAuto.lastTriggeredTokens === 'number' &&
+          telemetry.usedTokens >= prevAuto.lastTriggeredTokens + AUTO_COMPACT_RETRIGGER_TOKEN_DELTA;
+        const canTriggerAgain =
+          !prevAuto.waitingForDrop || (stepAdvancedSinceLast && tokensGrewSinceLast);
+
+        if (
+          autoCompactEnabled &&
+          limitInfo.isCustomActive &&
+          !compaction.inProgress &&
+          telemetry.hostCompactionInProgress !== true &&
+          telemetry.compactionJustCompleted !== true &&
+          cooldownExpired &&
+          canTriggerAgain
+        ) {
+          if (isRunning && autoCompactWhileRunning === 'defer') {
+            // ISS-00 Option B/C: Defer compaction cleanly until RUNNING turn completes into IDLE
+            deferredAutoCompactSessions.add(sessionId);
+            autoCompactDeferred = true;
+          } else {
+            deferredAutoCompactSessions.delete(sessionId);
+            const triggerRecord = {
+              cooldownUntil: now + AUTO_COMPACT_COOLDOWN_MS,
+              waitingForDrop: true,
+              lastTriggeredTokens:
+                typeof telemetry.usedTokens === 'number' ? telemetry.usedTokens : null,
+              lastTriggeredStep:
+                typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null,
+              lastTriggeredCompactedStep: currentCompactedStep,
+              failedWhileRunning: false,
+            };
+            autoCompactState.set(sessionId, triggerRecord);
+            while (autoCompactState.size > MAX_SESSION_OVERRIDES) {
+              const oldest = autoCompactState.keys().next().value;
+              if (oldest === undefined) break;
+              autoCompactState.delete(oldest);
+            }
+
+            let resumeAttemptToken = null;
+            if (isRunning && autoCompactWhileRunning === 'resume') {
+              resumeAttemptToken = `resume-${now}-${++attemptSeq}`;
+              pendingAutoResume.set(sessionId, {
+                attemptToken: resumeAttemptToken,
+                triggeredAt: now,
+                baselineCompactedStep: currentCompactedStep,
+                baselineUsedTokens:
+                  typeof telemetry.usedTokens === 'number' ? telemetry.usedTokens : null,
+                baselineStepCount:
+                  typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null,
+                locale: settings.locale || 'ko',
+                dispatched: false,
+              });
+              while (pendingAutoResume.size > MAX_SESSION_OVERRIDES) {
+                const oldestKey = pendingAutoResume.keys().next().value;
+                if (oldestKey === undefined) break;
+                pendingAutoResume.delete(oldestKey);
+              }
+            }
+
+            lastAutoCompactErrors.delete(sessionId);
+            compaction.lastError = null;
+            autoCompactTriggered = true;
+            // Fire-and-forget guarded auto-compaction for this session
+            this.requestCompaction(sessionId, { trigger: 'auto' }).catch((err) => {
+              if (
+                resumeAttemptToken &&
+                pendingAutoResume.get(sessionId)?.attemptToken === resumeAttemptToken
+              ) {
+                pendingAutoResume.delete(sessionId);
+              }
+              // A-1 & A-3: Release waitingForDrop so retry is possible; if rejected while RUNNING,
+              // use short backoff and retry immediately once the session transitions to IDLE.
+              const cur = autoCompactState.get(sessionId);
+              if (cur === triggerRecord) {
+                cur.waitingForDrop = false;
+                if (isRunning) {
+                  cur.failedWhileRunning = true;
+                  cur.cooldownUntil = clock() + AUTO_COMPACT_RUNNING_RETRY_MS;
+                }
+              }
+              lastAutoCompactErrors.set(sessionId, {
+                code: err?.code || ERROR_CODES.COMPACTION_FAILED,
+                message: err?.message || 'Auto-compaction failed.',
+                at: clock(),
+              });
+              while (lastAutoCompactErrors.size > MAX_SESSION_OVERRIDES) {
+                const oldestErr = lastAutoCompactErrors.keys().next().value;
+                if (oldestErr === undefined) break;
+                lastAutoCompactErrors.delete(oldestErr);
+              }
+            });
+          }
+        }
+      }
 
       return {
         sessionId,
@@ -154,6 +527,13 @@ export function createStatusbarService({
         usagePercent: threshold.usagePercent,
         thresholdLevel: threshold.thresholdLevel,
         exceededSoftLimit: threshold.exceededSoftLimit,
+        autoCompact: autoCompactEnabled,
+        autoCompactWhileRunning,
+        autoCompactTriggered,
+        autoCompactDeferred,
+        autoResumePending: pendingAutoResume.has(sessionId),
+        autoResumeTriggered,
+        compactPrompt: typeof settings.compactPrompt === 'string' ? settings.compactPrompt : '',
         cacheHitPercent: telemetry.cacheHitPercent ?? null,
         cacheReadTokens: telemetry.cacheReadTokens ?? null,
         inputTokens: telemetry.inputTokens ?? null,
@@ -162,6 +542,10 @@ export function createStatusbarService({
         tokenBreakdown: Array.isArray(telemetry.tokenBreakdown) ? telemetry.tokenBreakdown : [],
         compaction,
         locale: settings.locale,
+        customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
+        disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
+          ? settings.disabledRuntimeAddonIds
+          : [],
         presets: PRESET_LIMITS,
         fetchedAt: now,
       };
@@ -182,6 +566,15 @@ export function createStatusbarService({
       return {
         locale: settings.locale,
         defaultCustomLimit: settings.defaultCustomLimit,
+        autoCompact: settings.autoCompact !== false,
+        autoCompactWhileRunning:
+          settings.autoCompactWhileRunning === 'defer' ? 'defer' : 'resume',
+        compactPrompt: typeof settings.compactPrompt === 'string' ? settings.compactPrompt : '',
+        customButtons: Array.isArray(settings.customButtons) ? settings.customButtons : [],
+        disabledRuntimeAddonIds: Array.isArray(settings.disabledRuntimeAddonIds)
+          ? settings.disabledRuntimeAddonIds
+          : [],
+        modelLimits: formatModelLimits(settings.modelLimits),
         sessions: Array.from(settings.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -213,6 +606,80 @@ export function createStatusbarService({
         hasChange = true;
       }
 
+      if (Object.prototype.hasOwnProperty.call(patch, 'autoCompact')) {
+        normalizedPatch.autoCompact = Boolean(patch.autoCompact);
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'autoCompactWhileRunning')) {
+        normalizedPatch.autoCompactWhileRunning = normalizeAutoCompactWhileRunning(
+          patch.autoCompactWhileRunning,
+        );
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
+        normalizedPatch.compactPrompt = validateCompactPrompt(patch.compactPrompt);
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
+        normalizedPatch.customButtons = validateCustomButtons(patch.customButtons);
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'addonUpsert')) {
+        normalizedPatch.addonUpsert = validateAddonDescriptor(patch.addonUpsert);
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'addonToggle')) {
+        const tg = patch.addonToggle;
+        if (!tg || typeof tg !== 'object' || Array.isArray(tg)) {
+          throw new DomainError(
+            ERROR_CODES.INVALID_SETTINGS_PATCH,
+            400,
+            'addonToggle must be an object with id and enabled.',
+          );
+        }
+        normalizedPatch.addonToggle = {
+          id: validateAddonId(tg.id),
+          enabled: Boolean(tg.enabled),
+          runtime: Boolean(tg.runtime),
+        };
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'addonRemove')) {
+        const rawId =
+          typeof patch.addonRemove === 'string' ? patch.addonRemove : patch.addonRemove?.id;
+        normalizedPatch.addonRemove = { id: validateAddonId(rawId) };
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'disabledRuntimeAddonIds')) {
+        normalizedPatch.disabledRuntimeAddonIds = validateDisabledAddonIds(
+          patch.disabledRuntimeAddonIds,
+        );
+        hasChange = true;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'modelLimit')) {
+        const ml = patch.modelLimit;
+        if (!ml || typeof ml !== 'object' || Array.isArray(ml)) {
+          throw new DomainError(
+            ERROR_CODES.INVALID_SETTINGS_PATCH,
+            400,
+            'modelLimit must be an object with model and limit.',
+          );
+        }
+        normalizedPatch.modelLimit = {
+          model: validateModelName(ml.model),
+          limit: validateCustomLimit(ml.limit),
+        };
+        hasChange = true;
+      }
+
       if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit')) {
         const sl = patch.sessionLimit;
         if (!sl || typeof sl !== 'object' || Array.isArray(sl)) {
@@ -238,9 +705,32 @@ export function createStatusbarService({
       }
 
       const updated = await settingsPort.update(normalizedPatch);
+
+      // A-2: Reset auto-compact cooldown/wait state when limits change or autoCompact is re-enabled
+      if (
+        Object.prototype.hasOwnProperty.call(normalizedPatch, 'defaultCustomLimit') ||
+        Object.prototype.hasOwnProperty.call(normalizedPatch, 'modelLimit') ||
+        normalizedPatch.autoCompact === true
+      ) {
+        autoCompactState.clear();
+        lastAutoCompactErrors.clear();
+      } else if (normalizedPatch.sessionLimit) {
+        autoCompactState.delete(normalizedPatch.sessionLimit.sessionId);
+        lastAutoCompactErrors.delete(normalizedPatch.sessionLimit.sessionId);
+      }
+
       return {
         locale: updated.locale,
         defaultCustomLimit: updated.defaultCustomLimit,
+        autoCompact: updated.autoCompact !== false,
+        autoCompactWhileRunning:
+          updated.autoCompactWhileRunning === 'defer' ? 'defer' : 'resume',
+        compactPrompt: typeof updated.compactPrompt === 'string' ? updated.compactPrompt : '',
+        customButtons: Array.isArray(updated.customButtons) ? updated.customButtons : [],
+        disabledRuntimeAddonIds: Array.isArray(updated.disabledRuntimeAddonIds)
+          ? updated.disabledRuntimeAddonIds
+          : [],
+        modelLimits: formatModelLimits(updated.modelLimits),
         sessions: Array.from(updated.sessions.entries()).map(([id, entry]) => ({
           sessionId: id,
           limit: entry.limit,
@@ -250,8 +740,68 @@ export function createStatusbarService({
       };
     },
 
-    async requestCompaction(rawSessionId) {
+    async upsertAddon(rawAddon) {
+      const addon = validateAddonDescriptor(rawAddon);
+      return this.updateSettings({ addonUpsert: addon });
+    },
+
+    async setAddonEnabled(rawId, enabled, isRuntime = false) {
+      const id = validateAddonId(rawId);
+      return this.updateSettings({
+        addonToggle: { id, enabled: Boolean(enabled), runtime: Boolean(isRuntime) },
+      });
+    },
+
+    async removeAddon(rawId) {
+      const id = validateAddonId(rawId);
+      return this.updateSettings({ addonRemove: { id } });
+    },
+
+    async runCustomCommand(rawSessionId, rawCommand) {
       const sessionId = validateSessionId(rawSessionId);
+      const command = typeof rawCommand === 'string' ? rawCommand.trim() : '';
+      if (!command || command.length > MAX_BUTTON_COMMAND_LEN || command.includes('\0')) {
+        throw new DomainError(
+          ERROR_CODES.INVALID_SETTINGS_PATCH,
+          400,
+          `Command must be 1-${MAX_BUTTON_COMMAND_LEN} characters.`,
+        );
+      }
+      if (command === '/compact') {
+        return this.requestCompaction(sessionId);
+      }
+      if (command.startsWith('/compact ')) {
+        return this.requestCompaction(sessionId, { prompt: command.slice(9).trim() });
+      }
+      if (typeof compactionPort.sendCommand !== 'function') {
+        throw new DomainError(
+          ERROR_CODES.COMPACTION_FAILED,
+          501,
+          'Custom command execution is not supported by the active adapter.',
+        );
+      }
+      const result = await compactionPort.sendCommand(sessionId, command);
+      if (!result || result.accepted !== true) {
+        throw new DomainError(
+          ERROR_CODES.COMPACTION_FAILED,
+          502,
+          result?.reason || 'Custom command was not accepted.',
+        );
+      }
+      return {
+        accepted: true,
+        sessionId,
+        command,
+        method: result.method ?? 'unknown',
+        acceptedAt: clock(),
+      };
+    },
+
+    async requestCompaction(rawSessionId, options = {}) {
+      const sessionId = validateSessionId(rawSessionId);
+      const trigger = options?.trigger === 'auto' ? 'auto' : 'manual';
+      const explicitPrompt =
+        options?.prompt !== undefined ? validateCompactPrompt(options.prompt) : null;
       const now = clock();
       pruneCompactingSessions(now);
 
@@ -272,8 +822,12 @@ export function createStatusbarService({
         attemptToken,
         startedAt: now,
         acceptedAt: null,
+        lastHostCompactingAt: null,
         method: null,
+        trigger,
         baselineCompactedStep: null,
+        baselineUsedTokens: null,
+        baselineStepCount: null,
         status: 'pending',
       });
 
@@ -284,20 +838,59 @@ export function createStatusbarService({
       };
 
       let baselineCompactedStep = null;
+      let baselineUsedTokens = null;
+      let baselineStepCount = null;
+      let effectivePrompt = explicitPrompt ?? '';
+      if (explicitPrompt === null) {
+        try {
+          const currentSettings = await settingsPort.read();
+          if (typeof currentSettings?.compactPrompt === 'string') {
+            effectivePrompt = currentSettings.compactPrompt.trim();
+          }
+        } catch {
+          // Non-fatal: fall back to default /compact without custom prompt
+        }
+      }
+
       try {
-        const currentTelemetry = await telemetryPort.getSessionTelemetry(sessionId);
+        const currentTelemetry = await telemetryPort.getSessionTelemetry(sessionId, {
+          includeTailSteps: true,
+        });
         if (currentTelemetry && currentTelemetry.sessionId === sessionId) {
+          if (currentTelemetry.hostCompactionInProgress === true) {
+            releaseOwnMutex();
+            throw new DomainError(
+              ERROR_CODES.COMPACTION_IN_PROGRESS,
+              409,
+              'Compaction is already running on the host for this session.',
+              { sessionId, status: 'running' },
+            );
+          }
           baselineCompactedStep =
             typeof currentTelemetry.lastCompactedStep === 'number'
               ? currentTelemetry.lastCompactedStep
               : null;
+          baselineUsedTokens =
+            typeof currentTelemetry.usedTokens === 'number'
+              ? currentTelemetry.usedTokens
+              : null;
+          baselineStepCount =
+            typeof currentTelemetry.stepCount === 'number'
+              ? currentTelemetry.stepCount
+              : null;
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof DomainError && err.code === ERROR_CODES.COMPACTION_IN_PROGRESS) {
+          throw err;
+        }
         // Non-fatal: proceed without baseline step
       }
 
       try {
-        const result = await compactionPort.compactSession(sessionId);
+        const result = await compactionPort.compactSession(
+          sessionId,
+          effectivePrompt ? { prompt: effectivePrompt } : undefined,
+        );
         if (!result || result.accepted !== true) {
           // F2 & F5: Release ONLY this attempt's mutex immediately on failure
           releaseOwnMutex();
@@ -309,13 +902,18 @@ export function createStatusbarService({
         }
 
         const acceptedAt = clock();
+        lastAutoCompactErrors.delete(sessionId);
         if (compactingSessions.get(sessionId)?.attemptToken === attemptToken) {
           compactingSessions.set(sessionId, {
             attemptToken,
             startedAt: now,
             acceptedAt,
+            lastHostCompactingAt: null,
             method: result.method ?? 'unknown',
+            trigger,
             baselineCompactedStep,
+            baselineUsedTokens,
+            baselineStepCount,
             status: 'accepted',
           });
         }
@@ -324,6 +922,7 @@ export function createStatusbarService({
           accepted: true,
           sessionId,
           method: result.method ?? 'unknown',
+          trigger,
           acceptedAt,
         };
       } catch (err) {
@@ -338,6 +937,81 @@ export function createStatusbarService({
           err?.message || 'Compaction request failed.',
         );
       }
+    },
+
+    async sweepActiveSessions({
+      maxSessions = MAX_BACKGROUND_SWEEP_SESSIONS,
+      recentWindowMs = BACKGROUND_RECENT_WINDOW_MS,
+    } = {}) {
+      const settings = await settingsPort.read();
+      const autoCompactEnabled = settings.autoCompact !== false;
+      const hasAnyCustomLimit =
+        typeof settings.defaultCustomLimit === 'number' ||
+        (settings.modelLimits instanceof Map && settings.modelLimits.size > 0) ||
+        (settings.sessions instanceof Map && settings.sessions.size > 0);
+      if (!autoCompactEnabled || !hasAnyCustomLimit) {
+        pendingAutoResume.clear();
+        deferredAutoCompactSessions.clear();
+        return { checked: 0, triggered: 0, resumed: 0 };
+      }
+
+      const sessions = await telemetryPort.listSessions();
+      const now = clock();
+      const hasGlobalOrModelLimit =
+        typeof settings.defaultCustomLimit === 'number' ||
+        (settings.modelLimits instanceof Map && settings.modelLimits.size > 0);
+
+      const candidateIds = [];
+      const seen = new Set();
+
+      // Always prioritize sessions awaiting auto-resume or deferred IDLE compaction
+      for (const sid of pendingAutoResume.keys()) {
+        if (!seen.has(sid)) {
+          seen.add(sid);
+          candidateIds.push(sid);
+        }
+      }
+      for (const sid of deferredAutoCompactSessions) {
+        if (!seen.has(sid)) {
+          seen.add(sid);
+          candidateIds.push(sid);
+        }
+      }
+
+      if (autoCompactEnabled && hasAnyCustomLimit) {
+        for (const s of Array.isArray(sessions) ? sessions : []) {
+          if (candidateIds.length >= maxSessions) break;
+          if (!s || typeof s.sessionId !== 'string' || !s.sessionId) continue;
+          if (seen.has(s.sessionId)) continue;
+          // ISS-14: Exclude identifiable subagent cascades from background auto-compaction by default
+          if (s.isSubagent === true) continue;
+          if (!hasGlobalOrModelLimit && !settings.sessions.has(s.sessionId)) continue;
+          const running = isRunningStatus(s.status);
+          const recent =
+            typeof s.lastModifiedMs === 'number' &&
+            s.lastModifiedMs > 0 &&
+            now - s.lastModifiedMs <= recentWindowMs;
+          if (running || recent) {
+            seen.add(s.sessionId);
+            candidateIds.push(s.sessionId);
+          }
+        }
+      }
+
+      let checked = 0;
+      let triggered = 0;
+      let resumed = 0;
+      for (const sid of candidateIds) {
+        try {
+          const snap = await this.getSessionSnapshot(sid);
+          checked += 1;
+          if (snap.autoCompactTriggered) triggered += 1;
+          if (snap.autoResumeTriggered) resumed += 1;
+        } catch {
+          // Best-effort sweep: isolate per-session telemetry failures
+        }
+      }
+      return { checked, triggered, resumed };
     },
   };
 }

@@ -6,9 +6,19 @@ import writeFileAtomic from 'write-file-atomic';
 
 import { DEFAULT_LOCALE, DomainError, ERROR_CODES, normalizeLocale } from '../../core/i18n/error-codes.mjs';
 import {
+  MAX_CUSTOM_BUTTONS,
+  MAX_MODEL_LIMITS,
   MAX_SESSION_OVERRIDES,
+  normalizeAutoCompactWhileRunning,
+  pruneModelLimits,
   pruneSessionOverrides,
+  validateAddonDescriptor,
+  validateAddonId,
+  validateCompactPrompt,
+  validateCustomButtons,
   validateCustomLimit,
+  validateDisabledAddonIds,
+  validateModelName,
   validateSessionId,
 } from '../../core/model/context-policy.mjs';
 
@@ -23,6 +33,13 @@ function createDefaultState() {
     localeUpdatedAt: 0,
     defaultCustomLimit: null,
     defaultCustomLimitUpdatedAt: 0,
+    autoCompact: true,
+    autoCompactWhileRunning: 'resume',
+    compactPrompt: '',
+    customButtons: [],
+    customButtonsUpdatedAt: 0,
+    disabledRuntimeAddonIds: [],
+    modelLimits: new Map(),
     sessions: new Map(),
   };
 }
@@ -59,6 +76,52 @@ function parsePersistedState(raw) {
     state.defaultCustomLimitUpdatedAt = Math.floor(raw.defaultCustomLimitUpdatedAt);
   }
 
+  if (typeof raw.autoCompact === 'boolean') {
+    state.autoCompact = raw.autoCompact;
+  }
+
+  if (typeof raw.autoCompactWhileRunning === 'string') {
+    try {
+      state.autoCompactWhileRunning = normalizeAutoCompactWhileRunning(raw.autoCompactWhileRunning);
+    } catch {
+      state.autoCompactWhileRunning = 'resume';
+    }
+  }
+
+  if (typeof raw.compactPrompt === 'string') {
+    try {
+      state.compactPrompt = validateCompactPrompt(raw.compactPrompt);
+    } catch {
+      state.compactPrompt = '';
+    }
+  }
+
+  if (Array.isArray(raw.customButtons)) {
+    try {
+      state.customButtons = validateCustomButtons(raw.customButtons);
+    } catch {
+      state.customButtons = [];
+    }
+  }
+  if (
+    typeof raw.customButtonsUpdatedAt === 'number' &&
+    Number.isFinite(raw.customButtonsUpdatedAt)
+  ) {
+    state.customButtonsUpdatedAt = Math.floor(raw.customButtonsUpdatedAt);
+  }
+
+  if (Array.isArray(raw.disabledRuntimeAddonIds)) {
+    try {
+      state.disabledRuntimeAddonIds = validateDisabledAddonIds(raw.disabledRuntimeAddonIds);
+    } catch {
+      state.disabledRuntimeAddonIds = [];
+    }
+  }
+
+  if (Array.isArray(raw.modelLimits)) {
+    state.modelLimits = pruneModelLimits(raw.modelLimits, MAX_MODEL_LIMITS);
+  }
+
   if (Array.isArray(raw.sessions)) {
     state.sessions = pruneSessionOverrides(raw.sessions, MAX_SESSION_OVERRIDES);
   }
@@ -74,6 +137,13 @@ function serializeState(state) {
       localeUpdatedAt: state.localeUpdatedAt,
       defaultCustomLimit: state.defaultCustomLimit,
       defaultCustomLimitUpdatedAt: state.defaultCustomLimitUpdatedAt,
+      autoCompact: state.autoCompact,
+      autoCompactWhileRunning: state.autoCompactWhileRunning,
+      compactPrompt: state.compactPrompt,
+      customButtons: state.customButtons,
+      customButtonsUpdatedAt: state.customButtonsUpdatedAt,
+      disabledRuntimeAddonIds: state.disabledRuntimeAddonIds,
+      modelLimits: Array.from(state.modelLimits.entries()),
       sessions: Array.from(state.sessions.entries()),
     },
     null,
@@ -223,6 +293,12 @@ export function createJsonSettingsStore({
       return {
         locale: state.locale,
         defaultCustomLimit: state.defaultCustomLimit,
+        autoCompact: state.autoCompact,
+        autoCompactWhileRunning: state.autoCompactWhileRunning,
+        compactPrompt: state.compactPrompt,
+        customButtons: state.customButtons.map((b) => ({ ...b })),
+        disabledRuntimeAddonIds: [...state.disabledRuntimeAddonIds],
+        modelLimits: new Map(state.modelLimits),
         sessions: new Map(state.sessions),
       };
     },
@@ -243,6 +319,99 @@ export function createJsonSettingsStore({
           current.defaultCustomLimitUpdatedAt = ts;
         }
 
+        if (Object.prototype.hasOwnProperty.call(patch, 'autoCompact')) {
+          current.autoCompact = Boolean(patch.autoCompact);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'autoCompactWhileRunning')) {
+          current.autoCompactWhileRunning = normalizeAutoCompactWhileRunning(
+            patch.autoCompactWhileRunning,
+          );
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'compactPrompt')) {
+          current.compactPrompt = validateCompactPrompt(patch.compactPrompt);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'customButtons')) {
+          const ts = nextTimestamp(current.customButtonsUpdatedAt);
+          current.customButtons = validateCustomButtons(patch.customButtons);
+          current.customButtonsUpdatedAt = ts;
+        }
+
+        // ISS-07: Atomic in-lock delta patches for StatusbarAddon.v1 mutations (no lost updates)
+        if (Object.prototype.hasOwnProperty.call(patch, 'addonUpsert') && patch.addonUpsert) {
+          const descriptor = validateAddonDescriptor(patch.addonUpsert);
+          const list = current.customButtons.map((b) => ({ ...b }));
+          const idx = list.findIndex((b) => b.id === descriptor.id);
+          if (idx >= 0) {
+            list[idx] = descriptor;
+          } else {
+            if (list.length >= MAX_CUSTOM_BUTTONS) {
+              throw new DomainError(
+                ERROR_CODES.INVALID_SETTINGS_PATCH,
+                400,
+                `customButtons cannot exceed ${MAX_CUSTOM_BUTTONS} items.`,
+              );
+            }
+            list.push(descriptor);
+          }
+          const ts = nextTimestamp(current.customButtonsUpdatedAt);
+          current.customButtons = validateCustomButtons(list);
+          current.customButtonsUpdatedAt = ts;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'addonToggle') && patch.addonToggle) {
+          const id = validateAddonId(patch.addonToggle.id);
+          const enabled = Boolean(patch.addonToggle.enabled);
+          const isRuntime = Boolean(patch.addonToggle.runtime);
+          if (isRuntime) {
+            const disabled = new Set(current.disabledRuntimeAddonIds);
+            if (enabled) disabled.delete(id);
+            else disabled.add(id);
+            current.disabledRuntimeAddonIds = validateDisabledAddonIds(Array.from(disabled));
+          } else {
+            const nextList = current.customButtons.map((b) =>
+              b.id === id ? { ...b, enabled } : { ...b },
+            );
+            const ts = nextTimestamp(current.customButtonsUpdatedAt);
+            current.customButtons = validateCustomButtons(nextList);
+            current.customButtonsUpdatedAt = ts;
+          }
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'addonRemove') && patch.addonRemove) {
+          const rawId =
+            typeof patch.addonRemove === 'string' ? patch.addonRemove : patch.addonRemove.id;
+          const id = validateAddonId(rawId);
+          const nextList = current.customButtons.filter((b) => b.id !== id);
+          const ts = nextTimestamp(current.customButtonsUpdatedAt);
+          current.customButtons = validateCustomButtons(nextList);
+          current.customButtonsUpdatedAt = ts;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'disabledRuntimeAddonIds')) {
+          current.disabledRuntimeAddonIds = validateDisabledAddonIds(patch.disabledRuntimeAddonIds);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(patch, 'modelLimit') && patch.modelLimit) {
+          const model = validateModelName(patch.modelLimit.model);
+          const limit = validateCustomLimit(patch.modelLimit.limit);
+          const lower = model.toLowerCase();
+          let prevUpdatedAt = 0;
+          for (const [k, v] of Array.from(current.modelLimits.entries())) {
+            if (k.toLowerCase() === lower) {
+              prevUpdatedAt = Math.max(prevUpdatedAt, v?.updatedAt || 0);
+              current.modelLimits.delete(k);
+            }
+          }
+          if (limit !== null) {
+            const ts = nextTimestamp(prevUpdatedAt);
+            current.modelLimits.set(model, { limit, updatedAt: ts });
+          }
+          current.modelLimits = pruneModelLimits(current.modelLimits, MAX_MODEL_LIMITS);
+        }
+
         if (Object.prototype.hasOwnProperty.call(patch, 'sessionLimit') && patch.sessionLimit) {
           const sid = validateSessionId(patch.sessionLimit.sessionId);
           const limit = validateCustomLimit(patch.sessionLimit.limit);
@@ -261,6 +430,12 @@ export function createJsonSettingsStore({
         return {
           locale: current.locale,
           defaultCustomLimit: current.defaultCustomLimit,
+          autoCompact: current.autoCompact,
+          autoCompactWhileRunning: current.autoCompactWhileRunning,
+          compactPrompt: current.compactPrompt,
+          customButtons: current.customButtons.map((b) => ({ ...b })),
+          disabledRuntimeAddonIds: [...current.disabledRuntimeAddonIds],
+          modelLimits: new Map(current.modelLimits),
           sessions: new Map(current.sessions),
         };
       });
