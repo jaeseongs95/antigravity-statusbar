@@ -1275,14 +1275,14 @@ test('TC-P0-11 (v3.1.1): startSidecar supports headless mode (unset ANTIGRAVITY_
     assert.ok(published, 'startSidecar must publish ephemeral token to rendererPublisher');
     assert.match(published.token, /^[a-f0-9]{64}$/, 'Headless ephemeral token must be 64-char hex (256-bit)');
 
-    const postHealth = (tokenHeader) =>
+    const postSettings = (tokenHeader) =>
       new Promise((resolve, reject) => {
         const req = http.request(
           {
             hostname: '127.0.0.1',
             port: started.port,
             method: 'POST',
-            path: '/api/health',
+            path: '/api/settings/get',
             headers: {
               host: `127.0.0.1:${started.port}`,
               origin: `http://127.0.0.1:${started.port}`,
@@ -1301,12 +1301,12 @@ test('TC-P0-11 (v3.1.1): startSidecar supports headless mode (unset ANTIGRAVITY_
         req.end('{}');
       });
 
-    const unauth = await postHealth(null);
+    const unauth = await postSettings(null);
     assert.equal(unauth.status, 401);
 
-    const auth = await postHealth(published.token);
+    const auth = await postSettings(published.token);
     assert.equal(auth.status, 200);
-    assert.equal(JSON.parse(auth.body).ok, true);
+    assert.equal(typeof JSON.parse(auth.body).locale, 'string');
   } finally {
     if (started) {
       if (typeof started.stop === 'function') {
