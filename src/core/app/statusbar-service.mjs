@@ -325,7 +325,7 @@ export function createStatusbarService({
               typeof telemetry.stepCount === 'number' &&
               telemetry.stepCount >= currentCompactedStep + 3;
 
-            // Antigravity briefly keeps status=RUNNING after CHECKPOINT DONE before dropping to IDLE.
+            // The host briefly keeps status=RUNNING after checkpoint completion before dropping to IDLE.
             // Only treat RUNNING as genuine host self-resume after grace window or >=2 post-checkpoint steps.
             const runningStepDelta =
               typeof telemetry.stepCount === 'number' &&
