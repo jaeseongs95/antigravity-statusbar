@@ -339,7 +339,9 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
           if (modalDialog) modalDialog.remove();
           modalDialog = document.createElement('dialog');
           modalDialog.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
-          modalShadow = modalDialog.attachShadow({ mode: 'open' });
+          const modalHost = document.createElement('div');
+          modalDialog.appendChild(modalHost);
+          modalShadow = modalHost.attachShadow({ mode: 'open' });
           const bodyEl = document.createElement('div');
           modalShadow.appendChild(bodyEl);
           document.body.appendChild(modalDialog);
