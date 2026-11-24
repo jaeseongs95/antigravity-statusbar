@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,23 +27,98 @@ const INCLUDE_ENTRIES = [
   'README.md',
 ];
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const FALLBACK_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EXDEV']);
 const RENAME_MAX_TOTAL_MS = 2_500;
+const RM_CLEANUP_OPTIONS = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function renameWithRetry(srcPath, destPath) {
+function isSameOrSubpath(candidate, parent) {
+  const rel = path.relative(path.resolve(parent), path.resolve(candidate));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function isSameFilesystem(statA, pathA, statB, pathB) {
+  if (!statA || !statB) return false;
+  if (statA.dev !== statB.dev) return false;
+  if (process.platform === 'win32') {
+    const rootA = path.parse(path.resolve(pathA)).root.toLowerCase();
+    const rootB = path.parse(path.resolve(pathB)).root.toLowerCase();
+    if (rootA && rootB && rootA !== rootB) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Resolves a staging/backup parent directory outside `parentDir` (e.g. outside watched
+ * `~/.gemini/config/plugins/`) so the host app never discovers staging artifacts as plugins
+ * or creates `plugin_data/.antigravity-statusbar.staging.*` entries.
+ *
+ * Prefers `os.tmpdir()` when on the same filesystem for atomic `fs.rename`; falls back to
+ * `path.dirname(parentDir)` on cross-filesystem `/tmp` (e.g. Linux tmpfs) if writable on
+ * the same filesystem; otherwise returns `os.tmpdir()` and relies on `EXDEV` in-place fallback.
+ */
+export async function resolveInstallWorkParent(
+  parentDir,
+  { tmpDir = os.tmpdir(), statFn = fs.stat, accessFn = fs.access } = {},
+) {
+  const resolvedParent = path.resolve(parentDir);
+  const resolvedTmp = path.resolve(tmpDir);
+
+  let parentStat = null;
+  try {
+    parentStat = await statFn(resolvedParent);
+  } catch {
+    parentStat = null;
+  }
+
+  if (!isSameOrSubpath(resolvedTmp, resolvedParent)) {
+    try {
+      const tmpStat = await statFn(resolvedTmp);
+      if (isSameFilesystem(tmpStat, resolvedTmp, parentStat, resolvedParent)) {
+        await accessFn(resolvedTmp, fsConstants.W_OK);
+        return resolvedTmp;
+      }
+    } catch {
+      // Fall through to check same-filesystem grandparent outside parentDir
+    }
+  }
+
+  const grandParent = path.dirname(resolvedParent);
+  if (grandParent && grandParent !== resolvedParent && !isSameOrSubpath(grandParent, resolvedParent)) {
+    try {
+      const grandStat = await statFn(grandParent);
+      if (isSameFilesystem(grandStat, grandParent, parentStat, resolvedParent)) {
+        await accessFn(grandParent, fsConstants.W_OK);
+        return grandParent;
+      }
+    } catch {
+      // Fall through to tmpDir (installPlugin handles EXDEV cleanly via in-place fallback)
+    }
+  }
+
+  return resolvedTmp;
+}
+
+async function renameWithRetry(
+  srcPath,
+  destPath,
+  { renameFn = fs.rename, maxTotalMs = RENAME_MAX_TOTAL_MS } = {},
+) {
   const startedAt = Date.now();
   let delayMs = 20;
 
   while (true) {
     try {
-      await fs.rename(srcPath, destPath);
+      await renameFn(srcPath, destPath);
       return;
     } catch (err) {
       const elapsed = Date.now() - startedAt;
-      if (!RETRYABLE_RENAME_CODES.has(err?.code) || elapsed + delayMs >= RENAME_MAX_TOTAL_MS) {
+      if (!RETRYABLE_RENAME_CODES.has(err?.code) || elapsed + delayMs >= maxTotalMs) {
         throw err;
       }
       await sleep(delayMs);
@@ -125,7 +201,16 @@ async function copySafe(src, dest) {
  * Preserves existing plugin `data/` directory (settings.json) and never touches
  * host installation binaries or global host configuration files.
  */
-export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
+export async function installPlugin({
+  repoRoot,
+  destDir,
+  dryRun = false,
+  renameFn = fs.rename,
+  renameMaxTotalMs = RENAME_MAX_TOTAL_MS,
+  tmpDir = os.tmpdir(),
+  statFn = fs.stat,
+  accessFn = fs.access,
+}) {
   const plannedFiles = [];
   for (const rel of INCLUDE_ENTRIES) {
     const full = path.join(repoRoot, rel);
@@ -156,9 +241,14 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
   const parentDir = path.dirname(destDir);
   await fs.mkdir(parentDir, { recursive: true });
 
-  const stagingDir = path.join(parentDir, `.${PLUGIN_NAME}.staging.${process.pid}.${Date.now()}`);
+  const workParent = await resolveInstallWorkParent(parentDir, { tmpDir, statFn, accessFn });
+  await fs.mkdir(workParent, { recursive: true });
+  const workRoot = await fs.mkdtemp(path.join(workParent, `.${PLUGIN_NAME}-install-`));
+  const stagingDir = path.join(workRoot, 'staging');
+  const backupDir = path.join(workRoot, 'backup');
   const preservedDataDir = path.join(destDir, 'data');
   const stagedDataDir = path.join(stagingDir, 'data');
+  let preserveWorkRoot = false;
 
   try {
     await fs.mkdir(stagingDir, { recursive: true });
@@ -193,7 +283,6 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
       await copySafe(preservedDataDir, stagedDataDir);
     }
 
-    const backupDir = path.join(parentDir, `.${PLUGIN_NAME}.old.${process.pid}.${Date.now()}`);
     let hadExisting = false;
     try {
       const existingStat = await fs.lstat(destDir);
@@ -209,30 +298,30 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
     }
 
     let movedExistingToBackup = false;
+    const renameOpts = { renameFn, maxTotalMs: renameMaxTotalMs };
     try {
       if (hadExisting) {
-        await renameWithRetry(destDir, backupDir);
+        await renameWithRetry(destDir, backupDir, renameOpts);
         movedExistingToBackup = true;
       }
-      await renameWithRetry(stagingDir, destDir);
-      if (movedExistingToBackup) {
-        await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
-      }
+      await renameWithRetry(stagingDir, destDir, renameOpts);
       return { installed: true, dryRun: false, mode: 'atomic-rename', destDir, entries: plannedFiles };
     } catch (renameErr) {
       if (movedExistingToBackup) {
         try {
-          await renameWithRetry(backupDir, destDir);
+          await renameWithRetry(backupDir, destDir, renameOpts);
           movedExistingToBackup = false;
         } catch (restoreErr) {
+          preserveWorkRoot = true;
           throw new Error(
             `Install swap failed (${renameErr?.message || renameErr}) and restoring backup failed (${restoreErr?.message || restoreErr}). Your preserved plugin data remains at: ${backupDir}`,
           );
         }
       }
       // On Windows, a running host app watching ~/.gemini/config/plugins/ may hold a directory handle
-      // causing EPERM/EBUSY/EACCES on directory rename. Fall back to direct in-place copy preserving data/.
-      if (!RETRYABLE_RENAME_CODES.has(renameErr?.code)) {
+      // causing EPERM/EBUSY/EACCES on directory rename; cross-device rename throws EXDEV.
+      // Fall back to direct in-place copy preserving data/.
+      if (!FALLBACK_RENAME_CODES.has(renameErr?.code)) {
         throw renameErr;
       }
       await fs.mkdir(destDir, { recursive: true });
@@ -259,12 +348,12 @@ export async function installPlugin({ repoRoot, destDir, dryRun = false }) {
           mode: 0o600,
         });
       }
-      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       return { installed: true, dryRun: false, mode: 'in-place-fallback', destDir, entries: plannedFiles };
     }
-  } catch (err) {
-    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-    throw err;
+  } finally {
+    if (!preserveWorkRoot) {
+      await fs.rm(workRoot, RM_CLEANUP_OPTIONS).catch(() => {});
+    }
   }
 }
 
