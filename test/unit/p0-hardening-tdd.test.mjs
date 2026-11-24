@@ -20,6 +20,7 @@ import {
 } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
 import { createJsonSettingsStore } from '../../src/adapters/storage/json-settings-store.mjs';
 import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
+import { DomainError, ERROR_CODES } from '../../src/core/i18n/error-codes.mjs';
 import { createStatusbarApp } from '../../src/ui/app.js';
 import { installPlugin } from '../../scripts/install-plugin.mjs';
 import { runAddonCli } from '../../scripts/statusbar-addon.mjs';
@@ -1725,4 +1726,371 @@ test('TC-P0-12d (v3.1.2): post-checkpoint RUNNING lasting >12s with 0 new steps 
   await flush();
   assert.equal(h.commandCalls.length, 1);
   assert.equal(h.commandCalls[0].sid, 'sess-working-stall');
+});
+
+test('TC-P0-13a (v3.1.3): lowering global limit on >100% session must NOT fire immediate 2nd /compact when post-compaction tokens drop >=15% yet remain >= lowered limit', async () => {
+  const h = createServiceHarness({
+    initialSettings: { defaultCustomLimit: 512_000, autoCompact: true },
+    initialTelemetryBySession: {
+      'sess-lower-global': {
+        sessionId: 'sess-lower-global',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        modelName: 'Gemini 4 Neon (High)',
+        stepCount: 200,
+        usedTokens: 360_000,
+        usedTokensSource: 'estimated',
+        maxContextTokens: 512_000,
+        lastCompactedStep: 100,
+        compactionJustCompleted: false,
+        hostCompactionInProgress: false,
+        tokenBreakdown: [],
+      },
+    },
+  });
+
+  // User lowers global defaultCustomLimit from 512K -> 128K; session immediately exceeds 100%
+  await h.service.updateSettings({ defaultCustomLimit: 128_000 });
+  const s1 = await h.service.getSessionSnapshot('sess-lower-global');
+  assert.equal(s1.autoCompactTriggered, true);
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // 18s later: 1st /compact finishes; tokens drop 60% (360K -> 145K) but are STILL >= 128K lowered limit
+  h.advance(18_000);
+  h.telemetryBySession.set('sess-lower-global', {
+    ...h.telemetryBySession.get('sess-lower-global'),
+    stepCount: 203,
+    usedTokens: 145_000,
+    usedTokensSource: 'estimated',
+    lastCompactedStep: 202,
+    compactionJustCompleted: false,
+    hostCompactionInProgress: false,
+  });
+  const s2 = await h.service.getSessionSnapshot('sess-lower-global');
+  assert.equal(
+    s2.autoCompactTriggered,
+    false,
+    'Post-compaction tokens still >= lowered limit must NOT clear waitingForDrop/cooldown via reducedMeaningfully',
+  );
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // 2s later: still 146K -> must remain blocked during cooldown/growth guard
+  h.advance(2_000);
+  h.telemetryBySession.set('sess-lower-global', {
+    ...h.telemetryBySession.get('sess-lower-global'),
+    stepCount: 204,
+    usedTokens: 146_000,
+  });
+  const s3 = await h.service.getSessionSnapshot('sess-lower-global');
+  assert.equal(s3.autoCompactTriggered, false);
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+});
+
+test('TC-P0-13b (v3.1.3): ambiguous 504 timeout must NOT duplicate /compact via agentapi fallback or reset waitingForDrop/pendingAutoResume', async () => {
+  // Part 1: compaction-adapter must NOT fall back to agentapi on 504 RPC timeout
+  let spawnCalls = 0;
+  let observedRpcOpts = null;
+  const adapter = createAntigravityCompactionAdapter({
+    lsTransport: {
+      callUnaryRpc: async (_method, _payload, opts) => {
+        observedRpcOpts = opts;
+        throw new DomainError(
+          ERROR_CODES.TELEMETRY_UNAVAILABLE,
+          504,
+          'LS RPC SendUserCascadeMessage timed out after 20000ms.',
+        );
+      },
+    },
+    agentApiExePath: process.execPath,
+    spawnFn: () => {
+      spawnCalls += 1;
+      throw new Error('spawnFn must not be called on ambiguous 504 timeout');
+    },
+  });
+
+  const compactRes = await adapter.compactSession('sess-timeout');
+  assert.equal(compactRes.accepted, false);
+  assert.equal(compactRes.ambiguous, true, 'Ambiguous 504 timeout must be flagged ambiguous: true');
+  assert.equal(spawnCalls, 0, 'Must NOT duplicate /compact via agentapi fallback after 504 RPC timeout');
+  assert.ok(
+    (observedRpcOpts?.timeoutMs ?? 0) >= 20_000,
+    `SendUserCascadeMessage compact timeout should be >= 20000ms, got ${observedRpcOpts?.timeoutMs}`,
+  );
+
+  // Sibling path: sendCommand must NOT fall back to RPC when agentapi itself timed out
+  let rpcFallbackCalls = 0;
+  const cmdAdapter = createAntigravityCompactionAdapter({
+    lsTransport: {
+      callUnaryRpc: async () => {
+        rpcFallbackCalls += 1;
+        return {};
+      },
+    },
+    agentApiExePath: process.execPath,
+    fallbackTimeoutMs: 50,
+    spawnFn: (_exe, _args, opts) => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.exitCode = null;
+      child.signalCode = null;
+      child.kill = () => {};
+      opts.signal.addEventListener('abort', () => {
+        const err = new Error('The operation was aborted');
+        err.name = 'AbortError';
+        child.emit('error', err);
+      });
+      return child;
+    },
+  });
+  const cmdRes = await cmdAdapter.sendCommand('sess-timeout', 'continue work');
+  assert.equal(cmdRes.accepted, false);
+  assert.equal(cmdRes.ambiguous, true);
+  assert.equal(rpcFallbackCalls, 0, 'Must NOT duplicate sendCommand via RPC fallback after agentapi timeout');
+  await adapter.dispose();
+  await cmdAdapter.dispose();
+
+  // Part 2: statusbar-service must preserve waitingForDrop & pendingAutoResume on ambiguous timeout
+  const h = createServiceHarness({
+    initialSettings: { defaultCustomLimit: 256_000, autoCompactWhileRunning: 'resume' },
+    initialTelemetryBySession: {
+      'sess-ambig': {
+        sessionId: 'sess-ambig',
+        status: 'CASCADE_RUN_STATUS_RUNNING',
+        modelName: 'Gemini 4 Neon (High)',
+        stepCount: 80,
+        usedTokens: 280_000,
+        usedTokensSource: 'estimated',
+        maxContextTokens: 512_000,
+        lastCompactedStep: 10,
+        compactionJustCompleted: false,
+        hostCompactionInProgress: false,
+        tokenBreakdown: [],
+      },
+    },
+    compactImpl: async () => ({
+      accepted: false,
+      method: 'rpc',
+      ambiguous: true,
+      reason: 'LS RPC SendUserCascadeMessage timed out after 20000ms.',
+    }),
+  });
+
+  const s1 = await h.service.getSessionSnapshot('sess-ambig');
+  assert.equal(s1.autoCompactTriggered, true);
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // 18s later: session transitions to IDLE while tokens still 280K -> MUST NOT immediately re-fire 2nd /compact
+  h.advance(18_000);
+  h.telemetryBySession.set('sess-ambig', {
+    ...h.telemetryBySession.get('sess-ambig'),
+    status: 'CASCADE_RUN_STATUS_IDLE',
+  });
+  const sIdle = await h.service.getSessionSnapshot('sess-ambig');
+  assert.equal(
+    sIdle.autoCompactTriggered,
+    false,
+    'Ambiguous timeout must NOT arm failedWhileRunning immediate IDLE retry',
+  );
+  assert.equal(
+    sIdle.autoResumePending,
+    true,
+    'Ambiguous timeout must preserve pendingAutoResume in case host accepted 1st /compact',
+  );
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+});
+
+test('TC-P0-13c (v3.1.3): updateSettings must preserve autoCompactState for sessions currently compacting and ignore no-op same-value global limit saves', async () => {
+  const h = createServiceHarness({
+    initialSettings: { defaultCustomLimit: 512_000, autoCompact: true },
+    initialTelemetryBySession: {
+      'sess-inflight': {
+        sessionId: 'sess-inflight',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        modelName: 'Gemini 4 Neon (High)',
+        stepCount: 100,
+        usedTokens: 300_000,
+        usedTokensSource: 'estimated',
+        maxContextTokens: 512_000,
+        lastCompactedStep: 20,
+        compactionJustCompleted: false,
+        hostCompactionInProgress: false,
+        tokenBreakdown: [],
+      },
+    },
+  });
+
+  // 1. Lower global limit -> 1st /compact starts
+  await h.service.updateSettings({ defaultCustomLimit: 256_000 });
+  const s1 = await h.service.getSessionSnapshot('sess-inflight');
+  assert.equal(s1.autoCompactTriggered, true);
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // 2. 5s later (while 1st /compact is still in-flight): user lowers global limit again (256K -> 200K)
+  h.advance(5_000);
+  await h.service.updateSettings({ defaultCustomLimit: 200_000 });
+
+  // 3. 11s later (t=16s > 15s compactCooldownMs fallback TTL while 18s compaction is still running):
+  //    MUST NOT fire a 2nd /compact because autoCompactState was preserved for in-flight compaction!
+  h.advance(11_000);
+  const s16 = await h.service.getSessionSnapshot('sess-inflight');
+  assert.equal(
+    s16.autoCompactTriggered,
+    false,
+    'updateSettings while compaction is in-flight must NOT wipe cooldown and double-fire after 15s',
+  );
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // 4. Re-saving the exact same global limit (200K -> 200K no-op) after mutex cleared must NOT wipe cooldown
+  h.advance(10_000);
+  await h.service.updateSettings({ defaultCustomLimit: 200_000 });
+  const sNoop = await h.service.getSessionSnapshot('sess-inflight');
+  assert.equal(sNoop.autoCompactTriggered, false, 'No-op same-value global limit save must NOT reset autoCompactState');
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+});
+
+test('TC-P0-13d (v3.1.3): manual /compact arms autoCompactState so auto-compact never fires a 2nd /compact during an 18s compaction, and keeps tail check active', async () => {
+  const h = createServiceHarness({
+    initialSettings: { defaultCustomLimit: 256_000, autoCompact: true },
+    initialTelemetryBySession: {
+      'sess-manual-18s': {
+        sessionId: 'sess-manual-18s',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        modelName: 'Gemini 4 Neon (High)',
+        stepCount: 150,
+        usedTokens: 300_000,
+        usedTokensSource: 'estimated',
+        maxContextTokens: 512_000,
+        lastCompactedStep: 50,
+        compactionJustCompleted: false,
+        hostCompactionInProgress: false,
+        tokenBreakdown: [],
+      },
+    },
+  });
+
+  // User triggers manual /compact on an over-limit session
+  const req = await h.service.requestCompaction('sess-manual-18s');
+  assert.equal(req.accepted, true);
+  assert.equal(h.compactCalls.length, 1);
+
+  // 16s later (past 15s mutex TTL, before 18s compaction finishes, hostCompactionInProgress not reported)
+  h.advance(16_000);
+  h.telemetryCalls.length = 0;
+  const s16 = await h.service.getSessionSnapshot('sess-manual-18s');
+  assert.equal(
+    s16.autoCompactTriggered,
+    false,
+    'Auto-compact must NOT fire a 2nd /compact while manual compaction is still finishing past 15s',
+  );
+  assert.equal(
+    h.telemetryCalls[0]?.opts?.includeTailSteps,
+    true,
+    'Tail checkpoint probe must remain enabled while awaiting post-compaction drop within cooldown',
+  );
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+});
+
+test('TC-P0-13e (v3.1.3): out-of-order concurrent getSessionSnapshot response must NOT fire duplicate /compact even when stepCount and lastCompactedStep are null', async () => {
+  let now = 30_000_000;
+  const compactCalls = [];
+  let mode = 'over';
+  let releaseSlowPoll = null;
+
+  const service = createStatusbarService({
+    clock: () => now,
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async (sid) => {
+        if (mode === 'slow_over') {
+          mode = 'dropped';
+          await new Promise((resolve) => {
+            releaseSlowPoll = resolve;
+          });
+          return {
+            sessionId: sid,
+            status: 'CASCADE_RUN_STATUS_IDLE',
+            modelName: 'Gemini 4 Neon (High)',
+            stepCount: null,
+            usedTokens: 300_000,
+            usedTokensSource: 'estimated',
+            maxContextTokens: 512_000,
+            lastCompactedStep: null,
+            compactionJustCompleted: false,
+            hostCompactionInProgress: false,
+            tokenBreakdown: [],
+          };
+        }
+        return {
+          sessionId: sid,
+          status: 'CASCADE_RUN_STATUS_IDLE',
+          modelName: 'Gemini 4 Neon (High)',
+          stepCount: null,
+          usedTokens: mode === 'dropped' ? 45_000 : 300_000,
+          usedTokensSource: 'estimated',
+          maxContextTokens: 512_000,
+          lastCompactedStep: null,
+          compactionJustCompleted: false,
+          hostCompactionInProgress: false,
+          tokenBreakdown: [],
+        };
+      },
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: now }),
+    },
+    compactionPort: {
+      compactSession: async (sid) => {
+        compactCalls.push({ sid, at: now });
+        return { accepted: true, method: 'rpc' };
+      },
+    },
+    settingsPort: {
+      read: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        autoCompactWhileRunning: 'resume',
+        compactPrompt: '',
+        defaultCustomLimit: 256_000,
+        modelLimits: new Map(),
+        sessions: new Map(),
+        customButtons: [],
+        disabledRuntimeAddonIds: [],
+      }),
+      update: async () => ({}),
+    },
+  });
+
+  // 1. Triggers 1st /compact
+  const s1 = await service.getSessionSnapshot('sess-ooo');
+  assert.equal(s1.autoCompactTriggered, true);
+  await flush();
+  assert.equal(compactCalls.length, 1);
+
+  // 2. Advance past 15s mutex; start slow Poll 2 (captures pre-compact 300K), then complete fast Poll 3 (45K)
+  now += 17_000;
+  mode = 'slow_over';
+  const slowPollPromise = service.getSessionSnapshot('sess-ooo');
+  await flush();
+  now += 1_000;
+  const fastSnap = await service.getSessionSnapshot('sess-ooo');
+  assert.equal(fastSnap.usedTokens, 45_000);
+  assert.equal(fastSnap.autoCompactTriggered, false);
+
+  // 3. Slow Poll 2 finally resolves with stale pre-compact 300K -> MUST NOT trigger 2nd /compact!
+  releaseSlowPoll();
+  const slowSnap = await slowPollPromise;
+  assert.equal(
+    slowSnap.autoCompactTriggered,
+    false,
+    'Out-of-order older getSessionSnapshot response must never trigger duplicate /compact',
+  );
+  await flush();
+  assert.equal(compactCalls.length, 1);
 });

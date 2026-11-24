@@ -192,7 +192,7 @@ test('TC-TDD-AC-02: auto-compact never fires while hostCompactionInProgress or c
   assert.equal(h.compactCalls.length, 0);
 });
 
-test('TC-TDD-AC-03: advancing lastCompactedStep re-arms auto-compact immediately even if no intermediate below-limit snapshot was polled', async () => {
+test('TC-TDD-AC-03: advancing lastCompactedStep updates stale pre-compaction baseline without immediate double-compact when post-compaction stays above limit', async () => {
   const h = createHarness({
     initialSettings: { defaultCustomLimit: 256_000 },
     initialTelemetryBySession: {
@@ -217,7 +217,7 @@ test('TC-TDD-AC-03: advancing lastCompactedStep re-arms auto-compact immediately
   await flush();
   assert.equal(h.compactCalls.length, 1);
 
-  // Compaction completes at step 105 (even without polling an intermediate <256K snapshot)
+  // Compaction completes at step 105, dropping to 260K (still >= 256K limit)
   h.advance(10_000);
   h.telemetryBySession.set('sess-rearm', {
     ...h.telemetryBySession.get('sess-rearm'),
@@ -230,7 +230,7 @@ test('TC-TDD-AC-03: advancing lastCompactedStep re-arms auto-compact immediately
   assert.equal(snapCompacted.compaction.inProgress, false);
   assert.equal(snapCompacted.autoCompactTriggered, false);
 
-  // Next turn crosses 256K again at 262K (< previous 324K!): MUST fire immediately because compaction re-armed it!
+  // 5s later at 262K (+2K only, within 90s cooldown): MUST NOT immediately double-compact!
   h.advance(5_000);
   h.telemetryBySession.set('sess-rearm', {
     ...h.telemetryBySession.get('sess-rearm'),
@@ -239,8 +239,31 @@ test('TC-TDD-AC-03: advancing lastCompactedStep re-arms auto-compact immediately
     lastCompactedStep: 105,
     compactionJustCompleted: false,
   });
+  const snapImmediate = await h.service.getSessionSnapshot('sess-rearm');
+  assert.equal(
+    snapImmediate.autoCompactTriggered,
+    false,
+    'Post-compaction tokens still >= limit must honor cooldown + growth guard instead of double-compacting',
+  );
+  await flush();
+  assert.equal(h.compactCalls.length, 1);
+
+  // After 90s cooldown expires and real new work adds +20K from refreshed 260K baseline (282K < old 324K!):
+  // MUST re-trigger cleanly, proving the stale 324K baseline was updated to 260K.
+  h.advance(95_000);
+  h.telemetryBySession.set('sess-rearm', {
+    ...h.telemetryBySession.get('sess-rearm'),
+    stepCount: 120,
+    usedTokens: 282_000,
+    lastCompactedStep: 105,
+    compactionJustCompleted: false,
+  });
   const snapNextCross = await h.service.getSessionSnapshot('sess-rearm');
-  assert.equal(snapNextCross.autoCompactTriggered, true, 'Advancing lastCompactedStep must clear stale waitingForDrop & 324K baseline');
+  assert.equal(
+    snapNextCross.autoCompactTriggered,
+    true,
+    'Advancing lastCompactedStep must refresh baseline from 324K to 260K so +20K growth after cooldown triggers',
+  );
   await flush();
   assert.equal(h.compactCalls.length, 2);
 });
