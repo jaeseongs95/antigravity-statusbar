@@ -9,9 +9,12 @@
 ## [English] `v3.1.4` Release Notes
 
 ### 1. Summary
-`antigravity-statusbar` `v3.1.4` aligns the plugin with `antigravity-native-addon-host` **`v2.3.0`** by declaring explicit Desktop-only host profile isolation (preventing Remote Web auto-inclusion from baking ephemeral Sidecar loopback tokens into Remote Web UserScript/bookmarklet artifacts), adding a fail-closed `addonHost.hostProfileId` runtime guard, and updating test coverage to mirror `v2.2.0`/`v2.3.0` host kernel contracts.
+`antigravity-statusbar` `v3.1.4` aligns the plugin with `antigravity-native-addon-host` **`v2.3.0`** by declaring explicit Desktop-only host profile isolation (preventing Remote Web auto-inclusion from baking ephemeral Sidecar loopback tokens into Remote Web UserScript/bookmarklet artifacts), adding a fail-closed `addonHost.hostProfileId` runtime guard, refining the auto-resume continuation prompt so it does not assume external summary-context artifacts, and updating test coverage to mirror `v2.2.0`/`v2.3.0` host kernel contracts.
 
 ### 2. Changes
+- **Auto-Resume Prompt Tool-Neutrality Fix (`src/core/model/context-policy.mjs`, `test/unit/p0-hardening-tdd.test.mjs`)**:
+  - Removes the assumption of an external summary-context artifact (`"요약 컨텍스트"` / `"the compaction summary"`) from `buildAutoResumePrompt` (`ko` and `en`), instructing the agent instead to check the current conversation and actual workspace state before continuing from where it left off (or briefly confirming completion if already finished).
+  - Adds unit regression `TC-P0-00f` verifying both `ko` and `en` prompts.
 - **Desktop-Only `AddonManifest.v2` Isolation (`addon-manifest.v2.json`)**:
   - Adds `"hostProfiles": ["antigravity-desktop"]` and `"excludeHostProfiles": ["antigravity-remote-web"]` and raises `"minHostVersion"` from `"2.0.0"` to `"2.3.0"` (the first host release whose strict `addon-manifest.v2.schema.json` accepts `hostProfiles` / `excludeHostProfiles`).
   - Prevents `antigravity-native-addon-host --build-remote` (whose `antigravity-remote-web` profile inherits `compatibleHostProfiles: ["antigravity-desktop"]`) from auto-packing `runtime/statusbar-renderer.js` with live per-process loopback URL + 256-bit Sidecar bearer tokens or permanently embedding the standby stub.
@@ -33,9 +36,12 @@
 ## [한국어] `v3.1.4` 릴리즈 노트
 
 ### 1. 개요
-`antigravity-statusbar` `v3.1.4`는 `antigravity-native-addon-host` **`v2.3.0`** 릴리즈에 맞춰 데스크톱 전용 호스트 프로필 격리(Remote Web 자동 포함으로 인한 Sidecar 임시 토큰 유출·고장 차단)를 매니페스트와 런타임 양쪽에 적용하고, `v2.2.0`/`v2.3.0` 호스트 커널 계약에 맞춰 테스트와 문서를 정합화한 호환성 패치 릴리즈입니다.
+`antigravity-statusbar` `v3.1.4`는 `antigravity-native-addon-host` **`v2.3.0`** 릴리즈에 맞춰 데스크톱 전용 호스트 프로필 격리(Remote Web 자동 포함으로 인한 Sidecar 임시 토큰 유출·고장 차단)를 매니페스트와 런타임 양쪽에 적용하고, 자동 재개 프롬프트에서 외부 요약 컨텍스트 전제를 제거했으며, `v2.2.0`/`v2.3.0` 호스트 커널 계약에 맞춰 테스트와 문서를 정합화한 호환성 패치 릴리즈입니다.
 
 ### 2. 주요 변경 사항
+- **자동 재개 프롬프트 외부 요약 컨텍스트 전제 제거 (`src/core/model/context-policy.mjs`, `test/unit/p0-hardening-tdd.test.mjs`)**:
+  - `buildAutoResumePrompt`(`ko`/`en`)에서 외부 도구·요약 산출물 존재를 전제하는 `"요약 컨텍스트를 참고해"` / `"using the compaction summary"` 표현을 제거하고, 어떤 환경에서도 유효하도록 **현재 대화 내용과 실제 작업 상태를 확인해** 중단된 지점부터 이어가도록 수정했습니다(완료 상태 시 짧은 완료 확인 조건 유지).
+  - 한·영 프롬프트 회귀 테스트 `TC-P0-00f`를 추가했습니다.
 - **데스크톱 전용 `AddonManifest.v2` 격리 (`addon-manifest.v2.json`)**:
   - `compatibility`에 `"hostProfiles": ["antigravity-desktop"]`과 `"excludeHostProfiles": ["antigravity-remote-web"]`을 명시하고, 해당 필드를 허용하는 최소 호스트 버전인 `"minHostVersion": "2.3.0"`으로 상향했습니다.
   - `antigravity-native-addon-host v2.3.0`의 `antigravity-remote-web` 프로필이 `compatibleHostProfiles: ["antigravity-desktop"]`을 상속함에 따라 `addon-host --build-remote` 실행 시 `runtime/statusbar-renderer.js`가 자동 포함되는 문제를 차단했습니다(데스크톱 실행 중 빌드 시 프로세스별 임시 256-bit Sidecar 토큰·루프백 포트가 Remote Web 산출물에 고정되거나, 종료 상태 빌드 시 대기 스텁이 영구 박제되는 현상 방지).

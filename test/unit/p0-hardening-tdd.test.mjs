@@ -21,6 +21,7 @@ import {
 import { createJsonSettingsStore } from '../../src/adapters/storage/json-settings-store.mjs';
 import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
 import { DomainError, ERROR_CODES } from '../../src/core/i18n/error-codes.mjs';
+import { buildAutoResumePrompt } from '../../src/core/model/context-policy.mjs';
 import { createStatusbarApp } from '../../src/ui/app.js';
 import { installPlugin } from '../../scripts/install-plugin.mjs';
 import { runAddonCli } from '../../scripts/statusbar-addon.mjs';
@@ -2093,4 +2094,18 @@ test('TC-P0-13e (v3.1.3): out-of-order concurrent getSessionSnapshot response mu
   );
   await flush();
   assert.equal(compactCalls.length, 1);
+});
+
+test('TC-P0-00f (v3.1.4): buildAutoResumePrompt avoids assuming external summary-context artifacts in both ko and en locales', () => {
+  const koPrompt = buildAutoResumePrompt('ko');
+  const defaultPrompt = buildAutoResumePrompt();
+  const enPrompt = buildAutoResumePrompt('en');
+
+  assert.equal(defaultPrompt, koPrompt);
+  assert.equal(koPrompt.includes('요약 컨텍스트'), false, 'ko prompt must not assume external summary-context exists');
+  assert.equal(/compaction summary/i.test(enPrompt), false, 'en prompt must not assume external summary-context exists');
+  assert.ok(koPrompt.includes('현재 대화 내용과 실제 작업 상태'));
+  assert.ok(koPrompt.includes('완료 여부만'));
+  assert.ok(enPrompt.includes('current conversation and actual workspace state'));
+  assert.ok(enPrompt.includes('briefly confirm completion'));
 });
