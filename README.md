@@ -1,14 +1,14 @@
-# Antigravity Statusbar (v3.1.4)
+# Antigravity Statusbar (v3.1.5)
 
 Official **Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + Headless Native Sidecar)** for monitoring real-time session context usage, prompt cache hit rate, 5h & weekly account quota, 4-tier soft context limits (`session > model > default > host`), guarded auto-compaction with auto-resume, token breakdown, and one-click `/compact`.
 
 [한국어 문서 (README.ko.md)](./README.ko.md)
 
-## Why v3.1.4 (AddonManifest.v2 Inline Statusbar + Headless Native Sidecar)
+## Why v3.1.5 (AddonManifest.v2 Inline Statusbar + Headless Native Sidecar)
 
 Previous v1/v2 versions patched Electron `app.asar` and hooked renderer internals (`lsClient` / React Fiber / Protobuf). Antigravity `2.33.0` upgraded to `@bufbuild/protobuf` v2, proving renderer mutation is unsafe.
 
-**v3.1.4** runs on the official native plugin + `antigravity-native-addon-host` **`>= 2.3.0`** (`AddonManifest.v2`) architecture:
+**v3.1.5** runs on the official native plugin + [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) (formerly `antigravity-native-addon-host`) **`>= 2.3.0`** (`AddonManifest.v2`) architecture:
 - **Zero `app.asar` patching**, zero Electron renderer injection, zero React Fiber/Redux/Protobuf mutation, zero `hooks.json`.
 - **Isolated Shadow DOM Inline UI (`AddonManifest.v2`, Desktop-Only)**: Renders directly beneath the chat input box using host-owned Shadow DOM slots (`status-bar`, `overlay` popover, `modal` `<dialog>`) with `trustLevel: "restricted"` and zero credential leakage onto `window` or DOM. Declares `hostProfiles: ["antigravity-desktop"]` and `excludeHostProfiles: ["antigravity-remote-web"]` (`minHostVersion: "2.3.0"`) plus a fail-closed `addonHost.hostProfileId` runtime guard so Remote Web builds (`addon-host --build-remote`) never pack or execute the local Sidecar renderer bundle. The redundant right-hand `AUX_PANE` tab is removed (`sidecar.json` `has_web_ui: false`).
 - **Ports & Adapters (Hexagonal) Architecture**: `src/core/` and `src/ui/` are 100% vendor-neutral. All Antigravity integration lives exclusively in `src/adapters/antigravity/`.
@@ -29,7 +29,7 @@ Previous v1/v2 versions patched Electron `app.asar` and hooked renderer internal
 
 ## Installation
 
-Requires `antigravity-native-addon-host >= 2.3.0` installed on Antigravity Desktop.
+Requires [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) (formerly `antigravity-native-addon-host`) `>= 2.3.0` installed on Antigravity Desktop.
 
 ```bash
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
@@ -38,10 +38,10 @@ npm ci --omit=dev
 npm run install-plugin
 ```
 
-Register (or refresh) the updated `AddonManifest.v2` manifest in `antigravity-native-addon-host` so `~/.gemini/antigravity/addons.d/antigravity-statusbar.json` stays synchronized with `v3.1.4` (`excludeHostProfiles: ["antigravity-remote-web"]`):
+Register (or refresh) the updated `AddonManifest.v2` manifest in `antigravity-addons` so `~/.gemini/antigravity/addons.d/antigravity-statusbar.json` stays synchronized with `v3.1.5` (`excludeHostProfiles: ["antigravity-remote-web"]`):
 
 ```bash
-# Run from your antigravity-native-addon-host directory
+# Run from your antigravity-addons directory
 node bin/addon-host.js --register ~/.gemini/config/plugins/antigravity-statusbar/addon-manifest.v2.json
 ```
 

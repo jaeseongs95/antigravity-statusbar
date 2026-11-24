@@ -814,16 +814,23 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
     const res = await installPlugin({ repoRoot: REPO_ROOT, destDir, dryRun: false });
     assert.equal(res.installed, true);
 
+    const parentEntries = await fs.readdir(tempRoot);
+    assert.deepEqual(
+      parentEntries.filter((name) => name !== 'empty-repo'),
+      ['antigravity-statusbar'],
+      'installPlugin must never leave staging or backup directories inside parentDir',
+    );
+
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.1.4');
+    assert.equal(manifest.version, '3.1.5');
     const addonManifest = JSON.parse(
       await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
     );
     assert.equal(addonManifest.schemaVersion, 2);
     assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-    assert.equal(addonManifest.version, '3.1.4');
+    assert.equal(addonManifest.version, '3.1.5');
     assert.deepEqual(addonManifest.compatibility.excludeHostProfiles, ['antigravity-remote-web']);
     assert.equal(addonManifest.compatibility.minHostVersion, '2.3.0');
     assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');

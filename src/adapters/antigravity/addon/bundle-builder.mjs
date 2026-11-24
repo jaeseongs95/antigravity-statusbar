@@ -2,7 +2,7 @@
  * Deterministic renderer script assembler for AddonManifest.v2 (SRP).
  *
  * Composes the SOLID DIP factory modules into a single self-contained script body
- * executed by `antigravity-native-addon-host` v2.3.0+ in Isolated World 998.
+ * executed by `antigravity-addons` (formerly `antigravity-native-addon-host`) v2.3.0+ in Isolated World 998.
  *
  * Security Invariants:
  * - Validates loopback-only `baseUrl` and >= 16-char `token` before assembly.
