@@ -608,12 +608,14 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   const styleRecords = [];
   const portals = [];
   const disposers = [];
+  const disposeEvents = [];
   let disposed = false;
 
   const v2HostHandle = Object.freeze({
     pluginId,
-    version: '3.1.3',
+    version: '3.1.4',
     trustLevel: 'restricted',
+    hostProfileId: 'antigravity-desktop',
     schemaVersion: 2,
     sourceSchemaVersion: 2,
     mountSlot(slotId, opts = {}) {
@@ -641,6 +643,8 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
       return rootEl;
     },
     unmountSlot(slotId) {
+      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
+      disposeEvents.push(['unmountSlot', slotId]);
       const rec = mountedSlots.get(slotId);
       if (!rec) return false;
       rec.hostEl.remove();
@@ -649,10 +653,13 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
       return true;
     },
     injectStyle(styleId, cssText, opts = {}) {
+      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
       styleRecords.push({ styleId, slotId: opts.slotId || null, length: String(cssText || '').length });
       return { styleId };
     },
     removeStyle(styleId) {
+      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
+      disposeEvents.push(['removeStyle', styleId]);
       return Boolean(styleId);
     },
     openPopover(slotId, opts = {}) {
@@ -690,8 +697,15 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
       dlg.setAttribute('data-addon-host-modal-dialog', '1');
       dlg.setAttribute('data-addon-host-owner', pluginId);
       dlg.setAttribute('data-addon-host-slot', slotId);
-      // Mirror real host modal-portal.js:224 titleBarOverlay inset
-      dlg.style.marginTop = 'max(env(titlebar-area-height, 36px), 36px)';
+      // Mirror real host v2.2.0+ modal-portal.js centered `<dialog>` defaults
+      dlg.style.position = 'fixed';
+      dlg.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
+      dlg.style.right = '0';
+      dlg.style.bottom = '0';
+      dlg.style.left = '0';
+      dlg.style.margin = 'auto';
+      dlg.style.width = 'fit-content';
+      dlg.style.height = 'fit-content';
       dlg.style.zIndex = '2147483001';
       const bodyEl = new MockElement('div', doc);
       bodyEl.className = 'addon-host-slot-root';
@@ -719,8 +733,10 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
     },
     dispose() {
       if (disposed) return;
-      disposed = true;
+      // Mirror host v2.2.0+ I10 invariant: run onDispose callbacks BEFORE marking handle disposed
+      // so plugin unmountSlot()/removeStyle() calls succeed without ERR_PLUGIN_HANDLE_DISPOSED.
       for (const fn of disposers.splice(0)) fn();
+      disposed = true;
       for (const p of portals) p.close();
       for (const slotId of Array.from(mountedSlots.keys())) {
         mountedSlots.get(slotId).hostEl.remove();
@@ -856,8 +872,113 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   const movedRec = mountedSlots.get('antigravity-statusbar.root');
   assert.equal(movedRec.container, v2.box, 'Tab switch must unmount and remount v2 Shadow slot into new active box');
 
-  // 5. Dispose cleans up slots and portals
+  // 5. Dispose cleans up slots and portals cleanly under v2.2.0+ I10 ordering
   v2HostHandle.dispose();
   assert.equal(mountedSlots.size, 0);
   assert.equal(sandboxWindow.statusbarAddons, undefined);
+  assert.ok(
+    disposeEvents.some(([op, id]) => op === 'unmountSlot' && id === 'antigravity-statusbar.root'),
+    'onDispose must unmount root slot before host handle transitions to disposed',
+  );
+  assert.ok(
+    disposeEvents.some(([op, id]) => op === 'removeStyle' && id === 'statusbar-main'),
+    'onDispose must remove main style before host handle transitions to disposed',
+  );
+});
+
+test('TC-ADDON-10: v2.3.0 Remote Web defense-in-depth fails closed on both active bundle and standby stub with zero mounts, styles, globals, or loopback fetches', async () => {
+  const activeSource = renderAddonRendererBundle({
+    baseUrl: 'http://127.0.0.1:45555',
+    token: TEST_TOKEN,
+  });
+  const standbySource = renderAddonStandbyStub();
+
+  // Static bundle hygiene check (zero DOM sink / dynamic code execution / external require)
+  for (const [label, src] of [
+    ['active', activeSource],
+    ['standby', standbySource],
+  ]) {
+    assert.equal(/\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b/.test(src), false, `${label} bundle must not use HTML sinks`);
+    assert.equal(/\beval\s*\(|\bnew\s+Function\b|\brequire\s*\(/.test(src), false, `${label} bundle must not use eval/Function/require`);
+  }
+
+  for (const [label, src] of [
+    ['active', activeSource],
+    ['standby', standbySource],
+  ]) {
+    const { doc, createConversationView } = createMockDom();
+    const view = createConversationView('sess-remote-web');
+    view.editor.focus();
+
+    let mountCalls = 0;
+    let styleCalls = 0;
+    let portalCalls = 0;
+    let disposeHookCalls = 0;
+    let fetchCalls = 0;
+
+    const remoteWebHostHandle = Object.freeze({
+      pluginId: 'antigravity-statusbar',
+      version: '3.1.4',
+      trustLevel: 'restricted',
+      hostProfileId: 'antigravity-remote-web',
+      schemaVersion: 2,
+      sourceSchemaVersion: 2,
+      mountSlot() {
+        mountCalls += 1;
+        return null;
+      },
+      unmountSlot() {
+        return false;
+      },
+      injectStyle() {
+        styleCalls += 1;
+        return { styleId: 'none' };
+      },
+      removeStyle() {
+        return false;
+      },
+      openPopover() {
+        portalCalls += 1;
+        return null;
+      },
+      openModal() {
+        portalCalls += 1;
+        return null;
+      },
+      onDispose() {
+        disposeHookCalls += 1;
+      },
+    });
+
+    const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
+    vm.runInNewContext(
+      `(function(addonHost){\n${src}\n})(addonHost);`,
+      {
+        window: sandboxWindow,
+        document: doc,
+        addonHost: remoteWebHostHandle,
+        AbortController,
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
+        fetch: async () => {
+          fetchCalls += 1;
+          throw new Error('Loopback fetch must never fire on Remote Web');
+        },
+      },
+    );
+    await flushMicrotasks();
+
+    assert.equal(mountCalls, 0, `${label}: must not mount any slot on antigravity-remote-web`);
+    assert.equal(styleCalls, 0, `${label}: must not inject any style on antigravity-remote-web`);
+    assert.equal(portalCalls, 0, `${label}: must not open any portal on antigravity-remote-web`);
+    assert.equal(disposeHookCalls, 0, `${label}: must not register disposers on antigravity-remote-web`);
+    assert.equal(fetchCalls, 0, `${label}: must not issue any loopback fetch on antigravity-remote-web`);
+    assert.equal(doc.getDirectStyleCreateCount(), 0, `${label}: must not create direct style elements`);
+    assert.equal(doc.getListenerCount('focusin'), 0, `${label}: must not bind document listeners`);
+    assert.equal(doc.getListenerCount('keydown'), 0, `${label}: must not bind keydown listeners`);
+    assert.equal(doc.getListenerCount('pointerdown'), 0, `${label}: must not bind pointerdown listeners`);
+    assert.equal(sandboxWindow.statusbarAddons, undefined, `${label}: must not expose window.statusbarAddons`);
+  }
 });

@@ -42,6 +42,8 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
     'integrity',
     'uiSlots',
     'isolation',
+    'settingsBridge',
+    'configBridge',
     'loadOrder',
   ]);
   for (const key of Object.keys(manifest)) {
@@ -53,9 +55,13 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
   assert.equal(manifest.displayName, 'Antigravity Statusbar');
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(manifest.trustLevel, 'restricted');
+  assert.equal(manifest.settingsBridge, undefined);
+  assert.equal(manifest.configBridge, undefined);
   assert.deepEqual(manifest.compatibility, {
     hostProfile: 'antigravity-desktop',
-    minHostVersion: '2.0.0',
+    hostProfiles: ['antigravity-desktop'],
+    excludeHostProfiles: ['antigravity-remote-web'],
+    minHostVersion: '2.3.0',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {
@@ -155,6 +161,7 @@ test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM /
 
   const portV1 = assertRendererHostPort(createAddonHostAdapter(fakeHostV1, 'antigravity-statusbar.root'));
   assert.equal(portV1.schemaVersion, 1);
+  assert.equal(portV1.hostProfileId, null);
   assert.equal(portV1.openModal, undefined);
   assert.equal(portV1.openPopover, undefined);
   assert.equal(portV1.mountSlot('BOX'), fakeEl);
@@ -178,6 +185,7 @@ test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM /
   const fakeHostV2 = {
     pluginId: 'antigravity-statusbar',
     schemaVersion: 2,
+    hostProfileId: 'antigravity-desktop',
     mountSlot(slotId, opts) {
       v2Calls.push(['mountSlot', slotId, opts]);
       return { id: `shadow-root-inner-${opts?.container?.id || 'none'}` };
@@ -216,6 +224,11 @@ test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM /
     ),
   );
   assert.equal(portV2.schemaVersion, 2);
+  assert.equal(portV2.hostProfileId, 'antigravity-desktop');
+  const portRemoteWeb = assertRendererHostPort(
+    createAddonHostAdapter({ ...fakeHostV2, hostProfileId: ' antigravity-remote-web ' }),
+  );
+  assert.equal(portRemoteWeb.hostProfileId, 'antigravity-remote-web');
   portV2.mountSlot(box1);
   // Same container -> no unmount before mount
   portV2.mountSlot(box1);

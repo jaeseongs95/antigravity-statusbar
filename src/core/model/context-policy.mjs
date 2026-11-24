@@ -144,9 +144,9 @@ export function normalizeAutoCompactWhileRunning(rawMode) {
  */
 export function buildAutoResumePrompt(locale = 'ko') {
   if (locale === 'en') {
-    return 'Auto-compaction completed after reaching the context limit. If a task was interrupted mid-execution, please continue from where you left off using the compaction summary. If the task was already finished, briefly confirm completion.';
+    return 'Auto-compaction completed after reaching the context limit. If a task was interrupted mid-execution, check the current conversation and actual workspace state and continue from where you left off. If the task was already finished, briefly confirm completion.';
   }
-  return '컨텍스트 한도 도달로 자동 압축이 완료되었습니다. 압축 직전 진행 중이던 미완료 작업이 있다면 요약 컨텍스트를 참고해 중단된 지점부터 이어서 계속 진행해 주세요. 이미 작업이 완료된 상태라면 짧게 완료 여부만 알려 주세요.';
+  return '컨텍스트 한도 도달로 자동 압축이 완료되었습니다. 압축 직전 진행 중이던 미완료 작업이 있다면 현재 대화 내용과 실제 작업 상태를 확인해 중단된 지점부터 이어서 계속 진행해 주세요. 이미 작업이 완료된 상태라면 짧게 완료 여부만 알려 주세요.';
 }
 
 /**

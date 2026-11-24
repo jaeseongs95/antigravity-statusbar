@@ -21,6 +21,19 @@ export function startAddonStatusbar({
   styleId = 'statusbar-main',
   pollConfig = {},
 }) {
+  // Fail closed on Remote Web host profiles (v2.3.0+ defense-in-depth alongside manifest excludeHostProfiles).
+  // Statusbar depends on the local Desktop Sidecar loopback server and must never mount, inject styles,
+  // expose globals, or issue loopback fetches inside remote browser sessions.
+  if (hostPort && hostPort.hostProfileId === 'antigravity-remote-web') {
+    return Object.freeze({
+      render() {},
+      mountToActiveBox() {
+        return false;
+      },
+      dispose() {},
+    });
+  }
+
   const NORMAL_POLL_MS = pollConfig.normalPollMs || 1000;
   const BURST_POLL_MS = pollConfig.burstPollMs || 400;
   const QUOTA_POLL_MS = pollConfig.quotaPollMs || 15000;
@@ -392,6 +405,15 @@ export function startStandbyStatusbar({
   cssText,
   styleId = 'statusbar-main',
 }) {
+  if (hostPort && hostPort.hostProfileId === 'antigravity-remote-web') {
+    return Object.freeze({
+      mountIfFound() {
+        return false;
+      },
+      dispose() {},
+    });
+  }
+
   let disposed = false;
   let observer = null;
   let currentSlotEl = null;

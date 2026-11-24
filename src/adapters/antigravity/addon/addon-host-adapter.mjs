@@ -2,9 +2,9 @@
  * Adapter translating the Antigravity native-addon-host scoped capability handle (`addonHost`)
  * into the segregated `RendererHostPort` abstraction (DIP / LSP).
  *
- * Supports AddonManifest.v2 (v2.0.0+ Shadow DOM slots, `{ container }` mount options,
- * ShadowRoot-routed `injectStyle(..., { slotId })`, and host `openModal`/`openPopover` portals)
- * while retaining backward-compatible behavior for v1 test doubles / hosts.
+ * Supports AddonManifest.v2 (v2.3.0+ Shadow DOM slots, `{ container }` mount options,
+ * ShadowRoot-routed `injectStyle(..., { slotId })`, `hostProfileId` forwarding, and host
+ * `openModal`/`openPopover` portals) while retaining backward-compatible behavior for v1 test doubles / hosts.
  *
  * Security & Isolation Invariants:
  * - Never exposes `addonHost` on `window` or DOM.
@@ -50,11 +50,17 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
     typeof addonHost.openModal === 'function' ||
     typeof addonHost.openPopover === 'function';
 
+  const hostProfileId =
+    typeof addonHost.hostProfileId === 'string' && addonHost.hostProfileId.trim()
+      ? addonHost.hostProfileId.trim()
+      : null;
+
   let lastMountedContainer = null;
 
   const adapter = {
     pluginId: typeof addonHost.pluginId === 'string' ? addonHost.pluginId : 'antigravity-statusbar',
     schemaVersion: isV2Host ? 2 : 1,
+    hostProfileId,
     slotId: rootSlotId,
     popoverSlotId,
     modalSlotId,
