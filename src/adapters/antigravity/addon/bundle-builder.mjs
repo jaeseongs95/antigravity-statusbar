@@ -2,7 +2,7 @@
  * Deterministic renderer script assembler for AddonManifest.v2 (SRP).
  *
  * Composes the SOLID DIP factory modules into a single self-contained script body
- * executed by `antigravity-native-addon-host` v2.0.0+ in Isolated World 998.
+ * executed by `antigravity-native-addon-host` v2.3.0+ in Isolated World 998.
  *
  * Security Invariants:
  * - Validates loopback-only `baseUrl` and >= 16-char `token` before assembly.
@@ -53,7 +53,7 @@ function serializeSafeJson(val) {
 }
 
 /**
- * Builds the active AddonManifest.v1 renderer script body with `{ baseUrl, token }`
+ * Builds the active AddonManifest.v2 renderer script body with `{ baseUrl, token }`
  * sealed strictly inside its closure.
  *
  * @param {{ baseUrl: string, token: string }} opts

@@ -1,7 +1,7 @@
 {
   "name": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
-  "version": "3.1.3",
+  "version": "3.1.4",
   "description": "Official native Antigravity AddonManifest.v2 inline statusbar and headless native sidecar displaying real-time session context usage, prompt cache hit rate, 5h & weekly account quota, 4-tier soft context limits, guarded auto-compaction with auto-resume, token breakdown, and one-click compaction.",
   "author": "jaeseongs95",
   "license": "MIT",
