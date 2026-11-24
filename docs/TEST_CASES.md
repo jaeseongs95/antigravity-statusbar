@@ -1,4 +1,4 @@
-# Test Cases — Antigravity Statusbar v3.1.4
+# Test Cases — Antigravity Statusbar v3.1.5
 
 | Suite | File | Scope & Regression IDs |
 |---|---|---|
@@ -77,6 +77,7 @@
 | `TC-P0-04` | `ISS-04` | `ls-transport` receives HTTP 502 / 504 timeout on metadata & step RPCs | Fails fast in 1 RPC call instead of amplifying into 12 probes; only `RESPONSE_CAP_EXCEEDED` triggers narrower window fallback. |
 | `TC-P0-05` | `ISS-05` | Transient `usedTokens: null` during cooldown + low custom limit `32K` where post-compact tokens remain `35K` | Transient `null` never wipes cooldown; ineffective low-limit compaction retains 90s cooldown + growth guard (no infinite loop). |
 | `TC-P0-06` | `ISS-06` | `install-plugin.mjs` against symlinked `destDir/data` | Fails fast with symlink error without following or silently skipping user data. |
+| `TC-P0-06b` | `v3.1.5` | `resolveInstallWorkParent` (same-fs `tmpDir`, cross-fs writable/unwritable grandparent) & `installPlugin` under simulated `EBUSY`, `EXDEV`, and catastrophic swap+restore failure | Staging and backup directories are created exclusively outside `plugins/`, zero `.antigravity-statusbar.staging.*`/`.old.*` entries ever appear in `plugins/`, `workRoot` is cleaned up on `EBUSY`/`EXDEV` fallback with `data/settings.json` preserved, and catastrophic double-failure preserves `backupDir` intact. |
 | `TC-P0-07` | `ISS-07` | 5 parallel `upsertAddon` calls against real `createJsonSettingsStore` + CLI `--data-dir` missing value & invalid `--enabled` | All 5 addons preserved (0 lost updates via in-lock delta patches); CLI rejects invalid flags. |
 | `TC-P0-08` | `ISS-08` | `runtime-publisher.teardownSync()` after `publish()` | Synchronously atomically overwrites renderer bundle with credential-free standby stub (`0o600`). |
 | `TC-P0-09` | `ISS-09`, `ISS-01` | `AUX_PANE` `syncLimitInputs` under `limitSource: 'model'` + `src/ui/index.html` input type check | Session input remains `''` under model limit; `limit-custom-input` uses `type="text"`. |

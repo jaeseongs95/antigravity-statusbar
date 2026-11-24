@@ -240,7 +240,7 @@ function createMockDom() {
 }
 
 /**
- * Mock mirroring `antigravity-native-addon-host` createScopedHandle() semantics.
+ * Mock mirroring `antigravity-addons` (formerly `antigravity-native-addon-host`) createScopedHandle() semantics.
  */
 function createMockAddonHost(doc, MockElement) {
   const pluginId = 'antigravity-statusbar';
@@ -456,7 +456,7 @@ test('TC-ADDON-06, TC-ADDON-07 & TC-ADDON-08: bundled renderer uses addonHost ca
     token: TEST_TOKEN,
   });
 
-  // Execute exactly like antigravity-native-addon-host wrapper: (function(addonHost){ rawCode })(__addonHandle)
+  // Execute exactly like antigravity-addons wrapper: (function(addonHost){ rawCode })(__addonHandle)
   vm.runInNewContext(
     `(function(addonHost){\n${bundleSource}\n})(addonHost);`,
     sandbox,
@@ -613,7 +613,7 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
 
   const v2HostHandle = Object.freeze({
     pluginId,
-    version: '3.1.4',
+    version: '3.1.5',
     trustLevel: 'restricted',
     hostProfileId: 'antigravity-desktop',
     schemaVersion: 2,
@@ -918,7 +918,7 @@ test('TC-ADDON-10: v2.3.0 Remote Web defense-in-depth fails closed on both activ
 
     const remoteWebHostHandle = Object.freeze({
       pluginId: 'antigravity-statusbar',
-      version: '3.1.4',
+      version: '3.1.5',
       trustLevel: 'restricted',
       hostProfileId: 'antigravity-remote-web',
       schemaVersion: 2,

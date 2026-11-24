@@ -23,7 +23,7 @@ import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs
 import { DomainError, ERROR_CODES } from '../../src/core/i18n/error-codes.mjs';
 import { buildAutoResumePrompt } from '../../src/core/model/context-policy.mjs';
 import { createStatusbarApp } from '../../src/ui/app.js';
-import { installPlugin } from '../../scripts/install-plugin.mjs';
+import { installPlugin, resolveInstallWorkParent } from '../../scripts/install-plugin.mjs';
 import { runAddonCli } from '../../scripts/statusbar-addon.mjs';
 
 function flush() {
@@ -2108,4 +2108,126 @@ test('TC-P0-00f (v3.1.4): buildAutoResumePrompt avoids assuming external summary
   assert.ok(koPrompt.includes('완료 여부만'));
   assert.ok(enPrompt.includes('current conversation and actual workspace state'));
   assert.ok(enPrompt.includes('briefly confirm completion'));
+});
+
+test('TC-P0-06b (v3.1.5): install-plugin isolates staging/backup outside plugins/, cleans up on EBUSY/EXDEV fallback, and preserves backup on restore failure', async () => {
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-inst-staging-'));
+  const fakeConfigDir = path.join(tmpRoot, 'config');
+  const fakePluginsDir = path.join(fakeConfigDir, 'plugins');
+  const fakeTmpDir = path.join(tmpRoot, 'tmp');
+  const destDir = path.join(fakePluginsDir, 'antigravity-statusbar');
+  const dataDir = path.join(destDir, 'data');
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../..');
+
+  try {
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.mkdir(fakeTmpDir, { recursive: true });
+    await fs.writeFile(path.join(dataDir, 'settings.json'), '{"locale":"ko","defaultCustomLimit":256000}', 'utf8');
+
+    // 1. resolveInstallWorkParent unit checks (same-fs tmp, cross-fs grandparent, unwritable grandparent)
+    const sameFsParent = await resolveInstallWorkParent(fakePluginsDir, {
+      tmpDir: fakeTmpDir,
+      statFn: async () => ({ dev: 100 }),
+      accessFn: async () => {},
+    });
+    assert.equal(sameFsParent, path.resolve(fakeTmpDir));
+
+    const crossFsGrandParent = await resolveInstallWorkParent(fakePluginsDir, {
+      tmpDir: fakeTmpDir,
+      statFn: async (p) => ({ dev: path.resolve(p) === path.resolve(fakeTmpDir) ? 999 : 100 }),
+      accessFn: async () => {},
+    });
+    assert.equal(crossFsGrandParent, path.resolve(fakeConfigDir));
+
+    const crossFsUnwritableGrandParent = await resolveInstallWorkParent(fakePluginsDir, {
+      tmpDir: fakeTmpDir,
+      statFn: async (p) => ({ dev: path.resolve(p) === path.resolve(fakeTmpDir) ? 999 : 100 }),
+      accessFn: async (p) => {
+        if (path.resolve(p) === path.resolve(fakeConfigDir)) {
+          const err = new Error('EACCES');
+          err.code = 'EACCES';
+          throw err;
+        }
+      },
+    });
+    assert.equal(crossFsUnwritableGrandParent, path.resolve(fakeTmpDir));
+
+    // 2. Simulated Windows EBUSY and Linux EXDEV: zero staging/backup entries ever appear inside plugins/
+    for (const errCode of ['EBUSY', 'EXDEV']) {
+      let entriesSeenDuringRename = null;
+      const seenTargets = [];
+      const res = await installPlugin({
+        repoRoot,
+        destDir,
+        dryRun: false,
+        tmpDir: fakeTmpDir,
+        renameMaxTotalMs: 40,
+        renameFn: async (src, dst) => {
+          seenTargets.push({ src, dst });
+          entriesSeenDuringRename = await fs.readdir(fakePluginsDir);
+          const err = new Error(`Simulated ${errCode}`);
+          err.code = errCode;
+          throw err;
+        },
+      });
+
+      assert.equal(res.installed, true);
+      assert.equal(res.mode, 'in-place-fallback');
+      assert.deepEqual(
+        entriesSeenDuringRename,
+        ['antigravity-statusbar'],
+        `During ${errCode} fallback, plugins/ must never contain any staging or backup directory`,
+      );
+      assert.ok(seenTargets.length >= 1);
+      for (const { src, dst } of seenTargets) {
+        const other = path.resolve(src) === path.resolve(destDir) ? dst : src;
+        const rel = path.relative(fakePluginsDir, other);
+        assert.ok(
+          rel.startsWith('..') || path.isAbsolute(rel),
+          `Staging/backup path (${other}) must reside outside plugins/ (${fakePluginsDir})`,
+        );
+      }
+      assert.deepEqual(await fs.readdir(fakePluginsDir), ['antigravity-statusbar']);
+      assert.deepEqual(await fs.readdir(fakeTmpDir), [], `Temporary workRoot must be cleaned up after ${errCode} fallback`);
+      assert.equal(
+        await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8'),
+        '{"locale":"ko","defaultCustomLimit":256000}',
+      );
+    }
+
+    // 3. Catastrophic double-failure (swap fails + restore fails) must preserve backup inside workRoot
+    let callCount = 0;
+    let preservedBackupPath = null;
+    await assert.rejects(
+      () =>
+        installPlugin({
+          repoRoot,
+          destDir,
+          dryRun: false,
+          tmpDir: fakeTmpDir,
+          renameMaxTotalMs: 40,
+          renameFn: async (src, dst) => {
+            callCount += 1;
+            if (callCount === 1) {
+              // destDir -> backupDir succeeds
+              preservedBackupPath = dst;
+              await fs.rename(src, dst);
+              return;
+            }
+            const err = new Error('Simulated catastrophic EIO');
+            err.code = 'EIO';
+            throw err;
+          },
+        }),
+      /Your preserved plugin data remains at:/,
+    );
+    assert.ok(preservedBackupPath, 'Backup path must be recorded when destDir was moved');
+    assert.equal(
+      await fs.readFile(path.join(preservedBackupPath, 'data', 'settings.json'), 'utf8'),
+      '{"locale":"ko","defaultCustomLimit":256000}',
+      'Preserved plugin data in backupDir must remain intact when restore fails',
+    );
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  }
 });

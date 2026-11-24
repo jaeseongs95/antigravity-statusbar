@@ -1,3 +1,53 @@
+# Release Notes — `v3.1.5` (2026-11-24)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.1.5` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.1.5` eliminates leftover `.antigravity-statusbar.staging.*` and `plugin_data/.antigravity-statusbar.staging.*` directory pollution caused by creating installer staging directories inside the host-watched `~/.gemini/config/plugins/` directory on Windows, adds cross-filesystem `EXDEV` handling and retryable cleanup, and updates host project documentation references to [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) (formerly `antigravity-native-addon-host`).
+
+### 2. Defect Fixes & Changes
+- **Installer Staging & Backup Isolation Outside `plugins/` (`scripts/install-plugin.mjs`)**:
+  - Previously, `installPlugin` created `.antigravity-statusbar.staging.<pid>.<ts>` and `.antigravity-statusbar.old.<pid>.<ts>` directly inside `parentDir` (`~/.gemini/config/plugins/`). While the Antigravity host was running on Windows, its plugin watcher discovered the temporary staging folder, created `plugin_data/.antigravity-statusbar.staging.*`, and opened handles under `staging/sidecars/`, causing the subsequent `fs.rm` cleanup in `in-place-fallback` mode to fail silently and leave stranded staging folders behind.
+  - Introduces `resolveInstallWorkParent()` to place a single temporary `workRoot` (`staging/` and `backup/`) outside `parentDir`: prefers `os.tmpdir()` when on the same filesystem for atomic `fs.rename`, falls back to a writable same-filesystem `path.dirname(parentDir)` (e.g., `~/.gemini/config`) on cross-filesystem `/tmp` (such as Linux `tmpfs`), and handles `EXDEV` alongside `EPERM`/`EBUSY`/`EACCES` via safe `in-place-fallback`.
+  - Cleans up `workRoot` deterministically in `finally` with `{ recursive: true, force: true, maxRetries: 5, retryDelay: 100 }` while preserving `backupDir` intact if a catastrophic swap + restore double-failure occurs.
+- **Regression Tests (`test/unit/p0-hardening-tdd.test.mjs`, `test/integration/antigravity-adapter.test.mjs`)**:
+  - Adds `TC-P0-06b` covering `resolveInstallWorkParent` (same-fs `tmpDir`, cross-fs writable/unwritable grandparent), simulated `EBUSY` and `EXDEV` fallbacks verifying zero staging/backup directories ever appear inside `plugins/`, complete `workRoot` cleanup, `data/settings.json` preservation, and backup preservation on catastrophic restore failure.
+  - Extends `test/integration/antigravity-adapter.test.mjs` to assert zero leftover staging/backup entries in `parentDir` after install.
+- **Host Project Rename Alignment (`README.md`, `README.ko.md`, `docs/ARCHITECTURE_V3.md`, `docs/TEST_CASES.md`, `src/adapters/antigravity/addon/bundle-builder.mjs`, `test/integration/addon-runtime.test.mjs`)**:
+  - Updates documentation and comment references from `antigravity-native-addon-host` to [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) (compatible with `v2.3.0`–`v2.5.1+`) while preserving backward-compatible `addon-host` CLI commands and `AddonManifest.v2` schema URI.
+
+### 3. Verification
+- Verified on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) across `test:static`, `test:unit` (including `TC-P0-06b`), `test:integration`, `test:security`, `test:ui`, and `install-plugin.mjs --dry-run`.
+
+---
+
+## [한국어] `v3.1.5` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.1.5`는 Windows에서 `npm run install-plugin` 실행 시 호스트가 감시하는 `~/.gemini/config/plugins/` 내부에 임시 스테이징 폴더를 생성해 `.antigravity-statusbar.staging.*` 잔여 폴더와 `plugin_data/.antigravity-statusbar.staging.*` 폴더가 누적되던 결함을 근본 수정하고, 크로스 파일시스템(`EXDEV`) 폴백과 재시도 정리를 보강했으며, 호스트 프로젝트 명칭 변경([`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons), 구 `antigravity-native-addon-host`)에 맞춰 문서를 갱신한 패치 릴리즈입니다.
+
+### 2. 주요 결함 수정 및 변경 사항
+- **설치 스테이징·백업 디렉터리 `plugins/` 외부 격리 (`scripts/install-plugin.mjs`)**:
+  - 기존 구현은 `parentDir`(`~/.gemini/config/plugins/`) 바로 아래에 `.antigravity-statusbar.staging.<pid>.<ts>` 및 `.antigravity-statusbar.old.<pid>.<ts>`를 생성했습니다. Windows에서 Antigravity 호스트가 실행 중인 상태로 설치하면 호스트의 플러그인 감시기가 임시 스테이징 폴더를 플러그인으로 인식해 `plugin_data/.antigravity-statusbar.staging.*`를 생성하고 `staging/sidecars/` 핸들을 점유함으로써 `in-place-fallback` 종료 시 `fs.rm` 정리가 무음 실패하며 잔여 폴더가 남는 결함이 발생했습니다.
+  - `resolveInstallWorkParent()`를 도입해 단일 임시 작업 루트(`workRoot` 하위 `staging/`·`backup/`)를 항상 `parentDir`(`plugins/`) 외부에 생성하도록 변경했습니다. 동일 파일시스템이면 `os.tmpdir()`를 우선 사용해 원자적 `fs.rename`을 유지하고, Linux `tmpfs` 등 `/tmp`가 다른 파일시스템인 경우 쓰기 가능한 동일 파일시스템 상위 디렉터리(`~/.gemini/config` 등)를 선택하며, 불가 시 `EXDEV`도 `EPERM`/`EBUSY`/`EACCES`와 함께 안전한 `in-place-fallback`으로 처리합니다.
+  - `finally` 블록에서 `{ recursive: true, force: true, maxRetries: 5, retryDelay: 100 }`으로 임시 작업 루트를 일관 정리하며, 교체·복구가 모두 실패한 치명적 오류 시에는 사용자 `data/` 보존을 위해 `backupDir`을 삭제하지 않고 유지합니다.
+- **회귀 테스트 추가 (`test/unit/p0-hardening-tdd.test.mjs`, `test/integration/antigravity-adapter.test.mjs`)**:
+  - `TC-P0-06b`를 신설해 `resolveInstallWorkParent`(동일 파일시스템 `tmpDir`, 크로스 파일시스템 상위 폴더 쓰기 가능/불가) 및 시뮬레이션 `EBUSY`/`EXDEV` 폴백 중·후 `plugins/` 내부에 스테이징·백업 폴더가 단 한 번도 생성되지 않음, `workRoot` 완전 정리, `data/settings.json` 보존, 복구 실패 시 `backupDir` 보존을 검증합니다.
+  - `test/integration/antigravity-adapter.test.mjs` 설치 통합 테스트에 설치 후 `parentDir` 잔여 항목 0건 검증을 추가했습니다.
+- **호스트 프로젝트 개명 반영 (`README.md`, `README.ko.md`, `docs/ARCHITECTURE_V3.md`, `docs/TEST_CASES.md`, `src/adapters/antigravity/addon/bundle-builder.mjs`, `test/integration/addon-runtime.test.mjs`)**:
+  - 문서 및 주석의 호스트 프로젝트 참조를 [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons)(구 `antigravity-native-addon-host`, `v2.3.0`~`v2.5.1+` 호환)로 갱신했습니다. 하위 호환되는 `addon-host` CLI 명령과 `AddonManifest.v2` 스키마 URI는 그대로 유지합니다.
+
+### 3. 검증 근거
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): `test:static`, `test:unit`(`TC-P0-06b` 포함), `test:integration`, `test:security`, `test:ui`, `install-plugin.mjs --dry-run` 전 항목 검증 완료.
+
+---
+
 # Release Notes — `v3.1.4` (2026-11-24)
 
 > **Document Policy / 문서 작성 기준**
