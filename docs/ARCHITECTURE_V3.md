@@ -1,4 +1,4 @@
-# Architecture v3.1.2 — Official Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + Headless Native Sidecar)
+# Architecture v3.1.3 — Official Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + Headless Native Sidecar)
 
 ## 1. Design Principles
 

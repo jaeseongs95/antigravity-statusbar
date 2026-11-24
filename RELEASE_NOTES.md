@@ -1,3 +1,47 @@
+# Release Notes — `v3.1.3` (2026-11-24)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.1.3` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.1.3` eliminates five concrete root causes of duplicate `/compact` execution triggered when lowering the global context limit (`defaultCustomLimit`) on sessions that immediately exceed 100% of the new limit.
+
+### 2. Defect Fixes & Changes
+- **Fix #1 — Remove `reducedMeaningfully` Cooldown Bypass (`src/core/app/statusbar-service.mjs`)**: Previously, when post-compaction tokens dropped by `>= 15%` (`>= 10K`) yet still remained `>= effectiveLimit` (common when lowering the global limit on large sessions), `if (droppedBelowLimit || reducedMeaningfully)` cleared `waitingForDrop` and zeroed `cooldownUntil = 0`, immediately firing a 2nd `/compact`. The bypass is removed so `waitingForDrop` and cooldown clear only when `droppedBelowLimit === true`; otherwise the 90-second cooldown and token-growth guard stay active from the refreshed post-compaction token baseline.
+- **Fix #2 — Ambiguous Timeout Idempotency Guard (`src/adapters/antigravity/compaction-adapter.mjs`, `src/core/app/statusbar-service.mjs`)**: Raises `/compact` `SendUserCascadeMessage` RPC timeout to `20_000ms` and stops blind fallback (`agentapi` in `compactSession`, RPC in `sendCommand`) on ambiguous timeouts (`httpStatus === 504`, `AbortError`, timeout message), returning `{ accepted: false, ambiguous: true }`. In `statusbar-service`, ambiguous `504` timeouts preserve `waitingForDrop`, 90-second cooldown, and `pendingAutoResume` instead of triggering an immediate retry on `IDLE`.
+- **Fix #3 — Preserve In-Flight Cooldowns in `updateSettings` (`src/core/app/statusbar-service.mjs`)**: Compares incoming patches against prior settings before clearing `autoCompactState` (ignoring no-op same-value saves) and never clears entries for sessions currently in `compactingSessions`.
+- **Fix #4 — Arm Cooldown & Tail Probe on Manual `/compact` (`src/core/app/statusbar-service.mjs`)**: Arms `autoCompactState` (90-second cooldown + `waitingForDrop`) when a manual `/compact` is accepted and keeps `includeTailSteps: true` active while awaiting post-compaction settlement within cooldown.
+- **Fix #5 — Per-Session Concurrent Snapshot Epoch Guard (`src/core/app/statusbar-service.mjs`)**: Adds a bounded LRU per-session `snapshotSeq` / `latestCompletedSnapshotSeq` guard so out-of-order slower `getSessionSnapshot` polls cannot overwrite state or fire duplicate `/compact` even when `stepCount` and `lastCompactedStep` are `null`.
+- **Tests (`test/unit/p0-hardening-tdd.test.mjs`, `test/unit/autocompact-tdd.test.mjs`)**: Adds TDD regressions `TC-P0-13a`–`TC-P0-13e` covering all five root causes and updates legacy oracle `TC-TDD-AC-03` to enforce cooldown + growth guard while still verifying stale pre-compaction baseline refresh.
+
+### 3. Verification
+- Verified TDD RED (61 pass / 5 fail on `TC-P0-13a`–`TC-P0-13e`) → TDD GREEN on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): `test:static` (7/7), `test:unit` (66/66), `test:integration` (16/16), `test:security` (3/3), `test:ui` (5/5), and `install-plugin.mjs --dry-run` (97/97 PASS per OS).
+
+---
+
+## [한국어] `v3.1.3` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.1.3`은 **전역 컨텍스트 한도(`defaultCustomLimit`)를 낮춘 직후 100%를 초과한 세션에서 `/compact`가 2회 연속 호출되는 결함**의 5가지 근본 원인을 수정한 패치 릴리즈입니다.
+
+### 2. 주요 결함 수정 및 변경 사항
+- **수정 1 — `reducedMeaningfully` 쿨다운 우회 제거 (`src/core/app/statusbar-service.mjs`)**: 낮춘 전역 한도에서 압축 후 토큰이 15%(`>= 10K`) 이상 줄었더라도 여전히 새 한도 이상일 때 `droppedBelowLimit || reducedMeaningfully` 분기가 `waitingForDrop = false`, `cooldownUntil = 0`으로 초기화해 즉시 2번째 `/compact`를 호출하던 결함을 제거했습니다. 실제 한도 미만(`droppedBelowLimit`)으로 내려간 경우에만 쿨다운을 해제하고, 여전히 한도 이상이면 압축 후 토큰을 새 기준으로 90초 쿨다운과 증가량 가드를 유지합니다.
+- **수정 2 — 모호한 타임아웃(504) 중복 폴백·상태 초기화 차단 (`src/adapters/antigravity/compaction-adapter.mjs`, `src/core/app/statusbar-service.mjs`)**: `/compact` RPC 타임아웃을 `20_000ms`로 상향하고, `504`/`AbortError`/타임아웃 등 호스트 접수 여부가 불명확한 오류에서는 `agentapi`·RPC 폴백을 실행하지 않고 `{ accepted: false, ambiguous: true }`를 반환합니다. `statusbar-service`는 모호한 `504` 타임아웃 시 `waitingForDrop`, 90초 쿨다운, `pendingAutoResume`을 보존해 `IDLE` 전환 직후 중복 재호출을 방지합니다.
+- **수정 3 — `updateSettings` 진행 중 세션 보호 및 동일 값 저장 무시 (`src/core/app/statusbar-service.mjs`)**: 이전 설정과 실제로 값이 변경된 경우(또는 `autoCompact`가 `false → true`로 켜진 경우)에만 `autoCompactState`를 초기화하며, 현재 압축 진행 중(`compactingSessions`)인 세션의 쿨다운은 삭제하지 않습니다.
+- **수정 4 — 수동 `/compact` 쿨다운 무장 및 Tail 조회 유지 (`src/core/app/statusbar-service.mjs`)**: 수동 `/compact` 수락 시에도 `autoCompactState`(90초 쿨다운 + `waitingForDrop`)를 무장해 15초 초과 압축 도중 자동 압축이 겹치지 않게 하고, 쿨다운 대기 중 `includeTailSteps: true` 조회를 유지합니다.
+- **수정 5 — 동시 `getSessionSnapshot` 역순 응답 순번 가드 (`src/core/app/statusbar-service.mjs`)**: 세션별 단조 순번(`snapshotSeq` / `latestCompletedSnapshotSeq`, LRU 상한) 가드를 도입해 `stepCount`/`lastCompactedStep`이 `null`인 환경에서도 오래된 지연 폴링 응답이 상태를 덮어쓰거나 중복 `/compact`를 발화하지 않도록 차단했습니다.
+- **테스트 (`test/unit/p0-hardening-tdd.test.mjs`, `test/unit/autocompact-tdd.test.mjs`)**: 5개 근본 원인 회귀 테스트 `TC-P0-13a`–`TC-P0-13e`를 추가하고, 구 오라클 `TC-TDD-AC-03`을 쿨다운+증가량 가드 준수 및 갱신된 기준선 검증으로 정합화했습니다.
+
+### 3. 검증 근거
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) TDD RED (`TC-P0-13a`–`TC-P0-13e` 5건 실패 재현) → TDD GREEN: `test:static`(7/7), `test:unit`(66/66), `test:integration`(16/16), `test:security`(3/3), `test:ui`(5/5), `install-plugin.mjs --dry-run` (OS당 97/97 전 항목 통과).
+
+---
+
 # Release Notes — `v3.1.2` (2026-11-23)
 
 > **Document Policy / 문서 작성 기준**

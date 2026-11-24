@@ -817,7 +817,7 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.1.2');
+    assert.equal(manifest.version, '3.1.3');
     const addonManifest = JSON.parse(
       await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
     );
