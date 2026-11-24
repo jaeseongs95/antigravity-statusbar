@@ -4,6 +4,21 @@ import path from 'node:path';
 
 const MAX_STDIO_BYTES = 64 * 1024; // 64KB bounded stream drain (F6)
 const DEFAULT_FALLBACK_TIMEOUT_MS = 15_000;
+const COMPACT_RPC_TIMEOUT_MS = 20_000;
+
+/**
+ * Returns true when an error represents an ambiguous timeout where the host may
+ * have already accepted and queued the command, so blind fallback would duplicate it.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isAmbiguousTimeoutError(err) {
+  if (!err || typeof err !== 'object') return false;
+  if (err.httpStatus === 504) return true;
+  if (err.name === 'AbortError') return true;
+  return /timed?\s*out/i.test(String(err.message || ''));
+}
 
 /**
  * Validates ANTIGRAVITY_AGENTAPI_EXE path safely:
@@ -137,10 +152,12 @@ export function createAntigravityCompactionAdapter({
       };
 
       child.on('error', (err) => {
+        const timedOut = err?.name === 'AbortError';
         finish({
           accepted: false,
           method: 'agentapi',
-          reason: err?.name === 'AbortError' ? 'fallback timed out' : err?.message || 'child error',
+          ...(timedOut ? { ambiguous: true } : {}),
+          reason: timedOut ? 'fallback timed out' : err?.message || 'child error',
         });
       });
 
@@ -181,12 +198,27 @@ export function createAntigravityCompactionAdapter({
 
       // 1. Primary path: async SendUserCascadeMessage RPC with structured slashCommand ContextScopeItem (F1)
       try {
-        await lsTransport.callUnaryRpc('SendUserCascadeMessage', {
-          cascadeId: sessionId,
-          items,
-        });
+        await lsTransport.callUnaryRpc(
+          'SendUserCascadeMessage',
+          {
+            cascadeId: sessionId,
+            items,
+          },
+          { timeoutMs: COMPACT_RPC_TIMEOUT_MS },
+        );
         return { accepted: true, method: 'rpc' };
       } catch (rpcErr) {
+        // v3.1.3: Never duplicate /compact via agentapi fallback on an ambiguous timeout;
+        // LS may have already accepted and started the 1st compaction.
+        if (isAmbiguousTimeoutError(rpcErr)) {
+          return {
+            accepted: false,
+            method: 'rpc',
+            ambiguous: true,
+            reason: rpcErr?.message || 'SendUserCascadeMessage timed out.',
+          };
+        }
+
         // 2. Fallback path: non-acceptance-only spawn
         const realExe = resolveSafeAgentApiExe(agentApiExePath);
         if (!realExe) {
@@ -205,6 +237,7 @@ export function createAntigravityCompactionAdapter({
         return {
           accepted: false,
           method: 'agentapi',
+          ...(fallbackResult.ambiguous ? { ambiguous: true } : {}),
           reason: `${rpcErr?.message || 'RPC failed'}; fallback: ${fallbackResult.reason}`,
         };
       }
@@ -227,6 +260,15 @@ export function createAntigravityCompactionAdapter({
         if (res.accepted) {
           return res;
         }
+        // v3.1.3: Never duplicate sendCommand via RPC fallback on an ambiguous agentapi timeout.
+        if (res.ambiguous) {
+          return {
+            accepted: false,
+            method: 'agentapi',
+            ambiguous: true,
+            reason: res.reason || 'agentapi send-message timed out',
+          };
+        }
         agentApiError = res.reason || 'agentapi send-message failed';
       }
       try {
@@ -240,6 +282,7 @@ export function createAntigravityCompactionAdapter({
         return {
           accepted: false,
           method: realExe ? 'agentapi' : 'rpc',
+          ...(isAmbiguousTimeoutError(rpcErr) ? { ambiguous: true } : {}),
           reason: agentApiError ? `${agentApiError}; fallback: ${rpcReason}` : rpcReason,
         };
       }

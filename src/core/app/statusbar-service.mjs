@@ -89,7 +89,10 @@ export function createStatusbarService({
   const lastAutoCompactErrors = new Map();
   /** @type {Map<string, { maxCompactedStep: number | null, maxStepCount: number | null }>} */
   const observedProgress = new Map();
+  /** @type {Map<string, number>} */
+  const latestCompletedSnapshotSeq = new Map();
   let attemptSeq = 0;
+  let snapshotSeq = 0;
 
   function recordAutoCompactError(sessionId, code, message) {
     lastAutoCompactErrors.set(sessionId, {
@@ -229,8 +232,12 @@ export function createStatusbarService({
 
     async getSessionSnapshot(rawSessionId) {
       const sessionId = validateSessionId(rawSessionId);
+      const reqSeq = ++snapshotSeq;
+      const prePollAuto = autoCompactState.get(sessionId);
       const needsTailCheck =
-        compactingSessions.has(sessionId) || pendingAutoResume.has(sessionId);
+        compactingSessions.has(sessionId) ||
+        pendingAutoResume.has(sessionId) ||
+        Boolean(prePollAuto?.waitingForDrop && prePollAuto.cooldownUntil > clock());
       const [telemetry, settings] = await Promise.all([
         needsTailCheck
           ? telemetryPort.getSessionTelemetry(sessionId, { includeTailSteps: true })
@@ -282,8 +289,21 @@ export function createStatusbarService({
       const incomingStepCount =
         typeof telemetry.stepCount === 'number' ? telemetry.stepCount : null;
 
-      // Monotonic progress guard: out-of-order stale polls (regressed stepCount or regressed/dropped
-      // lastCompactedStep) must never re-trigger auto-compaction.
+      // Monotonic progress + per-session sequence epoch guard: out-of-order stale polls
+      // (older request sequence, regressed stepCount, or regressed/dropped lastCompactedStep)
+      // must never overwrite state or re-trigger auto-compaction.
+      const prevCompletedSeq = latestCompletedSnapshotSeq.get(sessionId) ?? 0;
+      const isStaleSnapshot = reqSeq < prevCompletedSeq;
+      if (!isStaleSnapshot) {
+        latestCompletedSnapshotSeq.delete(sessionId);
+        latestCompletedSnapshotSeq.set(sessionId, reqSeq);
+        while (latestCompletedSnapshotSeq.size > MAX_SESSION_OVERRIDES) {
+          const oldestSeqKey = latestCompletedSnapshotSeq.keys().next().value;
+          if (oldestSeqKey === undefined) break;
+          latestCompletedSnapshotSeq.delete(oldestSeqKey);
+        }
+      }
+
       const prevObs = observedProgress.get(sessionId) ?? null;
       const compactedStepRegressed =
         prevObs !== null &&
@@ -294,7 +314,7 @@ export function createStatusbarService({
         prevObs.maxStepCount !== null &&
         incomingStepCount !== null &&
         incomingStepCount < prevObs.maxStepCount;
-      const telemetryRegressed = compactedStepRegressed || stepCountRegressed;
+      const telemetryRegressed = isStaleSnapshot || compactedStepRegressed || stepCountRegressed;
       if (!telemetryRegressed && (currentCompactedStep !== null || incomingStepCount !== null)) {
         const nextMaxCompacted =
           prevObs?.maxCompactedStep !== null && prevObs?.maxCompactedStep !== undefined
@@ -322,7 +342,7 @@ export function createStatusbarService({
 
       // ISS-00 / v3.1.1: Guarded single-shot Auto-Resume for RUNNING sessions interrupted by auto-compact
       const resumeEntry = pendingAutoResume.get(sessionId);
-      if (resumeEntry) {
+      if (resumeEntry && !isStaleSnapshot) {
         const resumeExpired = now - resumeEntry.triggeredAt > AUTO_RESUME_WINDOW_MS;
         const cancelledOrError = isCancelledOrErrorStatus(telemetry.status);
         const resumeStepAdvanced =
@@ -461,6 +481,7 @@ export function createStatusbarService({
           : currentCompactedStep > prevAuto.lastTriggeredCompactedStep);
 
       if (
+        !isStaleSnapshot &&
         compactionAdvanced &&
         (prevAuto.waitingForDrop ||
           prevAuto.cooldownUntil > 0 ||
@@ -469,13 +490,8 @@ export function createStatusbarService({
       ) {
         const hasNumericTokens = typeof telemetry.usedTokens === 'number';
         const droppedBelowLimit = hasNumericTokens && !threshold.exceededSoftLimit;
-        const reducedMeaningfully =
-          hasNumericTokens &&
-          typeof prevAuto.lastTriggeredTokens === 'number' &&
-          prevAuto.lastTriggeredTokens - telemetry.usedTokens >= 10_000 &&
-          telemetry.usedTokens <= prevAuto.lastTriggeredTokens * 0.85;
 
-        if (droppedBelowLimit || reducedMeaningfully) {
+        if (droppedBelowLimit) {
           prevAuto.waitingForDrop = false;
           // Preserve/refresh settlement cooldown while readings are synthetic ('after_compaction'),
           // even if compaction took longer than 90s; cleared once a real below-limit reading arrives.
@@ -487,8 +503,9 @@ export function createStatusbarService({
           prevAuto.lastTriggeredStep = null;
           prevAuto.lastTriggeredCompactedStep = currentCompactedStep;
         } else {
-          // ISS-05: Low custom limit (e.g. 32K) where post-compaction context still exceeds limit:
-          // retain cooldown + token-growth guard so it never enters an infinite compaction loop.
+          // ISS-05 / v3.1.3: Post-compaction context still exceeds effective limit (e.g. low custom
+          // limit or lowered global limit): retain cooldown + token-growth guard from the updated
+          // post-compaction baseline so it never fires an immediate 2nd /compact or infinite loop.
           prevAuto.waitingForDrop = true;
           prevAuto.cooldownUntil = now + AUTO_COMPACT_COOLDOWN_MS;
           prevAuto.failedWhileRunning = false;
@@ -504,7 +521,7 @@ export function createStatusbarService({
         autoCompactState.set(sessionId, prevAuto);
       }
 
-      if (typeof telemetry.usedTokens === 'number' && !threshold.exceededSoftLimit) {
+      if (!isStaleSnapshot && typeof telemetry.usedTokens === 'number' && !threshold.exceededSoftLimit) {
         deferredAutoCompactSessions.delete(sessionId);
         autoResumeCircuit.delete(sessionId);
         const shouldClearCooldown = !isSyntheticAfterCompaction && prevAuto.cooldownUntil > 0;
@@ -521,7 +538,7 @@ export function createStatusbarService({
           lastAutoCompactErrors.delete(sessionId);
           compaction.lastError = null;
         }
-      } else if (threshold.exceededSoftLimit) {
+      } else if (!isStaleSnapshot && threshold.exceededSoftLimit) {
         if (!isRunning && prevAuto.failedWhileRunning) {
           prevAuto.failedWhileRunning = false;
           prevAuto.cooldownUntil = 0;
@@ -600,20 +617,26 @@ export function createStatusbarService({
             autoCompactTriggered = true;
             // Fire-and-forget guarded auto-compaction for this session
             this.requestCompaction(sessionId, { trigger: 'auto' }).catch((err) => {
-              if (
-                resumeAttemptToken &&
-                pendingAutoResume.get(sessionId)?.attemptToken === resumeAttemptToken
-              ) {
-                pendingAutoResume.delete(sessionId);
-              }
-              // A-1 & A-3: Release waitingForDrop so retry is possible; if rejected while RUNNING,
-              // use short backoff and retry immediately once the session transitions to IDLE.
-              const cur = autoCompactState.get(sessionId);
-              if (cur === triggerRecord) {
-                cur.waitingForDrop = false;
-                if (isRunning) {
-                  cur.failedWhileRunning = true;
-                  cur.cooldownUntil = clock() + AUTO_COMPACT_RUNNING_RETRY_MS;
+              const isAmbiguous =
+                err?.httpStatus === 504 ||
+                err?.details?.ambiguous === true ||
+                err?.name === 'AbortError';
+              if (!isAmbiguous) {
+                if (
+                  resumeAttemptToken &&
+                  pendingAutoResume.get(sessionId)?.attemptToken === resumeAttemptToken
+                ) {
+                  pendingAutoResume.delete(sessionId);
+                }
+                // A-1 & A-3: Release waitingForDrop so retry is possible; if rejected while RUNNING,
+                // use short backoff and retry immediately once the session transitions to IDLE.
+                const cur = autoCompactState.get(sessionId);
+                if (cur === triggerRecord) {
+                  cur.waitingForDrop = false;
+                  if (isRunning) {
+                    cur.failedWhileRunning = true;
+                    cur.cooldownUntil = clock() + AUTO_COMPACT_RUNNING_RETRY_MS;
+                  }
                 }
               }
               recordAutoCompactError(
@@ -820,19 +843,55 @@ export function createStatusbarService({
         );
       }
 
+      const prevSettings = await settingsPort.read();
       const updated = await settingsPort.update(normalizedPatch);
 
-      // A-2: Reset auto-compact cooldown/wait state when limits change or autoCompact is re-enabled
-      if (
-        Object.prototype.hasOwnProperty.call(normalizedPatch, 'defaultCustomLimit') ||
-        Object.prototype.hasOwnProperty.call(normalizedPatch, 'modelLimit') ||
-        normalizedPatch.autoCompact === true
-      ) {
-        autoCompactState.clear();
-        lastAutoCompactErrors.clear();
-      } else if (normalizedPatch.sessionLimit) {
-        autoCompactState.delete(normalizedPatch.sessionLimit.sessionId);
-        lastAutoCompactErrors.delete(normalizedPatch.sessionLimit.sessionId);
+      // A-2 / v3.1.3: Reset auto-compact cooldown/wait state only when limits actually changed
+      // or autoCompact transitioned from disabled to enabled, while preserving sessions currently compacting.
+      pruneCompactingSessions(clock());
+
+      const defaultLimitChanged =
+        Object.prototype.hasOwnProperty.call(normalizedPatch, 'defaultCustomLimit') &&
+        (prevSettings?.defaultCustomLimit ?? null) !== (normalizedPatch.defaultCustomLimit ?? null);
+
+      let modelLimitChanged = false;
+      if (Object.prototype.hasOwnProperty.call(normalizedPatch, 'modelLimit')) {
+        const prevModelLimit = resolveModelCustomLimit(
+          prevSettings?.modelLimits,
+          normalizedPatch.modelLimit.model,
+        );
+        modelLimitChanged = (prevModelLimit ?? null) !== (normalizedPatch.modelLimit.limit ?? null);
+      }
+
+      const autoCompactReenabled =
+        normalizedPatch.autoCompact === true && prevSettings?.autoCompact === false;
+
+      let sessionLimitChanged = false;
+      if (normalizedPatch.sessionLimit) {
+        const prevSessionLimit =
+          prevSettings?.sessions instanceof Map
+            ? (prevSettings.sessions.get(normalizedPatch.sessionLimit.sessionId)?.limit ?? null)
+            : null;
+        sessionLimitChanged = prevSessionLimit !== (normalizedPatch.sessionLimit.limit ?? null);
+      }
+
+      if (defaultLimitChanged || modelLimitChanged || autoCompactReenabled) {
+        for (const sid of Array.from(autoCompactState.keys())) {
+          if (!compactingSessions.has(sid)) {
+            autoCompactState.delete(sid);
+          }
+        }
+        for (const sid of Array.from(lastAutoCompactErrors.keys())) {
+          if (!compactingSessions.has(sid)) {
+            lastAutoCompactErrors.delete(sid);
+          }
+        }
+      } else if (sessionLimitChanged) {
+        const targetSid = normalizedPatch.sessionLimit.sessionId;
+        if (!compactingSessions.has(targetSid)) {
+          autoCompactState.delete(targetSid);
+          lastAutoCompactErrors.delete(targetSid);
+        }
       }
 
       return {
@@ -1010,10 +1069,12 @@ export function createStatusbarService({
         if (!result || result.accepted !== true) {
           // F2 & F5: Release ONLY this attempt's mutex immediately on failure
           releaseOwnMutex();
+          const isAmbiguous = result?.ambiguous === true;
           throw new DomainError(
             ERROR_CODES.COMPACTION_FAILED,
-            502,
+            isAmbiguous ? 504 : 502,
             result?.reason || 'Compaction request was not accepted.',
+            isAmbiguous ? { ambiguous: true } : undefined,
           );
         }
 
@@ -1032,6 +1093,29 @@ export function createStatusbarService({
             baselineStepCount,
             status: 'accepted',
           });
+        }
+
+        // v3.1.3: Arm autoCompactState on manual compaction so auto-compact never fires a 2nd
+        // /compact while a >15s manual compaction is still finishing, and tail probes stay active.
+        if (trigger === 'manual') {
+          const prevAutoEntry = autoCompactState.get(sessionId);
+          autoCompactState.delete(sessionId);
+          autoCompactState.set(sessionId, {
+            cooldownUntil: Math.max(
+              prevAutoEntry?.cooldownUntil || 0,
+              acceptedAt + AUTO_COMPACT_COOLDOWN_MS,
+            ),
+            waitingForDrop: true,
+            lastTriggeredTokens: baselineUsedTokens,
+            lastTriggeredStep: baselineStepCount,
+            lastTriggeredCompactedStep: baselineCompactedStep,
+            failedWhileRunning: false,
+          });
+          while (autoCompactState.size > MAX_SESSION_OVERRIDES) {
+            const oldestAuto = autoCompactState.keys().next().value;
+            if (oldestAuto === undefined) break;
+            autoCompactState.delete(oldestAuto);
+          }
         }
 
         return {

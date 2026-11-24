@@ -1,4 +1,4 @@
-# Test Cases — Antigravity Statusbar v3.1.2
+# Test Cases — Antigravity Statusbar v3.1.3
 
 | Suite | File | Scope & Regression IDs |
 |---|---|---|
@@ -61,7 +61,7 @@
 | `TC-GLOBAL-05` | `G-1` fresh snapshot synchronization & session limit UX (`bar-controller.mjs`) | Trigger `handleApplyLimit` while a background `/api/snapshot` poll is already `inFlight`; verify controller waits for post-save fresh snapshot before showing toast/updating UI | Post-save toast and status text reflect updated snapshot rather than stale pre-save snapshot. |
 | `TC-GLOBAL-06` | `G-2` `AUX_PANE` global default scope sync (`src/ui/app.js`) | Switch `limitScopeSelect` between `'session'` and `'default'` after loading settings with `defaultCustomLimit: 256000` and session limit `128000`; render `limitSource: 'model'` badge | Switching scope accurately loads each scope's saved value into inputs (without leaking model-global limit into session input); `'model'` source displays localized model-global label. |
 
-## v3.1 / v3.1.1 / v3.1.2 P0 Hardening, Auto-Resume & Double-Compact Prevention TDD Cases (`TC-P0-00` – `TC-P0-12d`)
+## v3.1 / v3.1.1 / v3.1.2 / v3.1.3 P0 Hardening, Auto-Resume & Double-Compact Prevention TDD Cases (`TC-P0-00` – `TC-P0-13e`)
 
 | ID | Issue | Scenario & Inputs | Expected Result (Oracle) |
 |---|---|---|---|
@@ -84,4 +84,9 @@
 | `TC-P0-12b` | `v3.1.2` | Partial post-compaction `generatorMetadata` (`usage: {}`, no `estimatedTokensUsed`) and checkpoint-step summarization metadata (`stepIndices: [checkpointStep]`) | Compares checkpoint against `tokenSourceMetaStep` (`effectiveCheckpointStep >= tokenSourceMetaStep`), preventing pre-compaction tokens from leaking through partial or summarization items. |
 | `TC-P0-12c` | `v3.1.2` | Long compaction (`>90s`) finishing with synthetic `usedTokensSource: 'after_compaction'`, followed by stale spike before a real `<limit` turn, plus out-of-order regressed `stepCount`/`lastCompactedStep` poll | Preserves/refreshes 90s settlement cooldown on synthetic `after_compaction` (clears on real `<limit` reading) and blocks `/compact` on regressed out-of-order telemetry. |
 | `TC-P0-12d` | `v3.1.2` | Post-checkpoint `RUNNING` ("Working") lasting `>12s` (`20s`) with `runningStepDelta === 0`, then settling to `IDLE` | Preserves `pendingAutoResume` past 12s when `stepCount` is known with 0 new steps and dispatches single-shot auto-resume once `IDLE`. |
+| `TC-P0-13a` | `v3.1.3` | Lowering global `defaultCustomLimit` (`512K` → `128K`) on a `360K` session where 1st `/compact` drops tokens `>=15%` (`360K` → `145K`) yet remains `>= 128K` | Removes `reducedMeaningfully` bypass: retains 90s cooldown + growth guard from updated `145K` baseline instead of firing an immediate 2nd `/compact`. |
+| `TC-P0-13b` | `v3.1.3` | Ambiguous `504` RPC timeout on `SendUserCascadeMessage` (`/compact`) and `AbortError` timeout on `agentapi` (`sendCommand`) | Raises compact RPC timeout to `20_000ms`, blocks duplicate fallback on ambiguous timeout (`ambiguous: true`), and preserves `waitingForDrop`, cooldown, and `pendingAutoResume` in `statusbar-service`. |
+| `TC-P0-13c` | `v3.1.3` | `updateSettings` lowering global limit again during an in-flight compaction, and no-op same-value global limit save | Preserves `autoCompactState` for sessions currently in `compactingSessions` and ignores no-op saves where effective limit did not change. |
+| `TC-P0-13d` | `v3.1.3` | Manual `/compact` on an over-limit session taking `>15s` (`16s`–`18s`) | Arms `autoCompactState` (90s cooldown + `waitingForDrop`) on manual compaction and keeps `includeTailSteps: true` active during cooldown. |
+| `TC-P0-13e` | `v3.1.3` | Concurrent overlapping `getSessionSnapshot` polls resolving out of order when `stepCount` and `lastCompactedStep` are `null` | Per-session monotonic `snapshotSeq` / `latestCompletedSnapshotSeq` epoch guard blocks stale older poll from mutating state or triggering a duplicate `/compact`. |
 
