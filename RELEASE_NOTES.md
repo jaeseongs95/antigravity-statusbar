@@ -1,3 +1,59 @@
+# Release Notes — `v3.1.4` (2026-11-24)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.1.4` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.1.4` aligns the plugin with `antigravity-native-addon-host` **`v2.3.0`** by declaring explicit Desktop-only host profile isolation (preventing Remote Web auto-inclusion from baking ephemeral Sidecar loopback tokens into Remote Web UserScript/bookmarklet artifacts), adding a fail-closed `addonHost.hostProfileId` runtime guard, and updating test coverage to mirror `v2.2.0`/`v2.3.0` host kernel contracts.
+
+### 2. Changes
+- **Desktop-Only `AddonManifest.v2` Isolation (`addon-manifest.v2.json`)**:
+  - Adds `"hostProfiles": ["antigravity-desktop"]` and `"excludeHostProfiles": ["antigravity-remote-web"]` and raises `"minHostVersion"` from `"2.0.0"` to `"2.3.0"` (the first host release whose strict `addon-manifest.v2.schema.json` accepts `hostProfiles` / `excludeHostProfiles`).
+  - Prevents `antigravity-native-addon-host --build-remote` (whose `antigravity-remote-web` profile inherits `compatibleHostProfiles: ["antigravity-desktop"]`) from auto-packing `runtime/statusbar-renderer.js` with live per-process loopback URL + 256-bit Sidecar bearer tokens or permanently embedding the standby stub.
+  - Intentionally retains `trustLevel: "restricted"` without enabling `settingsBridge` or `configBridge`: the headless Sidecar regenerates `runtime/statusbar-renderer.js` with a fresh ephemeral token on every launch (making static `trusted` SHA-256 pinning incompatible) and already manages `data/settings.json` atomically via `proper-lockfile` + `write-file-atomic`.
+- **Defense-in-Depth Runtime Guard (`src/adapters/antigravity/addon/addon-host-adapter.mjs`, `src/adapters/antigravity/addon/bootstrap.mjs`, `src/adapters/antigravity/addon/bundle-builder.mjs`)**:
+  - Forwards `addonHost.hostProfileId` (trimmed string or `null`) through `createAddonHostAdapter`.
+  - Fails closed at the entry of both `startAddonStatusbar` and `startStandbyStatusbar` whenever `hostPort.hostProfileId === 'antigravity-remote-web'`, returning frozen no-op handles with zero slot mounts, zero style injections, zero `window.statusbarAddons` exposure, zero timers/observers/listeners, and zero loopback `fetch` calls.
+- **Host `v2.2.0`/`v2.3.0` Test Parity & Documentation (`test/static/boundary.test.mjs`, `test/unit/addon-manifest.test.mjs`, `test/integration/addon-runtime.test.mjs`, `test/integration/antigravity-adapter.test.mjs`, `README.md`, `README.ko.md`, `docs/ARCHITECTURE_V3.md`, `docs/TEST_CASES.md`)**:
+  - Updates `TC-ADDON-01` and `TC-ADDON-03` for `v2.3.0` schema fields (`hostProfiles`, `excludeHostProfiles`, `settingsBridge`/`configBridge` awareness) and `hostProfileId` forwarding.
+  - Updates `TC-ADDON-09` to mirror `v2.2.0+` centered `<dialog>` defaults and the `I10` dispose invariant (running `onDispose` callbacks before marking the handle disposed so `unmountSlot`/`removeStyle` succeed without `ERR_PLUGIN_HANDLE_DISPOSED`).
+  - Adds `TC-ADDON-10` verifying fail-closed Remote Web behavior for both active and standby bundles plus static bundle hygiene.
+  - Documents the `addon-host --register` manifest refresh step in `README.md` and `README.ko.md`.
+
+### 3. Verification
+- Verified on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) across `test:static`, `test:unit`, `test:integration` (including `TC-ADDON-09` & `TC-ADDON-10`), `test:security`, `test:ui`, and `install-plugin.mjs --dry-run`.
+
+---
+
+## [한국어] `v3.1.4` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.1.4`는 `antigravity-native-addon-host` **`v2.3.0`** 릴리즈에 맞춰 데스크톱 전용 호스트 프로필 격리(Remote Web 자동 포함으로 인한 Sidecar 임시 토큰 유출·고장 차단)를 매니페스트와 런타임 양쪽에 적용하고, `v2.2.0`/`v2.3.0` 호스트 커널 계약에 맞춰 테스트와 문서를 정합화한 호환성 패치 릴리즈입니다.
+
+### 2. 주요 변경 사항
+- **데스크톱 전용 `AddonManifest.v2` 격리 (`addon-manifest.v2.json`)**:
+  - `compatibility`에 `"hostProfiles": ["antigravity-desktop"]`과 `"excludeHostProfiles": ["antigravity-remote-web"]`을 명시하고, 해당 필드를 허용하는 최소 호스트 버전인 `"minHostVersion": "2.3.0"`으로 상향했습니다.
+  - `antigravity-native-addon-host v2.3.0`의 `antigravity-remote-web` 프로필이 `compatibleHostProfiles: ["antigravity-desktop"]`을 상속함에 따라 `addon-host --build-remote` 실행 시 `runtime/statusbar-renderer.js`가 자동 포함되는 문제를 차단했습니다(데스크톱 실행 중 빌드 시 프로세스별 임시 256-bit Sidecar 토큰·루프백 포트가 Remote Web 산출물에 고정되거나, 종료 상태 빌드 시 대기 스텁이 영구 박제되는 현상 방지).
+  - `trustLevel: "restricted"`를 의도적으로 유지하고 `settingsBridge`/`configBridge`를 활성화하지 않습니다. 상태바 Sidecar는 매 기동마다 새 임시 토큰으로 `runtime/statusbar-renderer.js`를 재생성하므로 정적 SHA-256 핀이 필요한 `trusted` 승격과 맞지 않으며, 설정 저장은 이미 Sidecar가 `proper-lockfile` + `write-file-atomic`으로 원자적 처리하고 있습니다.
+- **심층 방어 Fail-Closed 런타임 가드 (`src/adapters/antigravity/addon/addon-host-adapter.mjs`, `src/adapters/antigravity/addon/bootstrap.mjs`, `src/adapters/antigravity/addon/bundle-builder.mjs`)**:
+  - `createAddonHostAdapter`가 호스트의 `addonHost.hostProfileId`를 정규화하여 `RendererHostPort`로 전달하도록 확장했습니다.
+  - `startAddonStatusbar`와 `startStandbyStatusbar` 모두 `hostPort.hostProfileId === 'antigravity-remote-web'`이면 즉시 Fail-Closed no-op 핸들을 반환하여 슬롯 마운트, 스타일 주입, `window.statusbarAddons` 노출, 타이머/옵저버/리스너 등록, 루프백 `fetch`를 일절 수행하지 않습니다.
+- **호스트 `v2.2.0`/`v2.3.0` 계약 테스트 및 문서 정합화 (`test/static/boundary.test.mjs`, `test/unit/addon-manifest.test.mjs`, `test/integration/addon-runtime.test.mjs`, `test/integration/antigravity-adapter.test.mjs`, `README.md`, `README.ko.md`, `docs/ARCHITECTURE_V3.md`, `docs/TEST_CASES.md`)**:
+  - `TC-ADDON-01`, `TC-ADDON-03`에 `v2.3.0` 스키마 필드(`hostProfiles`, `excludeHostProfiles`, `settingsBridge`/`configBridge` 스키마 인지 및 미사용 확인)와 `hostProfileId` 전달 검증을 추가했습니다.
+  - `TC-ADDON-09`를 `v2.2.0+` 중앙 정렬 `<dialog>` 기본 스타일과 `I10` dispose 순서(`onDispose` 콜백이 핸들 disposed 전환 전에 실행되어 `unmountSlot`/`removeStyle`이 정상 완료됨) 기준으로 갱신했습니다.
+  - 활성 번들과 스탠바이 스텁 양쪽의 Remote Web Fail-Closed 가드 및 정적 번들 위생 검사를 수행하는 `TC-ADDON-10`을 신설했습니다.
+  - `README.md`와 `README.ko.md`에 `addon-host --register`를 통한 `addons.d` 매니페스트 갱신 절차를 문서화했습니다.
+
+### 3. 검증 근거
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): `test:static`, `test:unit`, `test:integration`(`TC-ADDON-09`·`TC-ADDON-10` 포함), `test:security`, `test:ui`, `install-plugin.mjs --dry-run` 전 항목 검증 완료.
+
+---
+
 # Release Notes — `v3.1.3` (2026-11-24)
 
 > **Document Policy / 문서 작성 기준**
