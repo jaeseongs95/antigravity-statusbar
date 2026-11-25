@@ -1241,3 +1241,118 @@ test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots
     remoteWebHost.dispose();
   }
 });
+
+test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversation to its own data-cascade-id without stock-chart fallback drift and cleans up pointerdown listener on dispose', async () => {
+  const staticSource = renderAddonRendererBundle({
+    baseUrl: 'http://127.0.0.1:46111',
+    token: TEST_TOKEN,
+  });
+  const { doc, MockElement } = createMockDom();
+
+  const mainView = new MockElement('div', doc);
+  mainView.setAttribute('data-testid', 'conversation-view');
+  mainView.setAttribute('data-cascade-id', 'sess-main-vm');
+  const mainBox = new MockElement('div', doc);
+  mainBox.setAttribute('data-testid', 'agent-input-box');
+  mainView.appendChild(mainBox);
+  doc.body.appendChild(mainView);
+
+  const subView = new MockElement('div', doc);
+  subView.setAttribute('data-testid', 'subagent-tab-conversation');
+  subView.setAttribute('data-cascade-id', 'sess-sub-vm');
+  const subText = new MockElement('p', doc);
+  subText.textContent = 'Subagent transcript';
+  const subBox = new MockElement('div', doc);
+  subBox.setAttribute('data-testid', 'agent-input-box');
+  subView.appendChild(subText);
+  subView.appendChild(subBox);
+  doc.body.appendChild(subView);
+
+  const host = createMockAddonHost(doc, MockElement);
+  let sessionCallCount = 0;
+  const snapshotCalls = [];
+  const sessionSequences = [
+    [{ sessionId: 'sess-main-vm', isSubagent: false }, { sessionId: 'sess-sub-vm', isSubagent: true }],
+    [{ sessionId: 'sess-other-sub', isSubagent: true }, { sessionId: 'sess-main-vm', isSubagent: false }],
+  ];
+
+  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
+  vm.runInNewContext(
+    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
+    {
+      window: sandboxWindow,
+      document: doc,
+      addonHost: host.handle,
+      URL,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      fetch: async (url, init) => {
+        const pathname = new URL(url).pathname;
+        const body = JSON.parse(init.body || '{}');
+        if (pathname === '/api/settings/get') {
+          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
+        }
+        if (pathname === '/api/quota') {
+          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+        }
+        if (pathname === '/api/sessions') {
+          const sessions = sessionSequences[sessionCallCount % sessionSequences.length];
+          sessionCallCount += 1;
+          return { ok: true, status: 200, async json() { return { sessions }; } };
+        }
+        if (pathname === '/api/snapshot') {
+          snapshotCalls.push(body.sessionId);
+          const usedTokens = body.sessionId === 'sess-sub-vm' ? 52000 : 190000;
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                sessionId: body.sessionId,
+                usedTokens,
+                effectiveLimit: 200000,
+                maxContextTokens: 512000,
+                usagePercent: usedTokens / 2000,
+                compaction: { inProgress: false, lastError: null },
+              };
+            },
+          };
+        }
+        return { ok: true, status: 200, async json() { return {}; } };
+      },
+    },
+  );
+
+  try {
+    // Initially mounts on last visible box (subBox) and MUST stay pinned to sess-sub-vm despite sessions[0] flipping
+    await flushMicrotasks();
+    const slotEl = host.slots.get('antigravity-statusbar.root');
+    assert.equal(slotEl.parentNode, subBox);
+    assert.ok(snapshotCalls.length >= 1);
+    assert.ok(
+      snapshotCalls.every((id) => id === 'sess-sub-vm'),
+      `Bundled renderer must query only sess-sub-vm while on subagent tab, got: ${JSON.stringify(snapshotCalls)}`,
+    );
+    assert.ok(slotEl.querySelector('.agy-inline-metric-btn').textContent.includes('52.0K'));
+
+    // Switching to main via pointerdown moves to mainBox and queries sess-main-vm, then clicking back on subText returns to sess-sub-vm
+    doc.dispatchEvent({ type: 'pointerdown', target: mainView });
+    await flushMicrotasks();
+    assert.equal(slotEl.parentNode, mainBox);
+    assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-main-vm');
+
+    doc.dispatchEvent({ type: 'pointerdown', target: subText });
+    await flushMicrotasks();
+    assert.equal(slotEl.parentNode, subBox);
+    assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-sub-vm');
+
+    host.handle.dispose();
+    assert.equal(doc.getListenerCount('pointerdown'), 0);
+    assert.equal(doc.getListenerCount('focusin'), 0);
+  } finally {
+    host.handle.dispose();
+  }
+});
