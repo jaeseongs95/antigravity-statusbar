@@ -55,7 +55,7 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
       ? addonHost.hostProfileId.trim()
       : null;
 
-  let lastMountedContainer = null;
+  let lastMountTarget = undefined;
 
   const adapter = {
     pluginId: typeof addonHost.pluginId === 'string' ? addonHost.pluginId : 'antigravity-statusbar',
@@ -66,25 +66,26 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
     modalSlotId,
     mountSlot(parentEl) {
       if (isV2Host) {
-        if (lastMountedContainer && parentEl && lastMountedContainer !== parentEl) {
+        const nextTarget = parentEl || null;
+        if (lastMountTarget !== undefined && lastMountTarget !== nextTarget) {
           try {
             addonHost.unmountSlot(rootSlotId);
           } catch {}
-          lastMountedContainer = null;
+          lastMountTarget = undefined;
         }
         const mounted = addonHost.mountSlot(
           rootSlotId,
-          parentEl ? { container: parentEl } : {},
+          nextTarget ? { container: nextTarget } : {},
         );
-        lastMountedContainer = mounted ? parentEl || null : null;
+        lastMountTarget = mounted ? nextTarget : undefined;
         return mounted;
       }
       const mounted = addonHost.mountSlot(rootSlotId, parentEl);
-      lastMountedContainer = mounted ? parentEl || null : null;
+      lastMountTarget = mounted ? parentEl || null : undefined;
       return mounted;
     },
     unmountSlot() {
-      lastMountedContainer = null;
+      lastMountTarget = undefined;
       return addonHost.unmountSlot(rootSlotId);
     },
     injectStyle(styleId, cssText, opts) {
@@ -108,6 +109,15 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
   }
   if (typeof addonHost.openModal === 'function') {
     adapter.openModal = (opts = {}) => addonHost.openModal(modalSlotId, opts);
+  }
+  if (typeof addonHost.getSettings === 'function') {
+    adapter.getSettings = () => addonHost.getSettings();
+  }
+  if (typeof addonHost.onSettingsChange === 'function') {
+    adapter.onSettingsChange = (cb) => addonHost.onSettingsChange(cb);
+  }
+  if (typeof addonHost.saveSettings === 'function') {
+    adapter.saveSettings = (nextData) => addonHost.saveSettings(nextData);
   }
 
   return Object.freeze(adapter);

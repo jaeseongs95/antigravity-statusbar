@@ -3,7 +3,7 @@
  * Safe DOM construction via createElement + textContent only (no HTML string injection).
  */
 
-export function createPopoverView({ doc, i18n, presets }) {
+export function createPopoverView({ doc, i18n, presets, isRemoteWeb = false }) {
   const PRESETS = Array.isArray(presets) && presets.length > 0
     ? presets
     : [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
@@ -271,6 +271,57 @@ export function createPopoverView({ doc, i18n, presets }) {
   langRow.appendChild(langSelect);
   langSection.appendChild(langRow);
 
+  const remoteConnCard = doc.createElement('div');
+  remoteConnCard.className = isRemoteWeb ? 'agy-inline-card' : 'agy-inline-card hidden';
+  const remoteConnTitle = doc.createElement('div');
+  remoteConnTitle.className = 'agy-inline-pop-subtitle';
+  remoteConnTitle.textContent = i18n.t().remoteConnTitle;
+  const remoteConnHint = doc.createElement('div');
+  remoteConnHint.className = 'agy-inline-pop-hint';
+  remoteConnHint.textContent = i18n.t().remoteConnHint;
+
+  const remoteUrlRow = doc.createElement('div');
+  remoteUrlRow.className = 'agy-inline-pop-input-row';
+  const remoteUrlInput = doc.createElement('input');
+  remoteUrlInput.className = 'agy-inline-pop-input';
+  remoteUrlInput.type = 'text';
+  remoteUrlInput.autocomplete = 'off';
+  remoteUrlInput.placeholder = i18n.t().remoteUrlPlaceholder;
+  remoteUrlRow.appendChild(remoteUrlInput);
+
+  const remoteTokenRow = doc.createElement('div');
+  remoteTokenRow.className = 'agy-inline-pop-input-row';
+  const remoteTokenInput = doc.createElement('input');
+  remoteTokenInput.className = 'agy-inline-pop-input';
+  remoteTokenInput.type = 'password';
+  remoteTokenInput.autocomplete = 'off';
+  remoteTokenInput.placeholder = i18n.t().remoteTokenPlaceholder;
+  remoteTokenRow.appendChild(remoteTokenInput);
+
+  const remoteActionsRow = doc.createElement('div');
+  remoteActionsRow.className = 'agy-inline-pop-actions-end';
+  const remoteDisconnectBtn = doc.createElement('button');
+  remoteDisconnectBtn.type = 'button';
+  remoteDisconnectBtn.className = 'agy-inline-btn';
+  remoteDisconnectBtn.textContent = i18n.t().remoteDisconnectBtn;
+  const remoteConnectBtn = doc.createElement('button');
+  remoteConnectBtn.type = 'button';
+  remoteConnectBtn.className = 'agy-inline-btn agy-inline-btn-primary';
+  remoteConnectBtn.textContent = i18n.t().remoteConnectBtn;
+  remoteActionsRow.appendChild(remoteDisconnectBtn);
+  remoteActionsRow.appendChild(remoteConnectBtn);
+
+  const remoteConnStatusEl = doc.createElement('div');
+  remoteConnStatusEl.className = 'agy-inline-pop-hint';
+  remoteConnStatusEl.textContent = i18n.t().remoteDisconnected;
+
+  remoteConnCard.appendChild(remoteConnTitle);
+  remoteConnCard.appendChild(remoteConnHint);
+  remoteConnCard.appendChild(remoteUrlRow);
+  remoteConnCard.appendChild(remoteTokenRow);
+  remoteConnCard.appendChild(remoteActionsRow);
+  remoteConnCard.appendChild(remoteConnStatusEl);
+
   const globalLimitCard = doc.createElement('div');
   globalLimitCard.className = 'agy-inline-card';
   const globalLimitRow = doc.createElement('div');
@@ -286,6 +337,7 @@ export function createPopoverView({ doc, i18n, presets }) {
   globalLimitRow.appendChild(openGlobalModalSettingsBtn);
   globalLimitCard.appendChild(globalLimitRow);
 
+  panelSettings.appendChild(remoteConnCard);
   panelSettings.appendChild(globalLimitCard);
   panelSettings.appendChild(compactionCard);
   panelSettings.appendChild(addonSection);
@@ -386,9 +438,20 @@ export function createPopoverView({ doc, i18n, presets }) {
     setText(addonTitle, tr.addonsTitle);
     setText(langRowLabel, tr.langLabel);
     langSelect.setAttribute('aria-label', tr.langLabel);
+    setText(remoteConnTitle, tr.remoteConnTitle);
+    setText(remoteConnHint, tr.remoteConnHint);
+    remoteUrlInput.placeholder = tr.remoteUrlPlaceholder;
+    remoteTokenInput.placeholder = tr.remoteTokenPlaceholder;
+    setText(remoteConnectBtn, tr.remoteConnectBtn);
+    setText(remoteDisconnectBtn, tr.remoteDisconnectBtn);
     if (langSelect.value !== i18n.getLocale()) {
       langSelect.value = i18n.getLocale();
     }
+  }
+
+  function setRemoteConnectionStatus(text, isErr = false) {
+    remoteConnStatusEl.className = isErr ? 'agy-inline-pop-feedback err' : 'agy-inline-pop-hint';
+    setText(remoteConnStatusEl, text);
   }
 
   function renderSnapshotDetails(snap) {
@@ -543,6 +606,13 @@ export function createPopoverView({ doc, i18n, presets }) {
     compactPromptSaveBtn,
     compactPromptResetBtn,
     langSelect,
+    remoteConnCard,
+    remoteUrlInput,
+    remoteTokenInput,
+    remoteConnectBtn,
+    remoteDisconnectBtn,
+    remoteConnStatusEl,
+    setRemoteConnectionStatus,
     rebuildPresets,
     setActiveTab,
     setVisible,

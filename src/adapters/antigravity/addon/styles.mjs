@@ -22,6 +22,15 @@ export const STATUSBAR_STYLES = `
   position: relative;
   flex-wrap: wrap;
 }
+.agy-inline-statusbar.agy-remote-dock {
+  margin-top: 0;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(18, 22, 30, 0.94);
+  color: #e6edf3;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
 .agy-inline-left,
 .agy-inline-right {
   display: flex;

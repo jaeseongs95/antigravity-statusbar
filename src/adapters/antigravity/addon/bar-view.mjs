@@ -107,17 +107,29 @@ export function createBarView({ doc, i18n }) {
   barEl.appendChild(leftEl);
   barEl.appendChild(rightEl);
 
-  function renderSnapshot({ snap, connected, compacting, hasSession, compactPrompt }) {
+  function renderSnapshot({
+    snap,
+    connected,
+    configured = true,
+    isRemoteWeb = false,
+    compacting,
+    hasSession,
+    compactPrompt,
+  }) {
     const tr = i18n.t();
     const isBackendCompacting = Boolean(snap?.compaction?.inProgress);
     const isCompactingNow = Boolean(compacting || isBackendCompacting);
-    compactBtn.disabled = isCompactingNow || !hasSession;
+    compactBtn.disabled = isCompactingNow || !hasSession || !configured;
     setText(compactBtn, isCompactingNow ? tr.compacting : tr.compact);
     compactBtn.title = compactPrompt ? `/compact ${compactPrompt}` : '/compact';
     settingsBtn.setAttribute('aria-label', tr.settingsTitle);
 
     if (!snap) {
-      setText(ctxTextEl, connected ? `${tr.ctx} --` : tr.connecting);
+      if (!configured) {
+        setText(ctxTextEl, isRemoteWeb ? tr.remoteSetupNeeded : tr.standby);
+      } else {
+        setText(ctxTextEl, connected ? `${tr.ctx} --` : tr.connecting);
+      }
       fillEl.style.width = '0%';
       fillEl.className = 'agy-inline-bar-fill';
       softBadgeEl.style.display = 'none';
@@ -337,6 +349,10 @@ export function createBarView({ doc, i18n }) {
     settingsBtn.setAttribute('aria-expanded', String(Boolean(open && activeTab === 'settings')));
   }
 
+  function setRemoteDockMode(active) {
+    barEl.classList.toggle('agy-remote-dock', Boolean(active));
+  }
+
   return Object.freeze({
     barEl,
     ctxBtn,
@@ -352,5 +368,6 @@ export function createBarView({ doc, i18n }) {
     setNote,
     setReconnecting,
     setExpandedState,
+    setRemoteDockMode,
   });
 }

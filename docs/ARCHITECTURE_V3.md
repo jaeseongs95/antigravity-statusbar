@@ -1,8 +1,11 @@
-# Architecture v3.1.5 — Official Antigravity Native Plugin (`AddonManifest.v2` Inline Statusbar + Headless Native Sidecar)
+# Architecture v3.2.0 — Official Antigravity Native Plugin (`AddonManifest.v2` Trusted Inline Statusbar + Remote Web + Headless Native Sidecar)
 
 ## 1. Design Principles
 
-1. **Zero Host Mutation & Desktop-Only Profile Isolation (`antigravity-addons >= 2.3.0`, formerly `antigravity-native-addon-host`)**: No `app.asar` patching, no Electron renderer injection, no React Fiber/Redux/Protobuf mutation, no `SetMendelFlagOverrides`, no `hooks.json`. `addon-manifest.v2.json` remains `trustLevel: "restricted"` (no static-SHA `settingsBridge`/`configBridge` because `runtime/statusbar-renderer.js` rotates per-process ephemeral credentials on every launch) and declares `hostProfiles: ["antigravity-desktop"]`, `excludeHostProfiles: ["antigravity-remote-web"]`, and `minHostVersion: "2.3.0"`, backed by a fail-closed `addonHost.hostProfileId === 'antigravity-remote-web'` guard in `bootstrap.mjs`.
+1. **Zero Host Mutation, Trusted SHA-256 Immutability & Dual-Profile Support (`antigravity-addons >= 2.3.0`, `v2.5.3+` recommended)**: No `app.asar` patching, no Electron renderer injection, no React Fiber/Redux/Protobuf mutation, no `SetMendelFlagOverrides`, no `hooks.json`. `addon-manifest.v2.json` declares `trustLevel: "trusted"`, `compatibility.hostProfiles: ["antigravity-desktop", "antigravity-remote-web"]`, `uiSlots[0].anchor: "status-bar"`, and `settingsBridge: { fileName: "antigravity-statusbar-runtime.json", maxBytes: 16384 }`.
+   - **Immutable Renderer Script**: `scripts/install-plugin.mjs` writes a 100% static, deterministic, credential-free `runtime/statusbar-renderer.js` (zero `baseUrl`/`token` literals, zero HTML/eval/require AST sinks). The Sidecar never modifies `runtime/statusbar-renderer.js`, preventing `ERR_RENDERER_SHA256_MISMATCH`.
+   - **Desktop `settingsBridge` Runtime Delivery**: On `antigravity-desktop`, `createSettingsBridgePublisher` atomically publishes per-launch `{ schemaVersion, mode: "active", baseUrl, token, updatedAt }` (`0o600`) strictly inside `HOST_DATA_DIR/antigravity-statusbar-runtime.json` and scrubs it to `mode: "standby"` (`baseUrl: null`, `token: null`) on `teardown()`/`teardownSync()`. The renderer subscribes via `addonHost.getSettings()` / `addonHost.onSettingsChange(...)` for zero-reload port/token rotation.
+   - **Remote Web (`antigravity-remote-web`) Browser-Local Configuration**: Rejects `persistence === "packed-initial"` snapshots as defense-in-depth, boots cleanly with zero fetches when unconfigured, mounts into `[data-testid="agent-input-box"]` when present or falls back to host `anchor: "status-bar"` / `#remote-addon-host-slot-dock` (`.agy-remote-dock`), and persists user-entered loopback HTTP or HTTPS endpoint + token strictly in browser `localStorage` via `addonHost.saveSettings(...)`.
 2. **Strict Vendor Neutrality (Ports & Adapters)**:
    - `src/core/`: Pure ESM domain models, 4-tier context limit policy (`session > model > default > host`), guarded auto-compaction & auto-resume state machine (with post-checkpoint completion latch and `AUTO_RESUME_FAILED` error surfacing), error codes, port contracts, and application service. Zero Node I/O, zero vendor strings.
    - `src/ui/`: Self-contained vendor-neutral browser UI modules (`index.html`, `styles.css`, `i18n.mjs`, `bridge/host-bridge.mjs`, `app.js`) retained for unit/UI contract testing (the right-hand `AUX_PANE` tab is disabled in `sidecars/statusbar/sidecar.json` via `has_web_ui: false`). Zero `innerHTML`, zero inline scripts/styles, zero `../core` imports, zero vendor strings.
@@ -12,11 +15,15 @@
 ## 2. Data Flow
 
 ```text
-AddonManifest.v2 Inline Statusbar (Shadow DOM slots: root / popover / modal)
-   │  POST /api/* + X-Statusbar-Token (explicit >=16 or headless 256-bit ephemeral) + exact loopback/host Origin
+AddonManifest.v2 Static Immutable Renderer (runtime/statusbar-renderer.js, SHA-256 pinned, 0 credentials)
+   ├── Desktop (antigravity-desktop):
+   │     reads live { mode, baseUrl, token } from host settingsBridge (HOST_DATA_DIR/antigravity-statusbar-runtime.json)
+   └── Remote Web (antigravity-remote-web):
+         ignores packed-initial snapshots; reads/saves user endpoint (loopback HTTP or HTTPS) + token via addonHost.saveSettings()
+   │  POST /api/* + X-Statusbar-Token + exact loopback/host Origin (with PNA preflight)
    ▼
-Headless Sidecar HTTP Server (src/adapters/antigravity/sidecar-entry.mjs, has_web_ui: false)
-   │  Fail-Closed auth, Host/Origin/CSP/path.relative jail, teardownSync()
+Headless Sidecar HTTP Server (src/adapters/antigravity/sidecar-entry.mjs, has_web_ui: false, optional STATUSBAR_SIDECAR_PORT)
+   │  Fail-Closed auth, Host/Origin/CSP/path.relative jail, settingsBridge publish & teardownSync()
    ▼
 Statusbar Service (src/core/app/statusbar-service.mjs)
    ├── TelemetryPort  ──► ls-transport.mjs (Connect JSON & 5B stream, oversize-only fallback)

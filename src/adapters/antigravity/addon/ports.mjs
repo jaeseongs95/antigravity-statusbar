@@ -15,9 +15,9 @@ export function assertRendererHostPort(port) {
       throw new Error(`ERR_INVALID_RENDERER_HOST_PORT:missing_${required[i]}`);
     }
   }
-  const optionalPortals = ['openModal', 'openPopover'];
-  for (let i = 0; i < optionalPortals.length; i += 1) {
-    const key = optionalPortals[i];
+  const optionalMethods = ['openModal', 'openPopover', 'getSettings', 'onSettingsChange', 'saveSettings'];
+  for (let i = 0; i < optionalMethods.length; i += 1) {
+    const key = optionalMethods[i];
     if (port[key] !== undefined && port[key] !== null && typeof port[key] !== 'function') {
       throw new Error(`ERR_INVALID_RENDERER_HOST_PORT:invalid_${key}`);
     }
@@ -46,6 +46,13 @@ export function assertStatusbarApiPort(port) {
   for (let i = 0; i < required.length; i += 1) {
     if (typeof port[required[i]] !== 'function') {
       throw new Error(`ERR_INVALID_STATUSBAR_API_PORT:missing_${required[i]}`);
+    }
+  }
+  const optionalApiMethods = ['isConfigured', 'getBaseUrl', 'configure', 'clearConnection'];
+  for (let i = 0; i < optionalApiMethods.length; i += 1) {
+    const key = optionalApiMethods[i];
+    if (port[key] !== undefined && port[key] !== null && typeof port[key] !== 'function') {
+      throw new Error(`ERR_INVALID_STATUSBAR_API_PORT:invalid_${key}`);
     }
   }
   return port;
