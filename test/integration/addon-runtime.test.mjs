@@ -995,45 +995,49 @@ test('TC-ADDON-10a (v3.2.0): Desktop trusted static bundle consumes live setting
       },
     },
   );
-  await flushMicrotasks();
+  try {
+    await flushMicrotasks();
 
-  // 1. Boots in standby with ZERO fetches
-  assert.equal(seenRequests.length, 0, 'Standby settingsBridge must issue zero fetches');
-  const rootEl = mountedSlots.get('antigravity-statusbar.root').rootEl;
-  assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
+    // 1. Boots in standby with ZERO fetches
+    assert.equal(seenRequests.length, 0, 'Standby settingsBridge must issue zero fetches');
+    const rootEl = mountedSlots.get('antigravity-statusbar.root').rootEl;
+    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
 
-  // 2. Sidecar publishes active credentials via settingsBridge -> renderer immediately connects
-  currentSettingsSnap = {
-    status: 'ok',
-    data: { mode: 'active', baseUrl: 'http://127.0.0.1:46001', token: TEST_TOKEN },
-  };
-  for (const cb of settingsListeners) cb(currentSettingsSnap);
-  await flushMicrotasks();
-  assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46001/') && r.token === TEST_TOKEN));
-  assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('48.0K'));
+    // 2. Sidecar publishes active credentials via settingsBridge -> renderer immediately connects
+    currentSettingsSnap = {
+      status: 'ok',
+      data: { mode: 'active', baseUrl: 'http://127.0.0.1:46001', token: TEST_TOKEN },
+    };
+    for (const cb of settingsListeners) cb(currentSettingsSnap);
+    await flushMicrotasks();
+    assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46001/') && r.token === TEST_TOKEN));
+    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('48.0K'));
 
-  // 3. Sidecar restarts on a new port/token -> live rotation without reload
-  const rotatedToken = 'rotated-desktop-bridge-token-32ok';
-  currentSettingsSnap = {
-    status: 'ok',
-    data: { mode: 'active', baseUrl: 'http://127.0.0.1:46002', token: rotatedToken },
-  };
-  for (const cb of settingsListeners) cb(currentSettingsSnap);
-  await flushMicrotasks();
-  assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46002/') && r.token === rotatedToken));
+    // 3. Sidecar restarts on a new port/token -> live rotation without reload
+    const rotatedToken = 'rotated-desktop-bridge-token-32ok';
+    currentSettingsSnap = {
+      status: 'ok',
+      data: { mode: 'active', baseUrl: 'http://127.0.0.1:46002', token: rotatedToken },
+    };
+    for (const cb of settingsListeners) cb(currentSettingsSnap);
+    await flushMicrotasks();
+    assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46002/') && r.token === rotatedToken));
 
-  // 4. Sidecar shuts down (mode: standby) -> clears connection back to standby
-  const reqCountBeforeStandby = seenRequests.length;
-  currentSettingsSnap = { status: 'ok', data: { mode: 'standby', baseUrl: null, token: null } };
-  for (const cb of settingsListeners) cb(currentSettingsSnap);
-  await flushMicrotasks();
-  assert.equal(seenRequests.length, reqCountBeforeStandby);
-  assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
+    // 4. Sidecar shuts down (mode: standby) -> clears connection back to standby
+    const reqCountBeforeStandby = seenRequests.length;
+    currentSettingsSnap = { status: 'ok', data: { mode: 'standby', baseUrl: null, token: null } };
+    for (const cb of settingsListeners) cb(currentSettingsSnap);
+    await flushMicrotasks();
+    assert.equal(seenRequests.length, reqCountBeforeStandby);
+    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
 
-  // 5. Dispose unsubscribes settingsBridge listener and cleans up slots
-  desktopHost.dispose();
-  assert.equal(unsubscribedCount, 1);
-  assert.equal(mountedSlots.size, 0);
+    // 5. Dispose unsubscribes settingsBridge listener and cleans up slots
+    desktopHost.dispose();
+    assert.equal(unsubscribedCount, 1);
+    assert.equal(mountedSlots.size, 0);
+  } finally {
+    desktopHost.dispose();
+  }
 });
 
 test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots, falls back to host status-bar anchor dock, and connects/disconnects via browser-local saveSettings', async () => {
@@ -1181,52 +1185,57 @@ test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots
       },
     },
   );
-  await flushMicrotasks();
+  try {
+    await flushMicrotasks();
 
-  // 1. Packed-initial snapshot MUST be ignored -> zero fetches on startup!
-  assert.equal(fetchLog.length, 0, 'Remote Web must ignore packed-initial snapshot and perform zero fetches');
-  // 2. Mounted via host status-bar anchor fallback ({} without container) and styled as .agy-remote-dock
-  assert.deepEqual(mountOptsLog[0], { slotId: 'antigravity-statusbar.root', opts: {} });
-  const rootRec = mountedSlots.get('antigravity-statusbar.root');
-  assert.equal(rootRec.container, remoteDock);
-  assert.equal(rootRec.rootEl.querySelector('.agy-inline-statusbar').classList.contains('agy-remote-dock'), true);
+    // 1. Packed-initial snapshot MUST be ignored -> zero fetches on startup!
+    assert.equal(fetchLog.length, 0, 'Remote Web must ignore packed-initial snapshot and perform zero fetches');
+    // 2. Mounted via host status-bar anchor fallback ({} without container) and styled as .agy-remote-dock
+    assert.equal(mountOptsLog[0].slotId, 'antigravity-statusbar.root');
+    assert.deepEqual(Object.keys(mountOptsLog[0].opts), []);
+    const rootRec = mountedSlots.get('antigravity-statusbar.root');
+    assert.equal(rootRec.container, remoteDock);
+    assert.equal(rootRec.rootEl.querySelector('.agy-inline-statusbar').classList.contains('agy-remote-dock'), true);
 
-  // 3. Clicking bar opens Settings tab with visible Remote Sidecar Connection card
-  const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
-  ctxBtn.getBoundingClientRect = () => ({ left: 400, top: 760, right: 560, width: 160, height: 24 });
-  ctxBtn.click();
-  const popPortal = portals[portals.length - 1];
-  assert.ok(popPortal, 'Clicking unconfigured Remote Web bar must open popover portal');
-  const inputs = popPortal.bodyEl.querySelectorAll('.agy-inline-pop-input');
-  const urlInput = inputs.find((el) => el.type === 'text' && el.placeholder.includes('http'));
-  const tokenInput = inputs.find((el) => el.type === 'password');
-  assert.ok(urlInput && tokenInput, 'Remote Web Settings tab must render URL and password token inputs');
+    // 3. Clicking bar opens Settings tab with visible Remote Sidecar Connection card
+    const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
+    ctxBtn.getBoundingClientRect = () => ({ left: 400, top: 760, right: 560, width: 160, height: 24 });
+    ctxBtn.click();
+    const popPortal = portals[portals.length - 1];
+    assert.ok(popPortal, 'Clicking unconfigured Remote Web bar must open popover portal');
+    const inputs = popPortal.bodyEl.querySelectorAll('.agy-inline-pop-input');
+    const urlInput = inputs.find((el) => el.type === 'text' && el.placeholder.includes('http'));
+    const tokenInput = inputs.find((el) => el.type === 'password');
+    assert.ok(urlInput && tokenInput, 'Remote Web Settings tab must render URL and password token inputs');
 
-  // 4. Connect to HTTPS endpoint -> persists via addonHost.saveSettings and fetches live snapshot!
-  urlInput.value = 'https://my-sidecar.example.com:8443';
-  tokenInput.value = remoteToken;
-  const connectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn-primary').find((b) => b.textContent.includes('연결'));
-  assert.ok(connectBtn);
-  connectBtn.click();
-  await flushMicrotasks();
+    // 4. Connect to HTTPS endpoint -> persists via addonHost.saveSettings and fetches live snapshot!
+    urlInput.value = 'https://my-sidecar.example.com:8443';
+    tokenInput.value = remoteToken;
+    const connectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn-primary').find((b) => b.textContent.includes('연결'));
+    assert.ok(connectBtn);
+    connectBtn.click();
+    await flushMicrotasks();
 
-  assert.equal(savedPayloads.length, 1);
-  assert.equal(savedPayloads[0].remoteBaseUrl, 'https://my-sidecar.example.com:8443');
-  assert.equal(savedPayloads[0].remoteToken, remoteToken);
-  assert.ok(fetchLog.some((r) => r.url === 'https://my-sidecar.example.com:8443/api/settings/get' && r.token === remoteToken));
-  assert.ok(rootRec.rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('75.0K'));
+    assert.equal(savedPayloads.length, 1);
+    assert.equal(savedPayloads[0].remoteBaseUrl, 'https://my-sidecar.example.com:8443');
+    assert.equal(savedPayloads[0].remoteToken, remoteToken);
+    assert.ok(fetchLog.some((r) => r.url === 'https://my-sidecar.example.com:8443/api/settings/get' && r.token === remoteToken));
+    assert.ok(rootRec.rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('75.0K'));
 
-  // 5. Disconnect clears browser-local settings and stops polling
-  const disconnectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('해제'));
-  assert.ok(disconnectBtn);
-  disconnectBtn.click();
-  await flushMicrotasks();
-  assert.equal(savedPayloads.length, 2);
-  assert.equal(savedPayloads[1].remoteBaseUrl, '');
-  assert.equal(savedPayloads[1].remoteToken, '');
+    // 5. Disconnect clears browser-local settings and stops polling
+    const disconnectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('해제'));
+    assert.ok(disconnectBtn);
+    disconnectBtn.click();
+    await flushMicrotasks();
+    assert.equal(savedPayloads.length, 2);
+    assert.equal(savedPayloads[1].remoteBaseUrl, '');
+    assert.equal(savedPayloads[1].remoteToken, '');
 
-  // 6. Dispose unsubscribes & unmounts cleanly
-  remoteWebHost.dispose();
-  assert.equal(unsubscribedCount, 1);
-  assert.equal(mountedSlots.size, 0);
+    // 6. Dispose unsubscribes & unmounts cleanly
+    remoteWebHost.dispose();
+    assert.equal(unsubscribedCount, 1);
+    assert.equal(mountedSlots.size, 0);
+  } finally {
+    remoteWebHost.dispose();
+  }
 });

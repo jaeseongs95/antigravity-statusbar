@@ -681,6 +681,18 @@ export async function startSidecar(env = process.env, deps = {}) {
 
   let rendererCleanedUp = false;
   let shuttingDown = false;
+  let stdinWatched = false;
+  const isPipedStdin = () => {
+    if (!process.stdin || typeof process.stdin.on !== 'function' || process.stdin.isTTY) {
+      return false;
+    }
+    try {
+      const st = fs.fstatSync(0);
+      return Boolean(st && (st.isFIFO() || st.isSocket()));
+    } catch {
+      return false;
+    }
+  };
   const cleanupResources = async () => {
     clearInterval(sweepTimer);
     process.removeListener('SIGTERM', onSigTerm);
@@ -688,9 +700,12 @@ export async function startSidecar(env = process.env, deps = {}) {
     process.removeListener('SIGBREAK', onSigBreak);
     process.removeListener('uncaughtException', onUncaught);
     process.removeListener('exit', onExit);
-    if (process.stdin && typeof process.stdin.removeListener === 'function') {
+    if (stdinWatched && process.stdin && typeof process.stdin.removeListener === 'function') {
       process.stdin.removeListener('end', onStdinClose);
       process.stdin.removeListener('close', onStdinClose);
+      if (typeof process.stdin.pause === 'function') process.stdin.pause();
+      if (typeof process.stdin.unref === 'function') process.stdin.unref();
+      stdinWatched = false;
     }
     if (rendererPublisher && !rendererCleanedUp) {
       try {
@@ -756,9 +771,12 @@ export async function startSidecar(env = process.env, deps = {}) {
   process.once('SIGTERM', onSigTerm);
   process.once('SIGINT', onSigInt);
   process.once('SIGBREAK', onSigBreak);
-  if (process.stdin && typeof process.stdin.on === 'function') {
+  if (deps.watchStdin !== false && isPipedStdin()) {
+    stdinWatched = true;
     process.stdin.once('end', onStdinClose);
     process.stdin.once('close', onStdinClose);
+    if (typeof process.stdin.resume === 'function') process.stdin.resume();
+    if (typeof process.stdin.unref === 'function') process.stdin.unref();
   }
   process.once('uncaughtException', onUncaught);
   process.once('exit', onExit);

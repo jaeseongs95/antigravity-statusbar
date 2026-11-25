@@ -22,6 +22,32 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
+async function stopSidecarChildGracefully(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exitPromise = new Promise((resolve) => child.once('exit', resolve));
+  if (process.platform === 'win32' && child.stdin && !child.stdin.destroyed) {
+    child.stdin.end();
+  } else {
+    child.kill('SIGTERM');
+  }
+  let fallbackTimer = null;
+  await Promise.race([
+    exitPromise,
+    new Promise((resolve) => {
+      fallbackTimer = setTimeout(() => {
+        try {
+          child.kill('SIGTERM');
+        } catch {}
+        resolve();
+      }, 4_000);
+    }),
+  ]);
+  if (fallbackTimer) clearTimeout(fallbackTimer);
+  if (child.exitCode === null && child.signalCode === null) {
+    await exitPromise;
+  }
+}
+
 test('parseLoopbackLsAddress normalizes schemeless loopback and rejects non-loopback hosts', () => {
   const norm = parseLoopbackLsAddress('localhost:42424');
   assert.equal(norm.protocol, 'http:');
@@ -695,7 +721,7 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
       ANTIGRAVITY_PLUGIN_DATA_DIR: dataDir,
       ANTIGRAVITY_ADDON_HOST_DATA_DIR: hostDataDir,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   try {
@@ -790,8 +816,7 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
     assert.equal(publishedBridge.baseUrl, origin);
     assert.equal(publishedBridge.token, token);
   } finally {
-    child.kill('SIGTERM');
-    await new Promise((resolve) => child.once('exit', resolve));
+    await stopSidecarChildGracefully(child);
     const afterStopBridge = JSON.parse(
       await fs.readFile(path.join(hostDataDir, 'antigravity-statusbar-runtime.json'), 'utf8'),
     );
@@ -883,7 +908,7 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
           ANTIGRAVITY_PLUGIN_DATA_DIR: dataDir,
           ANTIGRAVITY_ADDON_HOST_DATA_DIR: hostDataDir,
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
     try {
@@ -924,8 +949,7 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
       assert.equal(bridgeData.baseUrl, `http://127.0.0.1:${ready.port}`);
       assert.equal(bridgeData.token, 'installed-dest-token-32-chars-ok');
     } finally {
-      installedChild.kill('SIGTERM');
-      await new Promise((resolve) => installedChild.once('exit', resolve));
+      await stopSidecarChildGracefully(installedChild);
     }
 
     const shaAfter = crypto
@@ -977,6 +1001,7 @@ test('TC-ADDON-11 (v3.2.0): resolvePreferredSidecarPort validates [1024, 65535] 
         STATUSBAR_DISABLE_ADDON_PUBLISH: '1',
         STATUSBAR_SWEEP_INTERVAL_MS: '600000',
       },
+      { watchStdin: false },
     );
     assert.ok(started.port > 0);
     assert.notEqual(started.port, occupiedPort, 'EADDRINUSE must fall back to an ephemeral loopback port');
