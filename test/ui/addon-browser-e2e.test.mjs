@@ -469,8 +469,42 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
     const ctxText = await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-metric-btn').textContent");
     assert.ok(ctxText.includes('99%'), `Expected 99% for non-exceeded 99.7%, got "${ctxText}"`);
 
-    // Verify 5h + Weekly quota labels rendered in Shadow DOM
-    await waitFor("window.__e2eShadows.root.textContent.includes('5시간 한도 85%') && window.__e2eShadows.root.textContent.includes('주간한도 60%')");
+    // Verify 5h (with localized HH:mm reset time) + Weekly quota labels and localized tooltip rendered in Shadow DOM
+    const expectedBrowserQuota = await evalExpr(`(() => {
+      const fmtHHMM = (iso) => {
+        const d = new Date(iso);
+        return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+      };
+      const fmtDT = (iso) => {
+        const d = new Date(iso);
+        return (
+          String(d.getFullYear()) + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
+          String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+        );
+      };
+      return {
+        hhmm5h: fmtHHMM('2026-11-23T14:00:00Z'),
+        dt5h: fmtDT('2026-11-23T14:00:00Z'),
+        dtWeekly: fmtDT('2026-11-30T00:00:00Z'),
+      };
+    })()`);
+    await waitFor(
+      `window.__e2eShadows.root.textContent.includes('5시간 한도 85% (${expectedBrowserQuota.hhmm5h})') && window.__e2eShadows.root.textContent.includes('주간한도 60%')`,
+    );
+    const quotaTooltip = await evalExpr(`(() => {
+      const metrics = Array.from(window.__e2eShadows.root.querySelectorAll('.agy-inline-metric'));
+      return metrics[metrics.length - 2]?.title || '';
+    })()`);
+    assert.ok(
+      quotaTooltip.includes(`초기화 ${expectedBrowserQuota.dt5h}`) &&
+        quotaTooltip.includes(`초기화 ${expectedBrowserQuota.dtWeekly}`),
+      `Expected localized quota tooltip in Shadow DOM, got "${quotaTooltip}"`,
+    );
+    assert.equal(
+      quotaTooltip.includes('2026-11-23T14:00:00Z') || quotaTooltip.includes('2026-11-30T00:00:00Z'),
+      false,
+      `Shadow DOM quota tooltip must not expose raw UTC ISO strings, got "${quotaTooltip}"`,
+    );
 
     // Verify window.statusbarAddons is non-writable (P1)
     const writableDesc = await evalExpr("Object.getOwnPropertyDescriptor(window, 'statusbarAddons')?.writable");

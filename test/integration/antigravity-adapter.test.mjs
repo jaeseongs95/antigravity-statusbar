@@ -19,6 +19,7 @@ import {
   mapSessionTelemetry,
   normalizeResetTime,
 } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
+import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -1013,4 +1014,65 @@ test('TC-ADDON-11 (v3.2.0): resolvePreferredSidecarPort validates [1024, 65535] 
     await new Promise((resolve) => blocker.close(resolve));
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('TC-ADAPTER-SUBAGENT-MODEL (v3.3.0): mapSessionTelemetry and statusbar-service propagate isSubagent and fallback modelName cleanly', async () => {
+  const subMapped = mapSessionTelemetry({
+    requestedSessionId: 'sess-sub-1',
+    streamFrame: { update: { conversationId: 'sess-sub-1', status: 'CASCADE_RUN_STATUS_RUNNING' } },
+    trajectorySummary: {
+      summary: 'Subagent worker',
+      status: 'CASCADE_RUN_STATUS_RUNNING',
+      parentCascadeId: 'sess-main-1',
+      modelDisplayName: 'Gemini 4 Neon (High)',
+    },
+    generatorMetadata: [],
+  });
+  assert.equal(subMapped.isSubagent, true);
+  assert.equal(subMapped.modelName, 'Gemini 4 Neon (High)');
+
+  const mainMapped = mapSessionTelemetry({
+    requestedSessionId: 'sess-main-1',
+    streamFrame: { update: { conversationId: 'sess-main-1', status: 'CASCADE_RUN_STATUS_IDLE' } },
+    trajectorySummary: { summary: 'Main chat', status: 'CASCADE_RUN_STATUS_IDLE' },
+    generatorMetadata: [
+      {
+        stepIndices: [1],
+        chatModel: { modelDisplayName: 'Claude Opus 5.5' },
+      },
+    ],
+  });
+  assert.equal(mainMapped.isSubagent, false);
+  assert.equal(mainMapped.modelName, 'Claude Opus 5.5');
+
+  const service = createStatusbarService({
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async (sid) => (sid === 'sess-sub-1' ? subMapped : mainMapped),
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: Date.now() }),
+    },
+    compactionPort: { compactSession: async () => ({ accepted: true, method: 'rpc' }) },
+    settingsPort: {
+      read: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        autoCompactWhileRunning: 'resume',
+        compactPrompt: '',
+        defaultCustomLimit: null,
+        modelLimits: new Map(),
+        sessions: new Map(),
+        customButtons: [],
+        disabledRuntimeAddonIds: [],
+      }),
+      update: async () => ({}),
+    },
+  });
+
+  const subSnap = await service.getSessionSnapshot('sess-sub-1');
+  assert.equal(subSnap.isSubagent, true);
+  assert.equal(subSnap.modelName, 'Gemini 4 Neon (High)');
+
+  const mainSnap = await service.getSessionSnapshot('sess-main-1');
+  assert.equal(mainSnap.isSubagent, false);
+  assert.equal(mainSnap.modelName, 'Claude Opus 5.5');
 });

@@ -1296,7 +1296,25 @@ test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversati
           return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
         }
         if (pathname === '/api/quota') {
-          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                available: true,
+                stale: false,
+                groups: [
+                  {
+                    label: 'Gemini Models',
+                    buckets: [
+                      { window: '5h', remainingPercent: 84, resetTime: '2026-11-23T14:05:00Z' },
+                      { window: 'weekly', remainingPercent: 61, resetTime: '2026-11-30T00:00:00Z' },
+                    ],
+                  },
+                ],
+              };
+            },
+          };
         }
         if (pathname === '/api/sessions') {
           const sessions = sessionSequences[sessionCallCount % sessionSequences.length];
@@ -1305,13 +1323,16 @@ test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversati
         }
         if (pathname === '/api/snapshot') {
           snapshotCalls.push(body.sessionId);
-          const usedTokens = body.sessionId === 'sess-sub-vm' ? 52000 : 190000;
+          const isSub = body.sessionId === 'sess-sub-vm';
+          const usedTokens = isSub ? 52000 : 190000;
           return {
             ok: true,
             status: 200,
             async json() {
               return {
                 sessionId: body.sessionId,
+                isSubagent: isSub,
+                modelName: isSub ? 'Gemini 4 Neon (High)' : 'Claude Opus 5.5',
                 usedTokens,
                 effectiveLimit: 200000,
                 maxContextTokens: 512000,
@@ -1337,17 +1358,35 @@ test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversati
       `Bundled renderer must query only sess-sub-vm while on subagent tab, got: ${JSON.stringify(snapshotCalls)}`,
     );
     assert.ok(slotEl.querySelector('.agy-inline-metric-btn').textContent.includes('52.0K'));
+    const subModelPill = slotEl.querySelector('.agy-inline-model-pill');
+    assert.ok(subModelPill, 'Bundled renderer must include .agy-inline-model-pill element');
+    assert.equal(subModelPill.style.display, '', 'Subagent tab must display running model pill');
+    assert.equal(subModelPill.textContent, 'Gemini 4 Neon (High)');
 
-    // Switching to main via pointerdown moves to mainBox and queries sess-main-vm, then clicking back on subText returns to sess-sub-vm
+    const d5h = new Date('2026-11-23T14:05:00Z');
+    const expectedHHMM = `${String(d5h.getHours()).padStart(2, '0')}:${String(d5h.getMinutes()).padStart(2, '0')}`;
+    const expectedDT =
+      `${String(d5h.getFullYear())}-${String(d5h.getMonth() + 1).padStart(2, '0')}-${String(d5h.getDate()).padStart(2, '0')} ` +
+      expectedHHMM;
+    const metrics = slotEl.querySelectorAll('.agy-inline-metric');
+    const quota5hEl = metrics[metrics.length - 2];
+    assert.equal(quota5hEl.textContent, `5시간 한도 84% (${expectedHHMM})`);
+    assert.ok(quota5hEl.title.includes(`초기화 ${expectedDT}`));
+    assert.equal(quota5hEl.title.includes('2026-11-23T14:05:00Z'), false);
+
+    // Switching to main via pointerdown moves to mainBox, queries sess-main-vm, and hides subagent model pill
     doc.dispatchEvent({ type: 'pointerdown', target: mainView });
     await flushMicrotasks();
     assert.equal(slotEl.parentNode, mainBox);
     assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-main-vm');
+    assert.equal(subModelPill.style.display, 'none', 'Main conversation view must hide subagent model pill');
 
     doc.dispatchEvent({ type: 'pointerdown', target: subText });
     await flushMicrotasks();
     assert.equal(slotEl.parentNode, subBox);
     assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-sub-vm');
+    assert.equal(subModelPill.style.display, '', 'Switching back to subagent tab must restore model pill');
+    assert.equal(subModelPill.textContent, 'Gemini 4 Neon (High)');
 
     host.handle.dispose();
     assert.equal(doc.getListenerCount('pointerdown'), 0);

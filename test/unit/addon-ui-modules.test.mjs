@@ -386,6 +386,154 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   assert.equal(view.settingsBtn.getAttribute('aria-expanded'), 'true');
 });
 
+test('TC-UNIT-03b (v3.3.0): localized quota tooltip timestamps, 5h HH:mm local reset display, and subagent model pill', () => {
+  const toExpectedHHMM = (iso) => {
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  const toExpectedLocalDT = (iso) => {
+    const d = new Date(iso);
+    return (
+      `${String(d.getFullYear())}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ` +
+      `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    );
+  };
+
+  const koI18n = createInlineI18n('ko');
+  const enI18n = createInlineI18n('en');
+
+  // 1. i18n local time formatters convert UTC & explicit timezone offsets to local time cleanly
+  const iso5h = '2026-11-23T14:05:00Z';
+  const iso5hOffset = '2026-11-23T09:05:00-05:00';
+  const isoWeekly = '2026-11-30T00:00:00Z';
+
+  assert.equal(koI18n.formatLocalTimeHHMM(iso5h), toExpectedHHMM(iso5h));
+  assert.equal(koI18n.formatLocalTimeHHMM(iso5hOffset), koI18n.formatLocalTimeHHMM(iso5h));
+  assert.equal(koI18n.formatLocalDateTime(iso5h), toExpectedLocalDT(iso5h));
+  assert.equal(koI18n.formatLocalDateTime(iso5hOffset), koI18n.formatLocalDateTime(iso5h));
+  assert.equal(koI18n.formatLocalDateTime(iso5h).includes('T'), false);
+  assert.equal(koI18n.formatLocalDateTime(iso5h).endsWith('Z'), false);
+  assert.equal(koI18n.formatLocalTimeHHMM(''), '');
+  assert.equal(koI18n.formatLocalTimeHHMM('not-a-date'), '');
+  assert.equal(koI18n.formatLocalDateTime(''), '');
+  assert.equal(koI18n.formatLocalDateTime('soon'), 'soon');
+
+  // 2. Quota 5h shows localized HH:mm reset time next to percentage; tooltip renders local date-time (never raw UTC ISO)
+  const { doc } = createUnitMockDom();
+  const view = createBarView({ doc, i18n: koI18n });
+  const quotaPayload = {
+    available: true,
+    stale: false,
+    groups: [
+      {
+        label: 'Gemini Models',
+        buckets: [
+          { window: '5h', remainingPercent: 85, resetTime: iso5h },
+          { window: '5h', remainingPercent: 92, resetTime: '2026-11-23T16:30:00Z' },
+          { window: 'weekly', remainingPercent: 60, resetTime: isoWeekly },
+        ],
+      },
+    ],
+  };
+
+  view.renderQuota(quotaPayload, 'Gemini 4 Neon (High)');
+  assert.equal(view.quota5hEl.textContent, `5시간 한도 85% (${toExpectedHHMM(iso5h)})`);
+  assert.equal(view.quotaEl.textContent, '주간한도 60%');
+  assert.equal(view.quota5hEl.title.includes(iso5h), false, 'Tooltip must not display raw UTC ISO resetTime');
+  assert.equal(view.quota5hEl.title.includes(isoWeekly), false, 'Tooltip must not display raw UTC ISO weekly resetTime');
+  assert.ok(view.quota5hEl.title.includes(`초기화 ${toExpectedLocalDT(iso5h)}`));
+  assert.ok(view.quotaEl.title.includes(`초기화 ${toExpectedLocalDT(isoWeekly)}`));
+
+  // English locale check
+  const { doc: enDoc } = createUnitMockDom();
+  const enView = createBarView({ doc: enDoc, i18n: enI18n });
+  enView.renderQuota(quotaPayload, 'Gemini 4 Neon (High)');
+  assert.equal(enView.quota5hEl.textContent, `5h Limit 85% (${toExpectedHHMM(iso5h)})`);
+  assert.ok(enView.quota5hEl.title.includes(`Reset ${toExpectedLocalDT(iso5h)}`));
+  assert.equal(enView.quota5hEl.title.includes(iso5h), false);
+
+  // Invalid or absent resetTime omits (HH:mm) cleanly
+  view.renderQuota(
+    {
+      available: true,
+      stale: false,
+      groups: [{ label: 'Gemini Models', buckets: [{ window: '5h', remainingPercent: 77, resetTime: 'invalid' }] }],
+    },
+    'Gemini 4 Neon (High)',
+  );
+  assert.equal(view.quota5hEl.textContent, '5시간 한도 77%');
+
+  // 3. Subagent model pill visible on subagent views when modelName is present, hidden on main or empty model
+  assert.ok(view.modelEl, 'createBarView must expose modelEl');
+  view.renderSnapshot({
+    snap: {
+      usedTokens: 48000,
+      effectiveLimit: 200000,
+      usagePercent: 24,
+      modelName: 'Gemini 4 Neon (High)',
+      isSubagent: true,
+      compaction: { inProgress: false, status: 'idle' },
+    },
+    connected: true,
+    compacting: false,
+    hasSession: true,
+    compactPrompt: '',
+    isSubagent: true,
+  });
+  assert.equal(view.modelEl.style.display, '');
+  assert.equal(view.modelEl.textContent, 'Gemini 4 Neon (High)');
+  assert.equal(view.modelEl.title, '모델: Gemini 4 Neon (High)');
+  assert.equal(view.modelEl.getAttribute('aria-label'), '모델: Gemini 4 Neon (High)');
+
+  // Main conversation hides subagent model pill
+  view.renderSnapshot({
+    snap: {
+      usedTokens: 48000,
+      effectiveLimit: 200000,
+      usagePercent: 24,
+      modelName: 'Gemini 4 Neon (High)',
+      isSubagent: false,
+      compaction: { inProgress: false, status: 'idle' },
+    },
+    connected: true,
+    compacting: false,
+    hasSession: true,
+    compactPrompt: '',
+    isSubagent: false,
+  });
+  assert.equal(view.modelEl.style.display, 'none');
+  assert.equal(view.modelEl.textContent, '');
+
+  // Subagent without modelName yet hides pill cleanly
+  view.renderSnapshot({
+    snap: {
+      usedTokens: 10000,
+      effectiveLimit: 200000,
+      usagePercent: 5,
+      modelName: null,
+      isSubagent: true,
+      compaction: { inProgress: false, status: 'idle' },
+    },
+    connected: true,
+    compacting: false,
+    hasSession: true,
+    compactPrompt: '',
+    isSubagent: true,
+  });
+  assert.equal(view.modelEl.style.display, 'none');
+
+  // Null snapshot hides pill cleanly
+  view.renderSnapshot({
+    snap: null,
+    connected: true,
+    compacting: false,
+    hasSession: false,
+    compactPrompt: '',
+    isSubagent: true,
+  });
+  assert.equal(view.modelEl.style.display, 'none');
+});
+
 test('TC-UNIT-04: popover-view.mjs renders 2 tabs, over-max presets, clamped limit status, sorted breakdown, and addon callbacks', () => {
   const { doc } = createUnitMockDom();
   const i18n = createInlineI18n('ko');
