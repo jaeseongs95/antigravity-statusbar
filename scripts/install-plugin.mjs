@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import writeFileAtomic from 'write-file-atomic';
 
-import { renderAddonStandbyStub } from '../src/adapters/antigravity/addon/bundle-builder.mjs';
+import { renderAddonRendererBundle } from '../src/adapters/antigravity/addon/bundle-builder.mjs';
 import {
   DEFAULT_RENDERER_ENTRY,
   resolveConfinedRendererTarget,
@@ -256,10 +256,12 @@ export async function installPlugin({
       await copySafe(path.join(repoRoot, rel), path.join(stagingDir, rel));
     }
 
-    // Seed credential-free AddonManifest.v2 standby renderer script inside confined runtime/
+    // Write deterministic, immutable, credential-free AddonManifest.v2 static renderer bundle
+    // inside confined runtime/ so `trustLevel: "trusted"` SHA-256 pinning never drifts at runtime.
+    const staticRendererBundle = renderAddonRendererBundle();
     const stagedRendererPath = path.join(stagingDir, DEFAULT_RENDERER_ENTRY);
     await fs.mkdir(path.dirname(stagedRendererPath), { recursive: true });
-    await fs.writeFile(stagedRendererPath, renderAddonStandbyStub(), {
+    await fs.writeFile(stagedRendererPath, staticRendererBundle, {
       encoding: 'utf8',
       mode: 0o600,
     });
@@ -328,26 +330,22 @@ export async function installPlugin({
       for (const rel of plannedFiles) {
         await copySafe(path.join(repoRoot, rel), path.join(destDir, rel));
       }
-      // ISS-06: Preserve any existing live renderer bundle during in-place fallback;
-      // only seed standby stub atomically if missing.
+      // v3.2.0 (trusted): Always atomically write the deterministic static credential-free
+      // renderer bundle on install/upgrade after verifying target is not a symlink.
       const fallbackRendererPath = resolveConfinedRendererTarget(destDir, DEFAULT_RENDERER_ENTRY);
-      let rendererExists = false;
       try {
         const rStat = await fs.lstat(fallbackRendererPath);
         if (rStat.isSymbolicLink()) {
           throw new Error(`Refusing to overwrite symlink renderer: ${fallbackRendererPath}`);
         }
-        rendererExists = rStat.isFile();
       } catch (rErr) {
         if (rErr?.code !== 'ENOENT') throw rErr;
       }
-      if (!rendererExists) {
-        await fs.mkdir(path.dirname(fallbackRendererPath), { recursive: true });
-        await writeFileAtomic(fallbackRendererPath, renderAddonStandbyStub(), {
-          encoding: 'utf8',
-          mode: 0o600,
-        });
-      }
+      await fs.mkdir(path.dirname(fallbackRendererPath), { recursive: true });
+      await writeFileAtomic(fallbackRendererPath, staticRendererBundle, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
       return { installed: true, dryRun: false, mode: 'in-place-fallback', destDir, entries: plannedFiles };
     }
   } finally {

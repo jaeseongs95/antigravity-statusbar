@@ -3,14 +3,12 @@
   "schemaVersion": 2,
   "pluginId": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
-  "version": "3.1.5",
-  "trustLevel": "restricted",
+  "version": "3.2.0",
+  "trustLevel": "trusted",
   "compatibility": {
     "hostProfile": "antigravity-desktop",
     "hostProfiles": [
-      "antigravity-desktop"
-    ],
-    "excludeHostProfiles": [
+      "antigravity-desktop",
       "antigravity-remote-web"
     ],
     "minHostVersion": "2.3.0"
@@ -26,6 +24,7 @@
     {
       "slot": "status-bar",
       "slotId": "antigravity-statusbar.root",
+      "anchor": "status-bar",
       "exclusive": true,
       "scope": "addon-owned-slot",
       "shadow": true
@@ -50,6 +49,10 @@
     "i18nSelfManaged": true,
     "respectsNoTranslate": true,
     "storageNamespace": "antigravity-statusbar"
+  },
+  "settingsBridge": {
+    "fileName": "antigravity-statusbar-runtime.json",
+    "maxBytes": 16384
   },
   "loadOrder": 50
 }

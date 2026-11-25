@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -10,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { installPlugin, parseArgs } from '../../scripts/install-plugin.mjs';
 import { createAntigravityCompactionAdapter, resolveSafeAgentApiExe } from '../../src/adapters/antigravity/compaction-adapter.mjs';
 import { createLsTransport, encodeConnectFrame, parseLoopbackLsAddress } from '../../src/adapters/antigravity/ls-transport.mjs';
+import { resolvePreferredSidecarPort, startSidecar } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 import {
   extractLatestUsageMetadata,
   extractTailCheckpoint,
@@ -19,6 +21,32 @@ import {
 } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+async function stopSidecarChildGracefully(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exitPromise = new Promise((resolve) => child.once('exit', resolve));
+  if (process.platform === 'win32' && child.stdin && !child.stdin.destroyed) {
+    child.stdin.end();
+  } else {
+    child.kill('SIGTERM');
+  }
+  let fallbackTimer = null;
+  await Promise.race([
+    exitPromise,
+    new Promise((resolve) => {
+      fallbackTimer = setTimeout(() => {
+        try {
+          child.kill('SIGTERM');
+        } catch {}
+        resolve();
+      }, 4_000);
+    }),
+  ]);
+  if (fallbackTimer) clearTimeout(fallbackTimer);
+  if (child.exitCode === null && child.signalCode === null) {
+    await exitPromise;
+  }
+}
 
 test('parseLoopbackLsAddress normalizes schemeless loopback and rejects non-loopback hosts', () => {
   const norm = parseLoopbackLsAddress('localhost:42424');
@@ -681,6 +709,7 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
   await new Promise((resolve) => lsServer.listen(0, '127.0.0.1', resolve));
   const lsPort = lsServer.address().port;
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-e2e-data-'));
+  const hostDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-e2e-host-'));
   const token = 'e2e-real-sidecar-token-32chars-ok';
 
   const child = spawn(process.execPath, [path.join(REPO_ROOT, 'sidecars', 'statusbar', 'main.mjs')], {
@@ -690,8 +719,9 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
       ANTIGRAVITY_LS_ADDRESS: `localhost:${lsPort}`,
       ANTIGRAVITY_LS_CSRF_TOKEN: 'e2e-csrf',
       ANTIGRAVITY_PLUGIN_DATA_DIR: dataDir,
+      ANTIGRAVITY_ADDON_HOST_DATA_DIR: hostDataDir,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   try {
@@ -779,16 +809,30 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
         },
       ],
     });
+    // Verify settingsBridge active payload was published strictly in isolated hostDataDir
+    const bridgeRuntimePath = path.join(hostDataDir, 'antigravity-statusbar-runtime.json');
+    const publishedBridge = JSON.parse(await fs.readFile(bridgeRuntimePath, 'utf8'));
+    assert.equal(publishedBridge.mode, 'active');
+    assert.equal(publishedBridge.baseUrl, origin);
+    assert.equal(publishedBridge.token, token);
+
+    await stopSidecarChildGracefully(child);
+    const afterStopBridge = JSON.parse(
+      await fs.readFile(path.join(hostDataDir, 'antigravity-statusbar-runtime.json'), 'utf8'),
+    );
+    assert.equal(afterStopBridge.mode, 'standby');
+    assert.equal(afterStopBridge.baseUrl, null);
+    assert.equal(afterStopBridge.token, null);
   } finally {
-    child.kill('SIGTERM');
-    await new Promise((resolve) => child.once('exit', resolve));
+    await stopSidecarChildGracefully(child);
     lsServer.closeAllConnections?.();
     await new Promise((resolve) => lsServer.close(resolve));
     await fs.rm(dataDir, { recursive: true, force: true });
+    await fs.rm(hostDataDir, { recursive: true, force: true });
   }
 });
 
-test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, installs with fs.cp, preserves data/settings.json, and boots installed sidecar cleanly', async () => {
+test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writes static credential-free renderer untouched by live Sidecar lifecycle while settingsBridge publishes/tears down', async () => {
   assert.throws(() => parseArgs(['--target']), /--target requires/);
   assert.throws(() => parseArgs(['--target', '-x']), /--target requires/);
   assert.throws(() => parseArgs(['--target', '--dry-run']), /--target requires/);
@@ -797,10 +841,12 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
   const emptyRepo = path.join(tempRoot, 'empty-repo');
   const destDir = path.join(tempRoot, 'antigravity-statusbar');
   const dataDir = path.join(destDir, 'data');
+  const hostDataDir = path.join(tempRoot, 'host-data');
 
   try {
     // 1. R3-F3: Fail-Closed when node_modules is missing on non-dry-run install
     await fs.mkdir(emptyRepo, { recursive: true });
+    await fs.mkdir(hostDataDir, { recursive: true });
     await fs.writeFile(path.join(emptyRepo, 'plugin.json'), '{}', 'utf8');
     await assert.rejects(
       () => installPlugin({ repoRoot: emptyRepo, destDir, dryRun: false }),
@@ -816,7 +862,7 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
 
     const parentEntries = await fs.readdir(tempRoot);
     assert.deepEqual(
-      parentEntries.filter((name) => name !== 'empty-repo'),
+      parentEntries.filter((name) => name !== 'empty-repo' && name !== 'host-data'),
       ['antigravity-statusbar'],
       'installPlugin must never leave staging or backup directories inside parentDir',
     );
@@ -824,23 +870,35 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.1.5');
+    assert.equal(manifest.version, '3.2.0');
     const addonManifest = JSON.parse(
       await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
     );
     assert.equal(addonManifest.schemaVersion, 2);
     assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-    assert.equal(addonManifest.version, '3.1.5');
-    assert.deepEqual(addonManifest.compatibility.excludeHostProfiles, ['antigravity-remote-web']);
+    assert.equal(addonManifest.version, '3.2.0');
+    assert.equal(addonManifest.trustLevel, 'trusted');
+    assert.deepEqual(addonManifest.compatibility.hostProfiles, [
+      'antigravity-desktop',
+      'antigravity-remote-web',
+    ]);
+    assert.equal(addonManifest.compatibility.excludeHostProfiles, undefined);
     assert.equal(addonManifest.compatibility.minHostVersion, '2.3.0');
+    assert.deepEqual(addonManifest.settingsBridge, {
+      fileName: 'antigravity-statusbar-runtime.json',
+      maxBytes: 16384,
+    });
+    assert.equal(addonManifest.uiSlots[0].anchor, 'status-bar');
     assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');
 
     const installedRendererPath = path.join(destDir, 'runtime', 'statusbar-renderer.js');
-    const standbySource = await fs.readFile(installedRendererPath, 'utf8');
-    assert.ok(standbySource.includes('startStandbyStatusbar'));
-    assert.equal(standbySource.includes('installed-dest-token-32-chars-ok'), false);
+    const installedSource = await fs.readFile(installedRendererPath, 'utf8');
+    assert.ok(installedSource.includes('startAddonStatusbar'));
+    assert.equal(installedSource.includes('installed-dest-token-32-chars-ok'), false);
+    assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(installedSource), false);
+    const shaBefore = crypto.createHash('sha256').update(installedSource).digest('hex');
 
-    // 3. R3-F3: Boot installed sidecar directly from destDir (verifies node_modules resolution & confined runtime bundle publish)
+    // 3. Boot installed sidecar directly from destDir: rendererScript SHA-256 MUST stay 100% immutable!
     const installedChild = spawn(
       process.execPath,
       [path.join(destDir, 'sidecars', 'statusbar', 'main.mjs')],
@@ -850,8 +908,9 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
           ANTIGRAVITY_SIDECAR_UI_TOKEN: 'installed-dest-token-32-chars-ok',
           ANTIGRAVITY_LS_ADDRESS: 'localhost:49999',
           ANTIGRAVITY_PLUGIN_DATA_DIR: dataDir,
+          ANTIGRAVITY_ADDON_HOST_DATA_DIR: hostDataDir,
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
     try {
@@ -878,14 +937,80 @@ test('R3-F3, NB3 & NB4: install-plugin.mjs fails closed without node_modules, in
       const ready = JSON.parse(readyLine);
       assert.equal(ready.type, 'sidecar_ready');
       assert.ok(ready.port > 0);
-      const liveRendererSource = await fs.readFile(installedRendererPath, 'utf8');
-      assert.ok(liveRendererSource.includes(`http://127.0.0.1:${ready.port}`));
-      assert.ok(liveRendererSource.includes('startAddonStatusbar'));
+
+      const shaDuring = crypto
+        .createHash('sha256')
+        .update(await fs.readFile(installedRendererPath, 'utf8'))
+        .digest('hex');
+      assert.equal(shaDuring, shaBefore, 'trusted runtime/statusbar-renderer.js SHA-256 must never change on Sidecar start');
+
+      const bridgeData = JSON.parse(
+        await fs.readFile(path.join(hostDataDir, 'antigravity-statusbar-runtime.json'), 'utf8'),
+      );
+      assert.equal(bridgeData.mode, 'active');
+      assert.equal(bridgeData.baseUrl, `http://127.0.0.1:${ready.port}`);
+      assert.equal(bridgeData.token, 'installed-dest-token-32-chars-ok');
     } finally {
-      installedChild.kill('SIGTERM');
-      await new Promise((resolve) => installedChild.once('exit', resolve));
+      await stopSidecarChildGracefully(installedChild);
     }
+
+    const shaAfter = crypto
+      .createHash('sha256')
+      .update(await fs.readFile(installedRendererPath, 'utf8'))
+      .digest('hex');
+    assert.equal(shaAfter, shaBefore, 'trusted runtime/statusbar-renderer.js SHA-256 must never change on Sidecar shutdown');
+
+    const bridgeAfter = JSON.parse(
+      await fs.readFile(path.join(hostDataDir, 'antigravity-statusbar-runtime.json'), 'utf8'),
+    );
+    assert.equal(bridgeAfter.mode, 'standby');
+    assert.equal(bridgeAfter.baseUrl, null);
+    assert.equal(bridgeAfter.token, null);
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('TC-ADDON-11 (v3.2.0): resolvePreferredSidecarPort validates [1024, 65535] precedence and startSidecar falls back to ephemeral port on EADDRINUSE', async () => {
+  assert.equal(resolvePreferredSidecarPort({}), 0);
+  assert.equal(resolvePreferredSidecarPort({ STATUSBAR_SIDECAR_PORT: '80' }), 0);
+  assert.equal(resolvePreferredSidecarPort({ STATUSBAR_SIDECAR_PORT: '70000' }), 0);
+  assert.equal(resolvePreferredSidecarPort({ STATUSBAR_SIDECAR_PORT: 'abc' }), 0);
+  assert.equal(
+    resolvePreferredSidecarPort({
+      STATUSBAR_SIDECAR_PORT: '43120',
+      ANTIGRAVITY_SIDECAR_WEB_PORT: '43121',
+    }),
+    43120,
+  );
+  assert.equal(resolvePreferredSidecarPort({ ANTIGRAVITY_SIDECAR_WEB_PORT: '43121' }), 43121);
+  assert.equal(resolvePreferredSidecarPort({ ANTIGRAVITY_SIDECAR_PORT: '43122' }), 43122);
+
+  // Occupy a loopback port so startSidecar must detect EADDRINUSE and fall back to an ephemeral port
+  const blocker = http.createServer((_req, res) => res.end());
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+  const occupiedPort = blocker.address().port;
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-port-fallback-'));
+
+  let started = null;
+  try {
+    started = await startSidecar(
+      {
+        STATUSBAR_SIDECAR_PORT: String(occupiedPort),
+        ANTIGRAVITY_LS_ADDRESS: '127.0.0.1:1',
+        ANTIGRAVITY_CSRF_TOKEN: 'csrf-port-test',
+        ANTIGRAVITY_PLUGIN_DATA_DIR: tmpDir,
+        STATUSBAR_DISABLE_ADDON_PUBLISH: '1',
+        STATUSBAR_SWEEP_INTERVAL_MS: '600000',
+      },
+      { watchStdin: false },
+    );
+    assert.ok(started.port > 0);
+    assert.notEqual(started.port, occupiedPort, 'EADDRINUSE must fall back to an ephemeral loopback port');
+  } finally {
+    if (started) await started.stop();
+    blocker.closeAllConnections?.();
+    await new Promise((resolve) => blocker.close(resolve));
+    await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });

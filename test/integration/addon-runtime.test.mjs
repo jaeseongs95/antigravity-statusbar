@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import {
   renderAddonRendererBundle,
   renderAddonStandbyStub,
+  renderAddonStaticBundle,
 } from '../../src/adapters/antigravity/addon/bundle-builder.mjs';
 
 const TEST_TOKEN = 'addon-runtime-secret-token-32-ok';
@@ -613,8 +614,8 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
 
   const v2HostHandle = Object.freeze({
     pluginId,
-    version: '3.1.5',
-    trustLevel: 'restricted',
+    version: '3.2.0',
+    trustLevel: 'trusted',
     hostProfileId: 'antigravity-desktop',
     schemaVersion: 2,
     sourceSchemaVersion: 2,
@@ -886,99 +887,472 @@ test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { 
   );
 });
 
-test('TC-ADDON-10: v2.3.0 Remote Web defense-in-depth fails closed on both active bundle and standby stub with zero mounts, styles, globals, or loopback fetches', async () => {
-  const activeSource = renderAddonRendererBundle({
-    baseUrl: 'http://127.0.0.1:45555',
-    token: TEST_TOKEN,
+test('TC-ADDON-10a (v3.2.0): Desktop trusted static bundle consumes live settingsBridge credentials (standby -> active -> rotation -> standby) with zero hardcoded secrets', async () => {
+  const staticSource = renderAddonRendererBundle();
+  assert.equal(staticSource, renderAddonStaticBundle());
+  assert.equal(staticSource.includes(TEST_TOKEN), false);
+  assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(staticSource), false);
+  assert.equal(/\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b/.test(staticSource), false);
+  assert.equal(/\beval\s*\(|\bnew\s+Function\b|\brequire\s*\(/.test(staticSource), false);
+
+  const { doc, MockElement, createConversationView } = createMockDom();
+  const v1 = createConversationView('sess-desktop-bridge');
+  v1.editor.focus();
+
+  const mountedSlots = new Map();
+  const settingsListeners = new Set();
+  const disposers = [];
+  let unsubscribedCount = 0;
+  let currentSettingsSnap = { status: 'ok', data: { mode: 'standby', baseUrl: null, token: null } };
+
+  const desktopHost = Object.freeze({
+    pluginId: 'antigravity-statusbar',
+    version: '3.2.0',
+    trustLevel: 'trusted',
+    hostProfileId: 'antigravity-desktop',
+    schemaVersion: 2,
+    mountSlot(slotId, opts = {}) {
+      const container = opts && opts.container ? opts.container : doc.body;
+      const existing = mountedSlots.get(slotId);
+      if (existing && existing.hostEl.parentNode) return existing.rootEl;
+      const hostEl = new MockElement('div', doc);
+      container.appendChild(hostEl);
+      const rootEl = new MockElement('div', doc);
+      rootEl.className = 'addon-host-slot-root';
+      mountedSlots.set(slotId, { hostEl, rootEl, container });
+      return rootEl;
+    },
+    unmountSlot(slotId) {
+      const rec = mountedSlots.get(slotId);
+      if (!rec) return false;
+      rec.hostEl.remove();
+      mountedSlots.delete(slotId);
+      return true;
+    },
+    injectStyle() {
+      return { styleId: 'statusbar-main' };
+    },
+    removeStyle() {
+      return true;
+    },
+    getSettings() {
+      return currentSettingsSnap;
+    },
+    onSettingsChange(cb) {
+      settingsListeners.add(cb);
+      return () => {
+        settingsListeners.delete(cb);
+        unsubscribedCount += 1;
+      };
+    },
+    onDispose(fn) {
+      disposers.push(fn);
+    },
+    dispose() {
+      for (const fn of disposers.splice(0)) fn();
+    },
   });
-  const standbySource = renderAddonStandbyStub();
 
-  // Static bundle hygiene check (zero DOM sink / dynamic code execution / external require)
-  for (const [label, src] of [
-    ['active', activeSource],
-    ['standby', standbySource],
-  ]) {
-    assert.equal(/\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b/.test(src), false, `${label} bundle must not use HTML sinks`);
-    assert.equal(/\beval\s*\(|\bnew\s+Function\b|\brequire\s*\(/.test(src), false, `${label} bundle must not use eval/Function/require`);
-  }
-
-  for (const [label, src] of [
-    ['active', activeSource],
-    ['standby', standbySource],
-  ]) {
-    const { doc, createConversationView } = createMockDom();
-    const view = createConversationView('sess-remote-web');
-    view.editor.focus();
-
-    let mountCalls = 0;
-    let styleCalls = 0;
-    let portalCalls = 0;
-    let disposeHookCalls = 0;
-    let fetchCalls = 0;
-
-    const remoteWebHostHandle = Object.freeze({
-      pluginId: 'antigravity-statusbar',
-      version: '3.1.5',
-      trustLevel: 'restricted',
-      hostProfileId: 'antigravity-remote-web',
-      schemaVersion: 2,
-      sourceSchemaVersion: 2,
-      mountSlot() {
-        mountCalls += 1;
-        return null;
+  const seenRequests = [];
+  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
+  vm.runInNewContext(
+    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
+    {
+      window: sandboxWindow,
+      document: doc,
+      addonHost: desktopHost,
+      URL,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      fetch: async (url, init) => {
+        seenRequests.push({ url, token: init.headers['x-statusbar-token'] });
+        const pathname = new URL(url).pathname;
+        if (pathname === '/api/settings/get') {
+          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
+        }
+        if (pathname === '/api/quota') {
+          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+        }
+        if (pathname === '/api/sessions') {
+          return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-desktop-bridge' }] }; } };
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              sessionId: 'sess-desktop-bridge',
+              usedTokens: 48000,
+              effectiveLimit: 200000,
+              maxContextTokens: 512000,
+              usagePercent: 24,
+              compaction: { inProgress: false, lastError: null },
+            };
+          },
+        };
       },
-      unmountSlot() {
-        return false;
-      },
-      injectStyle() {
-        styleCalls += 1;
-        return { styleId: 'none' };
-      },
-      removeStyle() {
-        return false;
-      },
-      openPopover() {
-        portalCalls += 1;
-        return null;
-      },
-      openModal() {
-        portalCalls += 1;
-        return null;
-      },
-      onDispose() {
-        disposeHookCalls += 1;
-      },
-    });
-
-    const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
-    vm.runInNewContext(
-      `(function(addonHost){\n${src}\n})(addonHost);`,
-      {
-        window: sandboxWindow,
-        document: doc,
-        addonHost: remoteWebHostHandle,
-        AbortController,
-        setTimeout,
-        clearTimeout,
-        setInterval,
-        clearInterval,
-        fetch: async () => {
-          fetchCalls += 1;
-          throw new Error('Loopback fetch must never fire on Remote Web');
-        },
-      },
-    );
+    },
+  );
+  try {
     await flushMicrotasks();
 
-    assert.equal(mountCalls, 0, `${label}: must not mount any slot on antigravity-remote-web`);
-    assert.equal(styleCalls, 0, `${label}: must not inject any style on antigravity-remote-web`);
-    assert.equal(portalCalls, 0, `${label}: must not open any portal on antigravity-remote-web`);
-    assert.equal(disposeHookCalls, 0, `${label}: must not register disposers on antigravity-remote-web`);
-    assert.equal(fetchCalls, 0, `${label}: must not issue any loopback fetch on antigravity-remote-web`);
-    assert.equal(doc.getDirectStyleCreateCount(), 0, `${label}: must not create direct style elements`);
-    assert.equal(doc.getListenerCount('focusin'), 0, `${label}: must not bind document listeners`);
-    assert.equal(doc.getListenerCount('keydown'), 0, `${label}: must not bind keydown listeners`);
-    assert.equal(doc.getListenerCount('pointerdown'), 0, `${label}: must not bind pointerdown listeners`);
-    assert.equal(sandboxWindow.statusbarAddons, undefined, `${label}: must not expose window.statusbarAddons`);
+    // 1. Boots in standby with ZERO fetches
+    assert.equal(seenRequests.length, 0, 'Standby settingsBridge must issue zero fetches');
+    const rootEl = mountedSlots.get('antigravity-statusbar.root').rootEl;
+    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
+
+    // 2. Sidecar publishes active credentials via settingsBridge -> renderer immediately connects
+    currentSettingsSnap = {
+      status: 'ok',
+      data: { mode: 'active', baseUrl: 'http://127.0.0.1:46001', token: TEST_TOKEN },
+    };
+    for (const cb of settingsListeners) cb(currentSettingsSnap);
+    await flushMicrotasks();
+    assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46001/') && r.token === TEST_TOKEN));
+    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('48.0K'));
+
+    // 3. Sidecar restarts on a new port/token -> live rotation without reload
+    const rotatedToken = 'rotated-desktop-bridge-token-32ok';
+    currentSettingsSnap = {
+      status: 'ok',
+      data: { mode: 'active', baseUrl: 'http://127.0.0.1:46002', token: rotatedToken },
+    };
+    for (const cb of settingsListeners) cb(currentSettingsSnap);
+    await flushMicrotasks();
+    assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46002/') && r.token === rotatedToken));
+
+    // 4. Sidecar shuts down (mode: standby) -> clears connection back to standby
+    const reqCountBeforeStandby = seenRequests.length;
+    currentSettingsSnap = { status: 'ok', data: { mode: 'standby', baseUrl: null, token: null } };
+    for (const cb of settingsListeners) cb(currentSettingsSnap);
+    await flushMicrotasks();
+    assert.equal(seenRequests.length, reqCountBeforeStandby);
+    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
+
+    // 5. Dispose unsubscribes settingsBridge listener and cleans up slots
+    desktopHost.dispose();
+    assert.equal(unsubscribedCount, 1);
+    assert.equal(mountedSlots.size, 0);
+  } finally {
+    desktopHost.dispose();
+  }
+});
+
+test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots, falls back to host status-bar anchor dock, and connects/disconnects via browser-local saveSettings', async () => {
+  const staticSource = renderAddonRendererBundle();
+  const { doc, MockElement } = createMockDom();
+  // Intentionally NO [data-testid="agent-input-box"] in Remote Web DOM -> must use host status-bar dock fallback!
+
+  const remoteDock = new MockElement('div', doc);
+  remoteDock.setAttribute('id', 'remote-addon-host-slot-dock');
+  doc.body.appendChild(remoteDock);
+
+  const mountedSlots = new Map();
+  const mountOptsLog = [];
+  const savedPayloads = [];
+  const portals = [];
+  const disposers = [];
+  let unsubscribedCount = 0;
+
+  // Simulate an accidental packed-initial snapshot containing Desktop credentials -> MUST BE IGNORED!
+  let hostSettings = {
+    status: 'ok',
+    persistence: 'packed-initial',
+    data: {
+      mode: 'active',
+      baseUrl: 'http://127.0.0.1:49991',
+      token: 'leaked-desktop-packed-token-32ok',
+      remoteBaseUrl: 'http://127.0.0.1:49991',
+      remoteToken: 'leaked-desktop-packed-token-32ok',
+    },
+  };
+
+  const remoteWebHost = Object.freeze({
+    pluginId: 'antigravity-statusbar',
+    version: '3.2.0',
+    trustLevel: 'trusted',
+    hostProfileId: 'antigravity-remote-web',
+    schemaVersion: 2,
+    mountSlot(slotId, opts = {}) {
+      mountOptsLog.push({ slotId, opts });
+      const existing = mountedSlots.get(slotId);
+      if (existing && existing.hostEl.parentNode) return existing.rootEl;
+      const container = opts && opts.container ? opts.container : remoteDock;
+      const hostEl = new MockElement('div', doc);
+      container.appendChild(hostEl);
+      const rootEl = new MockElement('div', doc);
+      rootEl.className = 'addon-host-slot-root';
+      mountedSlots.set(slotId, { hostEl, rootEl, container });
+      return rootEl;
+    },
+    unmountSlot(slotId) {
+      const rec = mountedSlots.get(slotId);
+      if (!rec) return false;
+      rec.hostEl.remove();
+      mountedSlots.delete(slotId);
+      return true;
+    },
+    injectStyle() {
+      return { styleId: 'statusbar-main' };
+    },
+    removeStyle() {
+      return true;
+    },
+    openPopover(slotId, opts = {}) {
+      const pop = new MockElement('div', doc);
+      const bodyEl = new MockElement('div', doc);
+      pop.appendChild(bodyEl);
+      doc.body.appendChild(pop);
+      let closed = false;
+      const entry = {
+        slotId,
+        element: pop,
+        bodyEl,
+        close() {
+          if (closed) return;
+          closed = true;
+          pop.remove();
+          if (typeof opts.onClose === 'function') opts.onClose();
+        },
+      };
+      portals.push(entry);
+      return Object.freeze({ id: `pop-${portals.length}`, element: pop, bodyEl, close: entry.close });
+    },
+    getSettings() {
+      return hostSettings;
+    },
+    onSettingsChange() {
+      return () => {
+        unsubscribedCount += 1;
+      };
+    },
+    async saveSettings(data) {
+      savedPayloads.push(data);
+      hostSettings = { status: 'ok', persistence: 'browser-local', data };
+      return { ok: true, persistence: 'browser-local' };
+    },
+    onDispose(fn) {
+      disposers.push(fn);
+    },
+    dispose() {
+      for (const fn of disposers.splice(0)) fn();
+    },
+  });
+
+  const remoteToken = 'remote-web-user-token-32-charsok';
+  const fetchLog = [];
+  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
+
+  vm.runInNewContext(
+    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
+    {
+      window: sandboxWindow,
+      document: doc,
+      addonHost: remoteWebHost,
+      URL,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      fetch: async (url, init) => {
+        fetchLog.push({ url, token: init.headers['x-statusbar-token'] });
+        const pathname = new URL(url).pathname;
+        if (pathname === '/api/settings/get') {
+          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
+        }
+        if (pathname === '/api/quota') {
+          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+        }
+        if (pathname === '/api/sessions') {
+          return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-remote-1' }] }; } };
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              sessionId: 'sess-remote-1',
+              usedTokens: 75000,
+              effectiveLimit: 250000,
+              maxContextTokens: 512000,
+              usagePercent: 30,
+              compaction: { inProgress: false, lastError: null },
+            };
+          },
+        };
+      },
+    },
+  );
+  try {
+    await flushMicrotasks();
+
+    // 1. Packed-initial snapshot MUST be ignored -> zero fetches on startup!
+    assert.equal(fetchLog.length, 0, 'Remote Web must ignore packed-initial snapshot and perform zero fetches');
+    // 2. Mounted via host status-bar anchor fallback ({} without container) and styled as .agy-remote-dock
+    assert.equal(mountOptsLog[0].slotId, 'antigravity-statusbar.root');
+    assert.deepEqual(Object.keys(mountOptsLog[0].opts), []);
+    const rootRec = mountedSlots.get('antigravity-statusbar.root');
+    assert.equal(rootRec.container, remoteDock);
+    assert.equal(rootRec.rootEl.querySelector('.agy-inline-statusbar').classList.contains('agy-remote-dock'), true);
+
+    // 3. Clicking bar opens Settings tab with visible Remote Sidecar Connection card
+    const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
+    ctxBtn.getBoundingClientRect = () => ({ left: 400, top: 760, right: 560, width: 160, height: 24 });
+    ctxBtn.click();
+    const popPortal = portals[portals.length - 1];
+    assert.ok(popPortal, 'Clicking unconfigured Remote Web bar must open popover portal');
+    const inputs = popPortal.bodyEl.querySelectorAll('.agy-inline-pop-input');
+    const urlInput = inputs.find((el) => el.type === 'text' && el.placeholder.includes('http'));
+    const tokenInput = inputs.find((el) => el.type === 'password');
+    assert.ok(urlInput && tokenInput, 'Remote Web Settings tab must render URL and password token inputs');
+
+    // 4. Connect to HTTPS endpoint -> persists via addonHost.saveSettings and fetches live snapshot!
+    urlInput.value = 'https://my-sidecar.example.com:8443';
+    tokenInput.value = remoteToken;
+    const connectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn-primary').find((b) => b.textContent.includes('연결'));
+    assert.ok(connectBtn);
+    connectBtn.click();
+    await flushMicrotasks();
+
+    assert.equal(savedPayloads.length, 1);
+    assert.equal(savedPayloads[0].remoteBaseUrl, 'https://my-sidecar.example.com:8443');
+    assert.equal(savedPayloads[0].remoteToken, remoteToken);
+    assert.ok(fetchLog.some((r) => r.url === 'https://my-sidecar.example.com:8443/api/settings/get' && r.token === remoteToken));
+    assert.ok(rootRec.rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('75.0K'));
+
+    // 5. Disconnect clears browser-local settings and stops polling
+    const disconnectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('해제'));
+    assert.ok(disconnectBtn);
+    disconnectBtn.click();
+    await flushMicrotasks();
+    assert.equal(savedPayloads.length, 2);
+    assert.equal(savedPayloads[1].remoteBaseUrl, '');
+    assert.equal(savedPayloads[1].remoteToken, '');
+
+    // 6. Dispose unsubscribes & unmounts cleanly
+    remoteWebHost.dispose();
+    assert.equal(unsubscribedCount, 1);
+    assert.equal(mountedSlots.size, 0);
+  } finally {
+    remoteWebHost.dispose();
+  }
+});
+
+test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversation to its own data-cascade-id without stock-chart fallback drift and cleans up pointerdown listener on dispose', async () => {
+  const staticSource = renderAddonRendererBundle({
+    baseUrl: 'http://127.0.0.1:46111',
+    token: TEST_TOKEN,
+  });
+  const { doc, MockElement } = createMockDom();
+
+  const mainView = new MockElement('div', doc);
+  mainView.setAttribute('data-testid', 'conversation-view');
+  mainView.setAttribute('data-cascade-id', 'sess-main-vm');
+  const mainBox = new MockElement('div', doc);
+  mainBox.setAttribute('data-testid', 'agent-input-box');
+  mainView.appendChild(mainBox);
+  doc.body.appendChild(mainView);
+
+  const subView = new MockElement('div', doc);
+  subView.setAttribute('data-testid', 'subagent-tab-conversation');
+  subView.setAttribute('data-cascade-id', 'sess-sub-vm');
+  const subText = new MockElement('p', doc);
+  subText.textContent = 'Subagent transcript';
+  const subBox = new MockElement('div', doc);
+  subBox.setAttribute('data-testid', 'agent-input-box');
+  subView.appendChild(subText);
+  subView.appendChild(subBox);
+  doc.body.appendChild(subView);
+
+  const host = createMockAddonHost(doc, MockElement);
+  let sessionCallCount = 0;
+  const snapshotCalls = [];
+  const sessionSequences = [
+    [{ sessionId: 'sess-main-vm', isSubagent: false }, { sessionId: 'sess-sub-vm', isSubagent: true }],
+    [{ sessionId: 'sess-other-sub', isSubagent: true }, { sessionId: 'sess-main-vm', isSubagent: false }],
+  ];
+
+  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
+  vm.runInNewContext(
+    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
+    {
+      window: sandboxWindow,
+      document: doc,
+      addonHost: host.handle,
+      URL,
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      fetch: async (url, init) => {
+        const pathname = new URL(url).pathname;
+        const body = JSON.parse(init.body || '{}');
+        if (pathname === '/api/settings/get') {
+          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
+        }
+        if (pathname === '/api/quota') {
+          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+        }
+        if (pathname === '/api/sessions') {
+          const sessions = sessionSequences[sessionCallCount % sessionSequences.length];
+          sessionCallCount += 1;
+          return { ok: true, status: 200, async json() { return { sessions }; } };
+        }
+        if (pathname === '/api/snapshot') {
+          snapshotCalls.push(body.sessionId);
+          const usedTokens = body.sessionId === 'sess-sub-vm' ? 52000 : 190000;
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                sessionId: body.sessionId,
+                usedTokens,
+                effectiveLimit: 200000,
+                maxContextTokens: 512000,
+                usagePercent: usedTokens / 2000,
+                compaction: { inProgress: false, lastError: null },
+              };
+            },
+          };
+        }
+        return { ok: true, status: 200, async json() { return {}; } };
+      },
+    },
+  );
+
+  try {
+    // Initially mounts on last visible box (subBox) and MUST stay pinned to sess-sub-vm despite sessions[0] flipping
+    await flushMicrotasks();
+    const slotEl = host.slots.get('antigravity-statusbar.root');
+    assert.equal(slotEl.parentNode, subBox);
+    assert.ok(snapshotCalls.length >= 1);
+    assert.ok(
+      snapshotCalls.every((id) => id === 'sess-sub-vm'),
+      `Bundled renderer must query only sess-sub-vm while on subagent tab, got: ${JSON.stringify(snapshotCalls)}`,
+    );
+    assert.ok(slotEl.querySelector('.agy-inline-metric-btn').textContent.includes('52.0K'));
+
+    // Switching to main via pointerdown moves to mainBox and queries sess-main-vm, then clicking back on subText returns to sess-sub-vm
+    doc.dispatchEvent({ type: 'pointerdown', target: mainView });
+    await flushMicrotasks();
+    assert.equal(slotEl.parentNode, mainBox);
+    assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-main-vm');
+
+    doc.dispatchEvent({ type: 'pointerdown', target: subText });
+    await flushMicrotasks();
+    assert.equal(slotEl.parentNode, subBox);
+    assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-sub-vm');
+
+    host.handle.dispose();
+    assert.equal(doc.getListenerCount('pointerdown'), 0);
+    assert.equal(doc.getListenerCount('focusin'), 0);
+  } finally {
+    host.handle.dispose();
   }
 });

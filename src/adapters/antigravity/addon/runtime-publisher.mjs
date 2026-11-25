@@ -1,11 +1,16 @@
 /**
- * Confined atomic renderer publisher implementing `RendererPublisherPort` (SRP / DIP).
+ * Confined atomic publishers implementing `RendererPublisherPort` (SRP / DIP / LSP).
  *
- * Security & Confinement Invariants:
- * - Writes ONLY inside `<pluginRootDir>/<relativeEntryPath>` (default `runtime/statusbar-renderer.js`).
- * - Rejects absolute paths, `..` traversal, null bytes, and symlinked directories or targets.
- * - Uses `write-file-atomic` (`0o600`) so the addon host never observes a partial file write.
- * - Restores a credential-free standby stub on teardown so no stale Sidecar token lingers on disk.
+ * v3.2.0 (`trustLevel: "trusted"`):
+ * - `createSettingsBridgePublisher` publishes Desktop Sidecar runtime connection metadata
+ *   (`{ schemaVersion, mode, baseUrl, token, updatedAt }`) strictly inside host-owned
+ *   `HOST_DATA_DIR/<fileName>` (default `antigravity-statusbar-runtime.json`) so the signed
+ *   `runtime/statusbar-renderer.js` stays 100% static and immutable (SHA-256 pinned).
+ * - Rejects reserved host filenames, path traversal, separators, null bytes, and symlinks.
+ * - Uses `write-file-atomic` (`0o600`) and scrubs credentials back to `mode: "standby"` on
+ *   `teardown()` / `teardownSync()`.
+ *
+ * Legacy `createAddonRuntimePublisher` is retained for unit/backward compatibility.
  */
 
 import fs from 'node:fs';
@@ -15,6 +20,173 @@ import writeFileAtomic from 'write-file-atomic';
 import { renderAddonRendererBundle, renderAddonStandbyStub } from './bundle-builder.mjs';
 
 export const DEFAULT_RENDERER_ENTRY = 'runtime/statusbar-renderer.js';
+export const DEFAULT_SETTINGS_BRIDGE_FILE = 'antigravity-statusbar-runtime.json';
+
+const SETTINGS_FILE_RE = /^[a-z0-9][a-z0-9._-]{1,63}\.json$/;
+const LOOPBACK_URL_RE = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/;
+const MIN_TOKEN_LENGTH = 16;
+const RESERVED_SETTINGS_FILES = new Set([
+  'trust-policy.json',
+  'config.json',
+  'index.json',
+  'build-manifest.json',
+  'package.json',
+  'remote-preferences.json',
+]);
+const WINDOWS_DOS_DEVICE_RE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
+/**
+ * Resolves and verifies that `fileName` is a flat, non-reserved JSON file strictly inside
+ * `hostDataDir` with zero symlink escapes.
+ *
+ * @param {string} hostDataDir
+ * @param {string} fileName
+ * @returns {string}
+ */
+export function resolveConfinedSettingsBridgeTarget(
+  hostDataDir,
+  fileName = DEFAULT_SETTINGS_BRIDGE_FILE,
+) {
+  if (typeof hostDataDir !== 'string' || !hostDataDir.trim() || hostDataDir.includes('\0')) {
+    throw new Error('ERR_INVALID_HOST_DATA_DIR');
+  }
+  if (
+    typeof fileName !== 'string' ||
+    !SETTINGS_FILE_RE.test(fileName) ||
+    fileName.includes('..') ||
+    fileName.includes('/') ||
+    fileName.includes('\\') ||
+    fileName.includes('\0')
+  ) {
+    throw new Error('ERR_INVALID_SETTINGS_BRIDGE_FILE');
+  }
+  const lower = fileName.toLowerCase();
+  if (
+    RESERVED_SETTINGS_FILES.has(lower) ||
+    lower.endsWith('.orig.json') ||
+    WINDOWS_DOS_DEVICE_RE.test(lower)
+  ) {
+    throw new Error('ERR_RESERVED_SETTINGS_BRIDGE_FILE');
+  }
+
+  const resolvedBase = path.resolve(hostDataDir);
+  if (fs.existsSync(resolvedBase)) {
+    const baseLstat = fs.lstatSync(resolvedBase);
+    if (baseLstat.isSymbolicLink()) {
+      throw new Error('ERR_SYMLINK_FORBIDDEN');
+    }
+    if (!baseLstat.isDirectory()) {
+      throw new Error('ERR_INVALID_HOST_DATA_DIR');
+    }
+    const realBase = fs.realpathSync(resolvedBase);
+    const targetPath = path.resolve(realBase, fileName);
+    if (path.dirname(targetPath) !== realBase) {
+      throw new Error('ERR_SETTINGS_BRIDGE_ESCAPES_HOST_DATA_DIR');
+    }
+    if (fs.existsSync(targetPath)) {
+      const targetLstat = fs.lstatSync(targetPath);
+      if (targetLstat.isSymbolicLink()) {
+        throw new Error('ERR_SYMLINK_FORBIDDEN');
+      }
+      if (!targetLstat.isFile()) {
+        throw new Error('ERR_INVALID_SETTINGS_BRIDGE_FILE');
+      }
+      const realTarget = fs.realpathSync(targetPath);
+      if (path.dirname(realTarget) !== realBase) {
+        throw new Error('ERR_SETTINGS_BRIDGE_ESCAPES_HOST_DATA_DIR');
+      }
+    }
+    return targetPath;
+  }
+
+  const targetPath = path.resolve(resolvedBase, fileName);
+  if (path.dirname(targetPath) !== resolvedBase) {
+    throw new Error('ERR_SETTINGS_BRIDGE_ESCAPES_HOST_DATA_DIR');
+  }
+  return targetPath;
+}
+
+/**
+ * Creates a confined `settingsBridge` runtime publisher (`RendererPublisherPort` LSP).
+ * Keeps `runtime/statusbar-renderer.js` 100% immutable while delivering per-launch Desktop
+ * loopback credentials atomically to `HOST_DATA_DIR/antigravity-statusbar-runtime.json`.
+ *
+ * @param {{
+ *   hostDataDir: string,
+ *   fileName?: string,
+ * }} opts
+ */
+export function createSettingsBridgePublisher({
+  hostDataDir,
+  fileName = DEFAULT_SETTINGS_BRIDGE_FILE,
+}) {
+  // Fail-closed validation at construction time
+  resolveConfinedSettingsBridgeTarget(hostDataDir, fileName);
+
+  function buildActivePayload({ baseUrl, token }) {
+    const m = typeof baseUrl === 'string' ? LOOPBACK_URL_RE.exec(baseUrl.trim()) : null;
+    const port = m ? Number(m[1]) : 0;
+    if (!m || !Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error('ERR_INVALID_LOOPBACK_BASE_URL');
+    }
+    if (typeof token !== 'string' || token.length < MIN_TOKEN_LENGTH) {
+      throw new Error('ERR_INVALID_SIDECAR_TOKEN');
+    }
+    return `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        mode: 'active',
+        baseUrl: baseUrl.trim(),
+        token,
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`;
+  }
+
+  function buildStandbyPayload() {
+    return `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        mode: 'standby',
+        baseUrl: null,
+        token: null,
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`;
+  }
+
+  async function writeAtomically(payloadText) {
+    fs.mkdirSync(path.resolve(hostDataDir), { recursive: true });
+    const verifiedTarget = resolveConfinedSettingsBridgeTarget(hostDataDir, fileName);
+    await writeFileAtomic(verifiedTarget, payloadText, { encoding: 'utf8', mode: 0o600 });
+    return verifiedTarget;
+  }
+
+  async function publish({ baseUrl, token }) {
+    return writeAtomically(buildActivePayload({ baseUrl, token }));
+  }
+
+  async function teardown() {
+    return writeAtomically(buildStandbyPayload());
+  }
+
+  function teardownSync() {
+    fs.mkdirSync(path.resolve(hostDataDir), { recursive: true });
+    const verifiedTarget = resolveConfinedSettingsBridgeTarget(hostDataDir, fileName);
+    writeFileAtomic.sync(verifiedTarget, buildStandbyPayload(), { encoding: 'utf8', mode: 0o600 });
+    return verifiedTarget;
+  }
+
+  return Object.freeze({
+    publish,
+    teardown,
+    teardownSync,
+  });
+}
 
 /**
  * Resolves and verifies that `relativeEntryPath` stays strictly inside `pluginRootDir`

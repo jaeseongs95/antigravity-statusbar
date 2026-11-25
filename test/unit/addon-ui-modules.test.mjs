@@ -215,6 +215,33 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   assert.ok(view.ctxBtn.textContent.includes('연결 중'));
   assert.equal(view.compactBtn.disabled, true);
 
+  // Unconfigured states: Desktop standby vs Remote Web setup hint + remote dock mode
+  view.renderSnapshot({
+    snap: null,
+    connected: false,
+    configured: false,
+    isRemoteWeb: false,
+    compacting: false,
+    hasSession: false,
+    compactPrompt: '',
+  });
+  assert.equal(view.ctxBtn.textContent, i18n.t().standby);
+
+  view.renderSnapshot({
+    snap: null,
+    connected: false,
+    configured: false,
+    isRemoteWeb: true,
+    compacting: false,
+    hasSession: false,
+    compactPrompt: '',
+  });
+  assert.equal(view.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+  view.setRemoteDockMode(true);
+  assert.equal(view.barEl.classList.contains('agy-remote-dock'), true);
+  view.setRemoteDockMode(false);
+  assert.equal(view.barEl.classList.contains('agy-remote-dock'), false);
+
   // Reconnecting state
   view.setReconnecting();
   assert.ok(view.ctxBtn.textContent.includes('재연결'));
@@ -415,6 +442,18 @@ test('TC-UNIT-04: popover-view.mjs renders 2 tabs, over-max presets, clamped lim
   rowBtns[0].click();
   rowBtns[1].click();
   assert.deepEqual(actions, [['toggle', 'p1', false, false], ['remove', 'p1', false]]);
+
+  // Desktop popover hides Remote Sidecar Connection card; Remote Web popover shows & localizes it
+  assert.equal(pop.remoteConnCard.classList.contains('hidden'), true);
+  const remotePop = createPopoverView({ doc, i18n, isRemoteWeb: true });
+  assert.equal(remotePop.remoteConnCard.classList.contains('hidden'), false);
+  assert.equal(remotePop.remoteUrlInput.type, 'text');
+  assert.equal(remotePop.remoteTokenInput.type, 'password');
+  remotePop.setRemoteConnectionStatus('Connected', false);
+  assert.equal(remotePop.remoteConnStatusEl.textContent, 'Connected');
+  assert.equal(remotePop.remoteConnStatusEl.classList.contains('err'), false);
+  remotePop.setRemoteConnectionStatus('Auth failed', true);
+  assert.equal(remotePop.remoteConnStatusEl.classList.contains('err'), true);
 });
 
 test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty edits, validates limit bounds, handles IME/keyboard, and cleans up on destroy', async () => {
@@ -600,6 +639,121 @@ test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty edits, 
   assert.equal(doc.getListenerCount('pointerdown'), 0);
 });
 
+test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured and handles Remote Web connect/disconnect & validation', async () => {
+  const { doc } = createUnitMockDom();
+  const i18n = createInlineI18n('ko');
+  const barView = createBarView({ doc, i18n });
+  const popoverView = createPopoverView({ doc, i18n, isRemoteWeb: true });
+
+  let configured = false;
+  let connected = false;
+  let currentUrl = '';
+  let postCount = 0;
+  const savedEvents = [];
+  let clearCount = 0;
+  const api = {
+    isConfigured: () => configured,
+    isConnected: () => connected,
+    getBaseUrl: () => currentUrl,
+    abortAll() {},
+    async post() {
+      postCount += 1;
+      return {};
+    },
+  };
+
+  const sharedState = {
+    autoCompactEnabled: true,
+    compactPrompt: '',
+    defaultCustomLimit: null,
+    sessionLimits: new Map(),
+    quotaState: null,
+    fallbackSessionId: '',
+  };
+  const addons = createAddonRegistry({ api, onChange() {} });
+  const ctrl = createBarController({
+    doc,
+    api,
+    i18n,
+    addons,
+    barView,
+    popoverView,
+    sharedState,
+    isRemoteWeb: true,
+    onSettingsChanged() {},
+    onBurstRequested() {},
+    async onRemoteConnectionSave({ baseUrl, token }) {
+      savedEvents.push({ baseUrl, token });
+      if (baseUrl.startsWith('http://remote.')) {
+        return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
+      }
+      if (token === 'wrong-token-16-chars!') {
+        configured = true;
+        connected = false;
+        currentUrl = baseUrl;
+        return { ok: false, status: 401, code: 'UNAUTHORIZED' };
+      }
+      configured = true;
+      connected = true;
+      currentUrl = baseUrl;
+      return { ok: true, baseUrl };
+    },
+    async onRemoteConnectionClear() {
+      clearCount += 1;
+      configured = false;
+      connected = false;
+      currentUrl = '';
+    },
+  });
+
+  // 1. Unconfigured Remote Web skips snapshot polling and opens Settings tab on ctxBtn click
+  ctrl.render();
+  await ctrl.refreshSnapshot();
+  assert.equal(postCount, 0, 'Unconfigured controller must issue zero API fetches');
+  assert.equal(barView.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+  barView.ctxBtn.click();
+  assert.equal(popoverView.popEl.classList.contains('hidden'), false);
+  assert.equal(popoverView.tabSettingsBtn.getAttribute('aria-selected'), 'true');
+
+  // 2. Invalid URL surfaces error feedback
+  const popFeedback = popoverView.popEl.querySelector('.agy-inline-pop-feedback');
+  popoverView.remoteUrlInput.value = 'http://remote.example:8080';
+  popoverView.remoteTokenInput.value = TEST_TOKEN;
+  popoverView.remoteConnectBtn.click();
+  await flush();
+  assert.equal(popFeedback.classList.contains('err'), true);
+  assert.equal(popFeedback.textContent, i18n.t().remoteInvalidUrl);
+
+  // 3. 401 unauthorized surfaces auth error
+  popoverView.remoteUrlInput.value = 'https://sidecar.example.com';
+  popoverView.remoteTokenInput.value = 'wrong-token-16-chars!';
+  popoverView.remoteConnectBtn.click();
+  await flush();
+  assert.equal(popFeedback.classList.contains('err'), true);
+  assert.equal(popFeedback.textContent, i18n.formatTemplate(i18n.t().remoteAuthFailed, { status: 401 }));
+  assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), true);
+
+  // 4. Valid HTTPS connection succeeds and updates status; Disconnect clears connection
+  popoverView.remoteUrlInput.value = 'https://sidecar.example.com';
+  popoverView.remoteTokenInput.value = TEST_TOKEN;
+  popoverView.remoteConnectBtn.click();
+  await flush();
+  assert.equal(popFeedback.classList.contains('err'), false);
+  assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), false);
+  assert.ok(popoverView.remoteConnStatusEl.textContent.includes('https://sidecar.example.com'));
+  assert.equal(savedEvents.length, 3);
+
+  popoverView.remoteDisconnectBtn.click();
+  await flush();
+  assert.equal(clearCount, 1);
+  assert.equal(configured, false);
+  assert.equal(popoverView.remoteUrlInput.value, '');
+  assert.equal(popoverView.remoteTokenInput.value, '');
+  assert.equal(barView.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+
+  ctrl.destroy();
+});
+
 test('TC-UNIT-06: bootstrap.mjs picks visible/focused input box, ignores own mutations, and tears down cleanly', async () => {
   const { doc, El } = createUnitMockDom();
   const vHidden = new El('div', doc);
@@ -712,6 +866,353 @@ test('TC-UNIT-06: bootstrap.mjs picks visible/focused input box, ignores own mut
   assert.equal(reloaded, 1);
   standbyDisposers[0]();
   assert.equal(slotEl.parentNode, null);
+});
+
+test('TC-UNIT-06b: subagent & side-question views stay strictly pinned to their own data-cascade-id without fallback fluctuation, support sibling/nested/pointerdown switching, and fail closed when unattributed', async () => {
+  // 1. Subagent tab stays pinned to sub-A even while /api/sessions flips sessions[0] every poll (stock-chart bug reproduction)
+  {
+    const { doc, El } = createUnitMockDom();
+    const subView = new El('div', doc);
+    subView.setAttribute('data-testid', 'subagent-tab-conversation');
+    subView.setAttribute('data-cascade-id', 'sub-A');
+    const subBox = new El('div', doc);
+    subBox.setAttribute('data-testid', 'agent-input-box');
+    subView.appendChild(subBox);
+    doc.body.appendChild(subView);
+
+    const slotEl = new El('div', doc);
+    slotEl.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
+    const hostPort = {
+      pluginId: 'antigravity-statusbar',
+      mountSlot(parentEl) {
+        parentEl.appendChild(slotEl);
+        return slotEl;
+      },
+      unmountSlot() {
+        slotEl.remove();
+        return true;
+      },
+      injectStyle() {},
+      removeStyle() {
+        return true;
+      },
+      onDispose() {},
+    };
+
+    const snapshotsBySession = {
+      'sub-A': { sessionId: 'sub-A', usedTokens: 45000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 22.5 },
+      'main-1': { sessionId: 'main-1', usedTokens: 180000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 90.0 },
+      'sub-B': { sessionId: 'sub-B', usedTokens: 120000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 60.0 },
+      'sub-C': { sessionId: 'sub-C', usedTokens: 15000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 7.5 },
+    };
+    const sessionPolls = [
+      [{ sessionId: 'main-1', isSubagent: false }, { sessionId: 'sub-A', isSubagent: true }],
+      [{ sessionId: 'sub-B', isSubagent: true }, { sessionId: 'main-1', isSubagent: false }],
+      [{ sessionId: 'sub-C', isSubagent: true }, { sessionId: 'sub-A', isSubagent: true }],
+    ];
+    let pollIdx = 0;
+    const requestedSnapshotIds = [];
+
+    const api = {
+      isConnected: () => true,
+      abortAll() {},
+      async post(pathname, body) {
+        if (pathname === '/api/sessions') {
+          const list = sessionPolls[Math.min(pollIdx, sessionPolls.length - 1)];
+          pollIdx += 1;
+          return { sessions: list };
+        }
+        if (pathname === '/api/snapshot') {
+          requestedSnapshotIds.push(body.sessionId);
+          return snapshotsBySession[body.sessionId] || snapshotsBySession['sub-A'];
+        }
+        return {};
+      },
+    };
+
+    const runtime = startAddonStatusbar({
+      hostPort,
+      api,
+      i18n: createInlineI18n('ko'),
+      addons: createAddonRegistry({ api, onChange() {} }),
+      createBarViewFn: createBarView,
+      createPopoverViewFn: createPopoverView,
+      createBarControllerFn: createBarController,
+      doc,
+      win: { location: { reload() {} } },
+      cssText: STATUSBAR_STYLES,
+      styleId: STATUSBAR_STYLE_ID,
+      pollConfig: { normalPollMs: 25, quotaPollMs: 60000 },
+    });
+
+    try {
+      await flush(110);
+      assert.ok(requestedSnapshotIds.length >= 2, 'Expected multiple snapshot polls');
+      assert.ok(
+        requestedSnapshotIds.every((id) => id === 'sub-A'),
+        `Subagent statusbar must only query sub-A, got: ${JSON.stringify(requestedSnapshotIds)}`,
+      );
+      const ctxText = slotEl.querySelector('.agy-inline-metric-btn').textContent;
+      assert.ok(ctxText.includes('45.0K'), `Expected sub-A 45.0K tokens, got: ${ctxText}`);
+    } finally {
+      runtime.dispose();
+    }
+    assert.equal(doc.getListenerCount('pointerdown'), 0, 'dispose must remove pointerdown listener');
+  }
+
+  // 2. Nested subagent inside main conversation-view (innermost wins), sibling layout, side-question, and multi-pane pointerdown switching
+  {
+    const { doc, El } = createUnitMockDom();
+
+    // Main view containing a nested subagent view
+    const mainView = new El('div', doc);
+    mainView.setAttribute('data-testid', 'conversation-view');
+    mainView.setAttribute('data-cascade-id', 'main-outer');
+    const mainBox = new El('div', doc);
+    mainBox.setAttribute('data-testid', 'agent-input-box');
+    mainView.appendChild(mainBox);
+
+    const nestedSub = new El('div', doc);
+    nestedSub.setAttribute('data-testid', 'subagent-tab-conversation');
+    nestedSub.setAttribute('data-cascade-id', 'sub-inner');
+    const nestedSubText = new El('p', doc);
+    nestedSubText.textContent = 'Subagent message';
+    const nestedSubBox = new El('div', doc);
+    nestedSubBox.setAttribute('data-testid', 'agent-input-box');
+    nestedSub.appendChild(nestedSubText);
+    nestedSub.appendChild(nestedSubBox);
+    mainView.appendChild(nestedSub);
+    doc.body.appendChild(mainView);
+
+    // Sibling layout pane: subagent view and input box are siblings under one pane container
+    const siblingPane = new El('div', doc);
+    const siblingSub = new El('div', doc);
+    siblingSub.setAttribute('data-testid', 'subagent-tab-conversation');
+    siblingSub.setAttribute('data-cascade-id', 'sub-sibling');
+    const siblingBox = new El('div', doc);
+    siblingBox.setAttribute('data-testid', 'agent-input-box');
+    siblingPane.appendChild(siblingSub);
+    siblingPane.appendChild(siblingBox);
+    doc.body.appendChild(siblingPane);
+
+    // Side-question tab
+    const sideQ = new El('div', doc);
+    sideQ.setAttribute('data-testid', 'side-question-tab-conversation');
+    sideQ.setAttribute('data-cascade-id', 'sq-1');
+    const sideQBox = new El('div', doc);
+    sideQBox.setAttribute('data-testid', 'agent-input-box');
+    sideQ.appendChild(sideQBox);
+    doc.body.appendChild(sideQ);
+
+    const slotEl = new El('div', doc);
+    slotEl.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
+    const hostPort = {
+      pluginId: 'antigravity-statusbar',
+      mountSlot(parentEl) {
+        parentEl.appendChild(slotEl);
+        return slotEl;
+      },
+      unmountSlot() {
+        slotEl.remove();
+        return true;
+      },
+      injectStyle() {},
+      removeStyle() {
+        return true;
+      },
+      onDispose() {},
+    };
+
+    const requested = [];
+    const api = {
+      isConnected: () => true,
+      abortAll() {},
+      async post(pathname, body) {
+        if (pathname === '/api/sessions') {
+          return { sessions: [{ sessionId: 'main-outer', isSubagent: false }] };
+        }
+        if (pathname === '/api/snapshot') {
+          requested.push(body.sessionId);
+          return { sessionId: body.sessionId, usedTokens: 10000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 5 };
+        }
+        return {};
+      },
+    };
+
+    // Focus side-question first
+    sideQBox.focus();
+    const runtime = startAddonStatusbar({
+      hostPort,
+      api,
+      i18n: createInlineI18n('ko'),
+      addons: createAddonRegistry({ api, onChange() {} }),
+      createBarViewFn: createBarView,
+      createPopoverViewFn: createPopoverView,
+      createBarControllerFn: createBarController,
+      doc,
+      win: { location: { reload() {} } },
+      cssText: STATUSBAR_STYLES,
+      styleId: STATUSBAR_STYLE_ID,
+      pollConfig: { normalPollMs: 60000, quotaPollMs: 60000 },
+    });
+
+    try {
+      await flush(30);
+      assert.equal(slotEl.parentNode, sideQBox);
+      assert.equal(requested[requested.length - 1], 'sq-1');
+
+      // Click non-focusable text inside nested subagent -> switches to nestedSubBox and binds to sub-inner (NOT main-outer!)
+      doc.dispatchEvent({ type: 'pointerdown', target: nestedSubText });
+      await flush(30);
+      assert.equal(slotEl.parentNode, nestedSubBox);
+      assert.equal(requested[requested.length - 1], 'sub-inner');
+
+      // Click own statusbar node -> must NOT jump away from nestedSubBox
+      doc.dispatchEvent({ type: 'pointerdown', target: slotEl.querySelector('.agy-inline-metric-btn') });
+      await flush(20);
+      assert.equal(slotEl.parentNode, nestedSubBox);
+
+      // Focus sibling layout box -> binds to sub-sibling
+      siblingBox.focus();
+      doc.dispatchEvent({ type: 'focusin', target: siblingBox });
+      await flush(30);
+      assert.equal(slotEl.parentNode, siblingBox);
+      assert.equal(requested[requested.length - 1], 'sub-sibling');
+    } finally {
+      runtime.dispose();
+    }
+  }
+
+  // 3. Unattributed subagent view fails closed (never falls back to fallbackSessionId, clears stale snapshot) + stale response mismatch guard + fallback prefers non-subagent
+  {
+    const { doc, El } = createUnitMockDom();
+    const i18n = createInlineI18n('ko');
+    const barView = createBarView({ doc, i18n });
+    const popoverView = createPopoverView({ doc, i18n });
+
+    let nextSnap = { sessionId: 'main-1', usedTokens: 90000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 45 };
+    const calls = [];
+    const api = {
+      isConnected: () => true,
+      abortAll() {},
+      async post(pathname, body) {
+        calls.push({ pathname, body });
+        return nextSnap;
+      },
+    };
+    const sharedState = {
+      autoCompactEnabled: true,
+      compactPrompt: '',
+      defaultCustomLimit: null,
+      sessionLimits: new Map(),
+      quotaState: null,
+      fallbackSessionId: 'main-1',
+    };
+    const ctrl = createBarController({
+      doc,
+      api,
+      i18n,
+      addons: createAddonRegistry({ api, onChange() {} }),
+      barView,
+      popoverView,
+      sharedState,
+      onSettingsChanged() {},
+      onBurstRequested() {},
+    });
+
+    // Load main-1 first
+    const mainView = new El('div', doc);
+    mainView.setAttribute('data-testid', 'conversation-view');
+    mainView.setAttribute('data-cascade-id', 'main-1');
+    ctrl.setTargetView(mainView);
+    await flush(20);
+    assert.ok(barView.ctxBtn.textContent.includes('90.0K'));
+
+    // Switch to unattributed subagent view (no data-cascade-id yet) -> MUST fail closed (no snapshot call for main-1, stale 90.0K cleared!)
+    const callsBefore = calls.length;
+    const unattrSub = new El('div', doc);
+    unattrSub.setAttribute('data-testid', 'subagent-tab-conversation');
+    ctrl.setTargetView(unattrSub);
+    await flush(20);
+    assert.equal(calls.length, callsBefore, 'Unattributed subagent view must never fall back to fallbackSessionId');
+    assert.equal(barView.ctxBtn.textContent.includes('90.0K'), false, 'Stale main-1 snapshot must be cleared');
+
+    // Mismatched response sessionId must be rejected by bar-controller defense-in-depth guard
+    const subView2 = new El('div', doc);
+    subView2.setAttribute('data-testid', 'subagent-tab-conversation');
+    subView2.setAttribute('data-cascade-id', 'sub-target');
+    nextSnap = { sessionId: 'wrong-other-session', usedTokens: 175000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 87.5 };
+    ctrl.setTargetView(subView2);
+    await flush(20);
+    assert.equal(barView.ctxBtn.textContent.includes('175.0K'), false, 'Mismatched snapshot sessionId must not render');
+
+    ctrl.destroy();
+  }
+
+  // 4. Fallback mode (Remote Web dock with no DOM cascade-id) prefers latest non-subagent session over noisy background subagents
+  {
+    const { doc, El } = createUnitMockDom();
+    const slotEl = new El('div', doc);
+    slotEl.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
+    const hostPort = {
+      pluginId: 'antigravity-statusbar',
+      hostProfileId: 'antigravity-remote-web',
+      mountSlot() {
+        doc.body.appendChild(slotEl);
+        return slotEl;
+      },
+      unmountSlot() {
+        slotEl.remove();
+        return true;
+      },
+      injectStyle() {},
+      removeStyle() {
+        return true;
+      },
+      onDispose() {},
+    };
+    const snapIds = [];
+    const api = {
+      isConfigured: () => true,
+      isConnected: () => true,
+      abortAll() {},
+      async post(pathname, body) {
+        if (pathname === '/api/sessions') {
+          return {
+            sessions: [
+              { sessionId: 'sub-bg-1', isSubagent: true },
+              { sessionId: 'main-primary', isSubagent: false },
+            ],
+          };
+        }
+        if (pathname === '/api/snapshot') {
+          snapIds.push(body.sessionId);
+          return { sessionId: body.sessionId, usedTokens: 32000, effectiveLimit: 200000, maxContextTokens: 512000, usagePercent: 16 };
+        }
+        return {};
+      },
+    };
+    const runtime = startAddonStatusbar({
+      hostPort,
+      api,
+      i18n: createInlineI18n('ko'),
+      addons: createAddonRegistry({ api, onChange() {} }),
+      createBarViewFn: createBarView,
+      createPopoverViewFn: createPopoverView,
+      createBarControllerFn: createBarController,
+      doc,
+      win: { location: { reload() {} } },
+      cssText: STATUSBAR_STYLES,
+      styleId: STATUSBAR_STYLE_ID,
+      pollConfig: { normalPollMs: 60000, quotaPollMs: 60000 },
+    });
+    try {
+      await flush(40);
+      assert.deepEqual(snapIds, ['main-primary'], 'Fallback mode must prefer latest non-subagent session');
+    } finally {
+      runtime.dispose();
+    }
+  }
 });
 
 test('TC-UNIT-07: api-client, addon-bridge, i18n dictionary symmetry, and styles edge cases', async () => {

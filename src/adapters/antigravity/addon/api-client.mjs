@@ -2,25 +2,122 @@
  * Sidecar HTTP API client implementing `StatusbarApiPort` (SRP / DIP).
  *
  * Security Invariants:
- * - Restricts requests strictly to the injected loopback `baseUrl`.
- * - Seals `token` inside closure scope; never writes it to `window`, DOM, or storage.
+ * - On Desktop (default), restricts requests strictly to loopback `http://127.0.0.1|localhost|[::1]:<port>`.
+ * - On Remote Web (`allowRemoteHttps: true`), allows loopback HTTP or explicit `https://` endpoints
+ *   with zero embedded URL credentials, query strings, or fragments (rejects cleartext remote HTTP).
+ * - Seals `token` strictly inside closure scope; never writes or returns it on `window`, DOM, or API getters.
+ * - Supports live reconfiguration via `configure()` and credential revocation via `clearConnection()`.
  */
 
-export function createSidecarApiClient({ baseUrl, token, fetchImpl }) {
-  if (typeof baseUrl !== 'string' || !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(baseUrl)) {
+export function createSidecarApiClient({
+  baseUrl = null,
+  token = null,
+  allowRemoteHttps = false,
+  fetchImpl,
+} = {}) {
+  const LOOPBACK_RE = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})\/?$/;
+
+  function normalizeValidatedBaseUrl(rawUrl) {
+    if (typeof rawUrl !== 'string') {
+      throw new Error(allowRemoteHttps ? 'ERR_INVALID_ENDPOINT_URL' : 'ERR_INVALID_LOOPBACK_BASE_URL');
+    }
+    const trimmed = rawUrl.trim();
+    const loopbackMatch = LOOPBACK_RE.exec(trimmed);
+    if (loopbackMatch) {
+      const port = Number(loopbackMatch[1]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error(allowRemoteHttps ? 'ERR_INVALID_ENDPOINT_URL' : 'ERR_INVALID_LOOPBACK_BASE_URL');
+      }
+      return trimmed.replace(/\/+$/, '');
+    }
+    if (allowRemoteHttps) {
+      let parsed;
+      try {
+        parsed = new URL(trimmed);
+      } catch {
+        throw new Error('ERR_INVALID_ENDPOINT_URL');
+      }
+      if (
+        parsed.protocol !== 'https:' ||
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        throw new Error('ERR_INVALID_ENDPOINT_URL');
+      }
+      const cleanedPath = parsed.pathname && parsed.pathname !== '/'
+        ? parsed.pathname.replace(/\/+$/, '')
+        : '';
+      return `${parsed.origin}${cleanedPath}`;
+    }
     throw new Error('ERR_INVALID_LOOPBACK_BASE_URL');
   }
-  if (typeof token !== 'string' || token.length < 16) {
-    throw new Error('ERR_INVALID_SIDECAR_TOKEN');
+
+  function normalizeValidatedToken(rawToken) {
+    if (typeof rawToken !== 'string' || rawToken.trim().length < 16) {
+      throw new Error('ERR_INVALID_SIDECAR_TOKEN');
+    }
+    return rawToken.trim();
   }
 
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
-  const sealedToken = token;
+  let normalizedBaseUrl = '';
+  let sealedToken = '';
   const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch;
   const activeControllers = new Set();
   let connected = false;
 
+  if (baseUrl !== null && baseUrl !== undefined || token !== null && token !== undefined) {
+    normalizedBaseUrl = normalizeValidatedBaseUrl(baseUrl);
+    sealedToken = normalizeValidatedToken(token);
+  }
+
+  function abortAll() {
+    for (const c of activeControllers) {
+      try {
+        c.abort();
+      } catch {}
+    }
+    activeControllers.clear();
+  }
+
+  function configure({ baseUrl: nextUrl, token: nextToken }) {
+    const validatedUrl = normalizeValidatedBaseUrl(nextUrl);
+    const validatedToken = normalizeValidatedToken(nextToken);
+    if (validatedUrl === normalizedBaseUrl && validatedToken === sealedToken) {
+      return false;
+    }
+    abortAll();
+    normalizedBaseUrl = validatedUrl;
+    sealedToken = validatedToken;
+    connected = false;
+    return true;
+  }
+
+  function clearConnection() {
+    const hadConn = Boolean(normalizedBaseUrl || sealedToken);
+    abortAll();
+    normalizedBaseUrl = '';
+    sealedToken = '';
+    connected = false;
+    return hadConn;
+  }
+
+  function isConfigured() {
+    return Boolean(normalizedBaseUrl && sealedToken);
+  }
+
+  function getBaseUrl() {
+    return normalizedBaseUrl;
+  }
+
   async function post(pathname, bodyObj, externalSignal) {
+    if (!normalizedBaseUrl || !sealedToken) {
+      const err = new Error('Sidecar connection is not configured.');
+      err.code = 'ERR_SIDECAR_NOT_CONFIGURED';
+      throw err;
+    }
     const ctrl = new AbortController();
     activeControllers.add(ctrl);
     const onAbort = () => ctrl.abort();
@@ -31,19 +128,21 @@ export function createSidecarApiClient({ baseUrl, token, fetchImpl }) {
       }
       externalSignal.addEventListener('abort', onAbort, { once: true });
     }
+    const targetBase = normalizedBaseUrl;
+    const targetToken = sealedToken;
     try {
-      const res = await doFetch(`${normalizedBaseUrl}${pathname}`, {
+      const res = await doFetch(`${targetBase}${pathname}`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-statusbar-token': sealedToken,
+          'x-statusbar-token': targetToken,
         },
         body: JSON.stringify(bodyObj || {}),
         signal: ctrl.signal,
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (res.status >= 500) {
+        if (res.status >= 500 || res.status === 401 || res.status === 403) {
           connected = false;
         }
         const err = new Error(json?.error?.message || `HTTP ${res.status}`);
@@ -54,7 +153,7 @@ export function createSidecarApiClient({ baseUrl, token, fetchImpl }) {
       connected = true;
       return json;
     } catch (err) {
-      if (err?.name !== 'AbortError' && err?.message !== 'aborted' && (err?.status === undefined || err.status >= 500)) {
+      if (err?.name !== 'AbortError' && err?.message !== 'aborted' && (err?.status === undefined || err.status >= 500 || err.status === 401 || err.status === 403)) {
         connected = false;
       }
       throw err;
@@ -70,18 +169,13 @@ export function createSidecarApiClient({ baseUrl, token, fetchImpl }) {
     return connected;
   }
 
-  function abortAll() {
-    for (const c of activeControllers) {
-      try {
-        c.abort();
-      } catch {}
-    }
-    activeControllers.clear();
-  }
-
   return Object.freeze({
     post,
     isConnected,
+    isConfigured,
+    getBaseUrl,
+    configure,
+    clearConnection,
     abortAll,
   });
 }
