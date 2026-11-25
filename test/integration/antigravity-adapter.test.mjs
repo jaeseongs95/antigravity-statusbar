@@ -1189,13 +1189,21 @@ test('TC-ADAPTER-QUOTA-REFRESH (v3.3.0): ls-transport bypasses 15s quotaCache on
     const { url } = await sidecar.listen();
     const resNormal = await fetch(`${url}/api/quota`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-statusbar-token': token },
+      headers: {
+        'content-type': 'application/json',
+        origin: url,
+        'x-statusbar-token': token,
+      },
       body: JSON.stringify({}),
     });
     assert.equal(resNormal.status, 200);
     const resForce = await fetch(`${url}/api/quota`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-statusbar-token': token },
+      headers: {
+        'content-type': 'application/json',
+        origin: url,
+        'x-statusbar-token': token,
+      },
       body: JSON.stringify({ forceRefresh: true }),
     });
     assert.equal(resForce.status, 200);
