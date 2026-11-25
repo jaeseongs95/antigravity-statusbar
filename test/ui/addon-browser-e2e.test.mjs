@@ -449,7 +449,11 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
         awaitPromise: true,
       });
       if (res?.exceptionDetails) {
-        throw new Error(res.exceptionDetails.text || 'Browser evaluation exception');
+        const detail =
+          res.exceptionDetails.exception?.description ||
+          res.exceptionDetails.text ||
+          'Browser evaluation exception';
+        throw new Error(detail);
       }
       return res?.result?.value;
     };
@@ -467,7 +471,7 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
     await cdp.call('Page.navigate', { url: `http://127.0.0.1:${harnessPort}/` });
 
     // 1. Wait for inline bar in Shadow DOM to render live metrics
-    await waitFor("Boolean(window.__e2eShadows.root?.querySelector('.agy-inline-metric-btn')?.textContent?.includes('255.2K'))");
+    await waitFor("Boolean(window.__e2eShadows?.root?.querySelector('.agy-inline-metric-btn')?.textContent?.includes('255.2K'))");
 
     // Verify 99.7% non-exceeded displays 99% (not 100%)
     const ctxText = await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-metric-btn').textContent");
