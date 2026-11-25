@@ -815,7 +815,7 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
     assert.equal(publishedBridge.mode, 'active');
     assert.equal(publishedBridge.baseUrl, origin);
     assert.equal(publishedBridge.token, token);
-  } finally {
+
     await stopSidecarChildGracefully(child);
     const afterStopBridge = JSON.parse(
       await fs.readFile(path.join(hostDataDir, 'antigravity-statusbar-runtime.json'), 'utf8'),
@@ -823,6 +823,8 @@ test('F4: real sidecars/statusbar/main.mjs (startSidecar + createAntigravityTele
     assert.equal(afterStopBridge.mode, 'standby');
     assert.equal(afterStopBridge.baseUrl, null);
     assert.equal(afterStopBridge.token, null);
+  } finally {
+    await stopSidecarChildGracefully(child);
     lsServer.closeAllConnections?.();
     await new Promise((resolve) => lsServer.close(resolve));
     await fs.rm(dataDir, { recursive: true, force: true });

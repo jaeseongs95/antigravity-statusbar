@@ -686,6 +686,9 @@ export async function startSidecar(env = process.env, deps = {}) {
     if (!process.stdin || typeof process.stdin.on !== 'function' || process.stdin.isTTY) {
       return false;
     }
+    if (process.stdin.constructor?.name === 'Socket') {
+      return true;
+    }
     try {
       const st = fs.fstatSync(0);
       return Boolean(st && (st.isFIFO() || st.isSocket()));
