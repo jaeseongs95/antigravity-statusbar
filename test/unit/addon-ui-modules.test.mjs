@@ -688,6 +688,9 @@ test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured a
         return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
       }
       if (token === 'wrong-token-16-chars!') {
+        configured = true;
+        connected = false;
+        currentUrl = baseUrl;
         return { ok: false, status: 401, code: 'UNAUTHORIZED' };
       }
       configured = true;
