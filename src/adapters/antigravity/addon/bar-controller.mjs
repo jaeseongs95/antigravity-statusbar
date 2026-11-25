@@ -14,8 +14,11 @@ export function createBarController({
   globalModalView = null,
   portalHost = null,
   sharedState,
+  isRemoteWeb = false,
   onSettingsChanged,
   onBurstRequested,
+  onRemoteConnectionSave = null,
+  onRemoteConnectionClear = null,
   presets,
 }) {
   const PRESETS = Array.isArray(presets) && presets.length > 0
@@ -62,7 +65,48 @@ export function createBarController({
     syncedPromptVal: null,
     lastAutoErrAt: 0,
     consecutiveSnapshotFailures: 0,
+    lastConnectionError: null,
+    remoteUrlDirty: false,
   };
+
+  function isApiConfigured() {
+    return typeof api.isConfigured === 'function' ? Boolean(api.isConfigured()) : true;
+  }
+
+  function getApiBaseUrl() {
+    return typeof api.getBaseUrl === 'function' ? api.getBaseUrl() : '';
+  }
+
+  function syncRemoteConnectionPanel(force = false) {
+    if (!isRemoteWeb || !popoverView.remoteUrlInput) return;
+    const tr = i18n.t();
+    const configured = isApiConfigured();
+    const currentUrl = getApiBaseUrl();
+    if (force || (!state.remoteUrlDirty && !isElementFocused(popoverView.remoteUrlInput))) {
+      popoverView.remoteUrlInput.value = currentUrl;
+      state.remoteUrlDirty = false;
+    }
+    if (!configured) {
+      popoverView.setRemoteConnectionStatus(tr.remoteDisconnected, false);
+    } else if (api.isConnected()) {
+      popoverView.setRemoteConnectionStatus(
+        i18n.formatTemplate(tr.remoteConnected, { url: currentUrl }),
+        false,
+      );
+    } else if (state.lastConnectionError) {
+      const status = state.lastConnectionError.status;
+      if (status === 401 || status === 403) {
+        popoverView.setRemoteConnectionStatus(
+          i18n.formatTemplate(tr.remoteAuthFailed, { status }),
+          true,
+        );
+      } else {
+        popoverView.setRemoteConnectionStatus(tr.remoteUnreachable, true);
+      }
+    } else {
+      popoverView.setRemoteConnectionStatus(tr.connecting, false);
+    }
+  }
 
   function isElementFocused(el) {
     if (!el) return false;
@@ -530,15 +574,21 @@ export function createBarController({
     syncCompactPrompt(false);
     renderAddons();
 
+    const configured = isApiConfigured();
     barView.renderSnapshot({
       snap,
       connected: api.isConnected(),
+      configured,
+      isRemoteWeb,
       compacting: state.compacting,
       hasSession: Boolean(getSessionId()),
       compactPrompt: sharedState.compactPrompt,
     });
-    if (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected())) {
+    if (configured && (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected()))) {
       barView.setReconnecting();
+    }
+    if (isRemoteWeb) {
+      syncRemoteConnectionPanel(false);
     }
     popoverView.renderSnapshotDetails(snap);
     if (snap) {
@@ -687,6 +737,13 @@ export function createBarController({
 
   async function refreshSnapshot({ waitForFresh = false } = {}) {
     if (state.disposed) return;
+    if (!isApiConfigured()) {
+      if (state.snapshot !== null) {
+        state.snapshot = null;
+        render();
+      }
+      return;
+    }
     const sid = getSessionId();
     if (!sid) return;
     const sessionChanged = Boolean(state.lastSessionId && state.lastSessionId !== sid);
@@ -717,13 +774,18 @@ export function createBarController({
         const snap = await api.post('/api/snapshot', { sessionId: sid }, state.abortCtrl.signal);
         if (state.disposed || reqEpoch !== state.epoch) return;
         state.consecutiveSnapshotFailures = 0;
+        state.lastConnectionError = null;
         state.snapshot = snap;
         render();
       } catch (err) {
         if (state.disposed || err?.name === 'AbortError' || err?.message === 'aborted') return;
         state.consecutiveSnapshotFailures += 1;
+        state.lastConnectionError = err;
         if (!state.snapshot || state.consecutiveSnapshotFailures >= 2 || !api.isConnected()) {
           barView.setReconnecting();
+        }
+        if (isRemoteWeb) {
+          syncRemoteConnectionPanel(false);
         }
       } finally {
         if (reqEpoch === state.epoch) {
@@ -1038,11 +1100,70 @@ export function createBarController({
     }
   };
 
+  async function handleRemoteConnect() {
+    if (!isRemoteWeb || typeof onRemoteConnectionSave !== 'function') return;
+    const tr = i18n.t();
+    const baseUrl = popoverView.remoteUrlInput ? popoverView.remoteUrlInput.value.trim() : '';
+    const token = popoverView.remoteTokenInput ? popoverView.remoteTokenInput.value.trim() : '';
+    try {
+      const result = await onRemoteConnectionSave({ baseUrl, token });
+      state.remoteUrlDirty = false;
+      if (result && result.ok) {
+        state.consecutiveSnapshotFailures = 0;
+        state.lastConnectionError = null;
+        if (popoverView.remoteTokenInput) popoverView.remoteTokenInput.value = '';
+        showFeedback(
+          i18n.formatTemplate(tr.remoteConnected, { url: result.baseUrl || baseUrl }),
+          false,
+        );
+      } else if (result && result.code === 'ERR_INVALID_ENDPOINT_URL') {
+        showFeedback(tr.remoteInvalidUrl, true);
+      } else if (result && result.code === 'ERR_INVALID_SIDECAR_TOKEN') {
+        showFeedback(tr.remoteInvalidToken, true);
+      } else if (result && (result.status === 401 || result.status === 403)) {
+        state.lastConnectionError = { status: result.status };
+        showFeedback(i18n.formatTemplate(tr.remoteAuthFailed, { status: result.status }), true);
+      } else if (result && result.code === 'ERR_SAVE_SETTINGS_FAILED') {
+        showFeedback(
+          i18n.formatTemplate(tr.remoteSaveFailed, { reason: result.reason || 'Error' }),
+          true,
+        );
+      } else {
+        state.lastConnectionError = new Error(result?.message || 'unreachable');
+        showFeedback(tr.remoteUnreachable, true);
+      }
+      render();
+    } catch (err) {
+      state.lastConnectionError = err;
+      showFeedback(err?.message || tr.remoteUnreachable, true);
+      render();
+    }
+  }
+
+  async function handleRemoteDisconnect() {
+    if (!isRemoteWeb || typeof onRemoteConnectionClear !== 'function') return;
+    const tr = i18n.t();
+    try {
+      await onRemoteConnectionClear();
+      state.remoteUrlDirty = false;
+      if (popoverView.remoteUrlInput) popoverView.remoteUrlInput.value = '';
+      if (popoverView.remoteTokenInput) popoverView.remoteTokenInput.value = '';
+      resetConnectionState();
+      showFeedback(tr.remoteDisconnectedSaved, false);
+    } catch (err) {
+      showFeedback(err?.message || 'Error', true);
+    }
+  }
+
   barView.ctxBtn.addEventListener('click', () => {
-    if (state.popOpen && state.activeTab === 'context') {
+    const preferredTab = isRemoteWeb && !isApiConfigured() ? 'settings' : 'context';
+    if (state.popOpen && state.activeTab === preferredTab) {
       setPopoverOpen(false);
     } else {
-      setPopoverOpen(true, 'context', barView.ctxBtn);
+      setPopoverOpen(true, preferredTab, barView.ctxBtn);
+      if (preferredTab === 'settings' && isRemoteWeb) {
+        syncRemoteConnectionPanel(true);
+      }
     }
   });
   barView.settingsBtn.addEventListener('click', () => {
@@ -1081,6 +1202,34 @@ export function createBarController({
   popoverView.presetSelect.addEventListener('change', onPresetChange);
   popoverView.customInput.addEventListener('input', onCustomInput);
   popoverView.customInput.addEventListener('keydown', onInputKeyDown);
+  if (isRemoteWeb && popoverView.remoteConnectBtn) {
+    popoverView.remoteConnectBtn.addEventListener('click', handleRemoteConnect);
+  }
+  if (isRemoteWeb && popoverView.remoteDisconnectBtn) {
+    popoverView.remoteDisconnectBtn.addEventListener('click', handleRemoteDisconnect);
+  }
+  if (isRemoteWeb && popoverView.remoteUrlInput) {
+    popoverView.remoteUrlInput.addEventListener('input', () => {
+      state.remoteUrlDirty = true;
+      showFeedback('', false);
+    });
+    popoverView.remoteUrlInput.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleRemoteConnect();
+      }
+    });
+  }
+  if (isRemoteWeb && popoverView.remoteTokenInput) {
+    popoverView.remoteTokenInput.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleRemoteConnect();
+      }
+    });
+  }
   if (popoverView.openGlobalModalBtn) {
     popoverView.openGlobalModalBtn.addEventListener('click', () =>
       openGlobalModal(popoverView.openGlobalModalBtn),
@@ -1167,6 +1316,20 @@ export function createBarController({
     refreshSnapshot();
   }
 
+  function resetConnectionState() {
+    if (state.abortCtrl) {
+      try {
+        state.abortCtrl.abort();
+      } catch {}
+      state.abortCtrl = null;
+    }
+    state.snapshot = null;
+    state.consecutiveSnapshotFailures = 0;
+    state.lastConnectionError = null;
+    sharedState.quotaState = null;
+    render();
+  }
+
   function destroy() {
     if (state.disposed) return;
     state.disposed = true;
@@ -1201,6 +1364,7 @@ export function createBarController({
     setTargetView,
     render,
     refreshSnapshot,
+    resetConnectionState,
     destroy,
   });
 }

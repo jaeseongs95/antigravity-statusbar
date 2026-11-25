@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   renderAddonRendererBundle,
   renderAddonStandbyStub,
+  renderAddonStaticBundle,
 } from '../../src/adapters/antigravity/addon/bundle-builder.mjs';
 import { createSidecarServer } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 
@@ -257,7 +258,34 @@ test('sidecar HTTP security: Host check on GET & POST, POST-only API w/ 405 & ze
   }
 });
 
-test('AddonManifest.v1 renderer bundle generator enforces loopback URL, min token length, capability-only injection, and credential-free standby stub', () => {
+test('v3.2.0 static renderer bundle is deterministic, credential-free, AST-safe, and legacy test bundle still validates loopback/token', () => {
+  const staticBundleA = renderAddonRendererBundle();
+  const staticBundleB = renderAddonStaticBundle();
+  assert.equal(staticBundleA, staticBundleB, 'renderAddonRendererBundle() without args must emit deterministic static bundle');
+  assert.equal(staticBundleA.includes(TEST_TOKEN), false);
+  assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(staticBundleA), false, 'Static bundle must never embed concrete loopback ports');
+  assert.ok(staticBundleA.includes('antigravity-statusbar.root'));
+  assert.ok(staticBundleA.includes('startAddonStatusbar'));
+
+  // Host v2.5.3 verifyRemoteBundleAst banned sink & dynamic execution checks
+  const bannedAstPatterns = [
+    /\binnerHTML\b/,
+    /\bouterHTML\b/,
+    /\binsertAdjacentHTML\b/,
+    /\bdocument\.write\b/,
+    /\beval\s*\(/,
+    /\bnew\s+Function\b/,
+    /\brequire\s*\(/,
+    /createPolicy\s*\(\s*['"]default['"]\s*\)/,
+    /SetMendelFlagOverrides/,
+    /createElement\s*\(\s*['"]style['"]\s*\)/,
+    /window\.__agyStatusbarInline/,
+  ];
+  for (const pat of bannedAstPatterns) {
+    assert.equal(pat.test(staticBundleA), false, `Static bundle matched forbidden pattern ${pat}`);
+  }
+
+  // Legacy explicit credentials validation (used by existing local E2E harnesses)
   assert.throws(() =>
     renderAddonRendererBundle({ baseUrl: 'https://evil.example:443', token: TEST_TOKEN }),
   );
@@ -270,10 +298,9 @@ test('AddonManifest.v1 renderer bundle generator enforces loopback URL, min toke
   });
   assert.ok(script.includes('http://127.0.0.1:43210'));
   assert.ok(script.includes('antigravity-statusbar.root'));
-  assert.equal(/\binnerHTML\b/.test(script), false);
-  assert.equal(/SetMendelFlagOverrides/.test(script), false);
-  assert.equal(/createElement\s*\(\s*['"]style['"]\s*\)/.test(script), false);
-  assert.equal(/window\.__agyStatusbarInline/.test(script), false);
+  for (const pat of bannedAstPatterns) {
+    assert.equal(pat.test(script), false, `Explicit bundle matched forbidden pattern ${pat}`);
+  }
 
   const stub = renderAddonStandbyStub();
   assert.equal(stub.includes(TEST_TOKEN), false);

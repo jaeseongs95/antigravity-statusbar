@@ -9,7 +9,7 @@ import { createStatusbarService } from '../../core/app/statusbar-service.mjs';
 import { DomainError } from '../../core/i18n/error-codes.mjs';
 import { createJsonSettingsStore } from '../storage/json-settings-store.mjs';
 import { assertRendererPublisherPort } from './addon/ports.mjs';
-import { createAddonRuntimePublisher } from './addon/runtime-publisher.mjs';
+import { createSettingsBridgePublisher } from './addon/runtime-publisher.mjs';
 import { createAntigravityCompactionAdapter } from './compaction-adapter.mjs';
 import { createLsTransport } from './ls-transport.mjs';
 import { createAntigravityTelemetryAdapter } from './telemetry-mapper.mjs';
@@ -537,6 +537,26 @@ export function createSidecarServer({
 }
 
 /**
+ * Resolves an optional configured Sidecar loopback port from environment variables.
+ * Accepts integers in [1024, 65535]; falls back to `0` (ephemeral OS-assigned port) otherwise.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @returns {number}
+ */
+export function resolvePreferredSidecarPort(env = process.env) {
+  const raw =
+    env?.STATUSBAR_SIDECAR_PORT ||
+    env?.ANTIGRAVITY_SIDECAR_WEB_PORT ||
+    env?.ANTIGRAVITY_SIDECAR_PORT ||
+    '';
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) return 0;
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) return 0;
+  return parsed;
+}
+
+/**
  * Production sidecar entrypoint invoked by sidecars/statusbar/main.mjs.
  */
 export async function startSidecar(env = process.env, deps = {}) {
@@ -554,8 +574,9 @@ export async function startSidecar(env = process.env, deps = {}) {
     token = crypto.randomBytes(32).toString('hex');
   }
 
-  const defaultPluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-  const pluginRootDir = env.ANTIGRAVITY_PLUGIN_ROOT_DIR || defaultPluginRoot;
+  const hostDataDir =
+    env.ANTIGRAVITY_ADDON_HOST_DATA_DIR ||
+    path.join(os.homedir(), '.gemini', 'antigravity');
 
   const dataDir =
     env.ANTIGRAVITY_PLUGIN_DATA_DIR ||
@@ -579,30 +600,52 @@ export async function startSidecar(env = process.env, deps = {}) {
     settingsPort,
   });
 
-  const sidecar = createSidecarServer({
+  const preferredPort = resolvePreferredSidecarPort(env);
+  let sidecar = createSidecarServer({
     token,
     service,
     frameAncestors: env.STATUSBAR_FRAME_ANCESTORS || DEFAULT_FRAME_ANCESTORS,
-    port: Number(env.ANTIGRAVITY_SIDECAR_WEB_PORT || env.ANTIGRAVITY_SIDECAR_PORT || 0) || 0,
+    port: preferredPort,
   });
 
-  const { port, url } = await sidecar.listen();
+  let listenInfo;
+  try {
+    listenInfo = await sidecar.listen();
+  } catch (listenErr) {
+    if (preferredPort > 0 && listenErr?.code === 'EADDRINUSE') {
+      process.stderr.write(
+        `[statusbar-sidecar] preferred port ${preferredPort} in use; falling back to ephemeral loopback port\n`,
+      );
+      sidecar = createSidecarServer({
+        token,
+        service,
+        frameAncestors: env.STATUSBAR_FRAME_ANCESTORS || DEFAULT_FRAME_ANCESTORS,
+        port: 0,
+      });
+      listenInfo = await sidecar.listen();
+    } else {
+      throw listenErr;
+    }
+  }
+  const { port, url } = listenInfo;
 
+  // v3.2.0 (trusted): Publish live Desktop loopback connection exclusively via host settingsBridge
+  // (`HOST_DATA_DIR/antigravity-statusbar-runtime.json`) so `runtime/statusbar-renderer.js` stays 100% immutable.
   const addonPublishDisabled = env.STATUSBAR_DISABLE_ADDON_PUBLISH === '1';
   let rendererPublisher = null;
   if (!addonPublishDisabled) {
     try {
       rendererPublisher = assertRendererPublisherPort(
         deps.rendererPublisher ||
-          createAddonRuntimePublisher({
-            pluginRootDir,
+          createSettingsBridgePublisher({
+            hostDataDir,
           }),
       );
       await rendererPublisher.publish({ baseUrl: url, token });
     } catch (pubErr) {
-      // Non-fatal: AUX_PANE remains available even if plugin runtime directory is read-only
+      // Non-fatal: Sidecar remains operational even if host data directory is read-only
       process.stderr.write(
-        `[statusbar-sidecar] addon renderer publish warning: ${pubErr?.message || String(pubErr)}\n`,
+        `[statusbar-sidecar] settingsBridge runtime publish warning: ${pubErr?.message || String(pubErr)}\n`,
       );
     }
   }

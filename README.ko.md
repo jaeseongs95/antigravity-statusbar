@@ -1,17 +1,21 @@
-# Antigravity Statusbar (v3.1.5)
+# Antigravity Statusbar (v3.2.0)
 
-공식 **Antigravity 네이티브 플러그인 (`AddonManifest.v2` 인라인 상태바 + 헤드리스 네이티브 Sidecar)** 입니다. 채팅 입력창 바로 아래에서 실시간 컨텍스트 사용량, 프롬프트 캐시 적중률, 5시간·주간 계정 한도, 4단계 컨텍스트 한도(`현재 세션 > 모델별 전역 > 일괄 전역 > 호스트 기본값`), 작업 중단 없는 가드된 자동 압축·자동 재개, 토큰 상세 내역, 원클릭 `/compact`를 안전하게 제공합니다.
+공식 **Antigravity 네이티브 플러그인 (`AddonManifest.v2` 신뢰 승인 인라인 상태바 + 원격 웹 지원 + 헤드리스 네이티브 Sidecar)** 입니다. 데스크톱 채팅 입력창 아래 및 원격 웹(`antigravity-remote-web`)에서 실시간 컨텍스트 사용량, 프롬프트 캐시 적중률, 5시간·주간 계정 한도, 4단계 컨텍스트 한도(`현재 세션 > 모델별 전역 > 일괄 전역 > 호스트 기본값`), 작업 중단 없는 가드된 자동 압축·자동 재개, 토큰 상세 내역, 원클릭 `/compact`를 안전하게 제공합니다.
 
 [English README (README.md)](./README.md)
 
-## v3.1.5 아키텍처 (`AddonManifest.v2` 인라인 상태바 + 헤드리스 네이티브 Sidecar)
+## v3.2.0 아키텍처 (신뢰 승인 정적 렌더러 + `settingsBridge` + 원격 웹 지원)
 
-구버전(v1/v2)은 Electron `app.asar` 바이너리를 패치하고 렌더러 내부(`lsClient`, React Fiber, Protobuf)를 후킹했습니다. **v3.1.5**는 공식 네이티브 플러그인과 [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons)(구 `antigravity-native-addon-host`) **`>= 2.3.0`** (`AddonManifest.v2`) 위에서 동작합니다.
+구버전(v1/v2)은 Electron `app.asar` 바이너리를 패치하고 렌더러 내부(`lsClient`, React Fiber, Protobuf)를 후킹했습니다. **v3.2.0**은 공식 네이티브 플러그인과 [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons)(구 `antigravity-native-addon-host`) **`>= 2.3.0`**(`v2.5.3+` 권장) 위에서 `trustLevel: "trusted"`로 동작합니다.
 
 - **`app.asar` 패치 0건**, Electron 렌더러 변조 0건, React Fiber/Protobuf 후킹 0건, `hooks.json` 0건.
-- **Shadow DOM 격리 인라인 UI (`AddonManifest.v2`, 데스크톱 전용)**: 호스트가 소유한 Shadow DOM 슬롯(`status-bar`, `overlay` 팝오버, `modal` `<dialog>`)으로 렌더링하며 `trustLevel: "restricted"`를 유지하고 `window`/DOM에 토큰이나 호스트 핸들을 노출하지 않습니다. `hostProfiles: ["antigravity-desktop"]`, `excludeHostProfiles: ["antigravity-remote-web"]`, `minHostVersion: "2.3.0"` 선언 및 `addonHost.hostProfileId` Fail-Closed 런타임 가드를 통해 Remote Web 빌드(`addon-host --build-remote`)에 로컬 Sidecar 번들이 포함·실행되는 것을 원천 차단합니다. 불필요한 우측 `AUX_PANE` 탭은 제거했습니다(`sidecar.json` `has_web_ui: false`).
+- **신뢰 승인 불변 정적 렌더러 (`trustLevel: "trusted"`)**: `scripts/install-plugin.mjs`가 자격 증명이 전혀 포함되지 않은 100% 정적·결정론적 `runtime/statusbar-renderer.js`를 생성하며, `antigravity-addons`의 SHA-256 신뢰 핀과 엄격한 AST 검사(HTML sink·`eval`·`new Function`·`require` 0건)를 통과합니다. Sidecar는 기동·종료 시 `runtime/statusbar-renderer.js`를 **절대 수정하지 않습니다**.
+- **데스크톱 `settingsBridge` 실시간 자격 증명 전달**: `antigravity-desktop`에서 Sidecar는 기동 시 `HOST_DATA_DIR/antigravity-statusbar-runtime.json`(`settingsBridge`)에만 루프백 URL과 256-bit 토큰을 원자적(`0o600`)으로 기록하고 종료 시 `mode: "standby"`로 회수합니다. 선택적으로 `STATUSBAR_SIDECAR_PORT`(`1024`~`65535`) 고정 포트를 지원하며 충돌(`EADDRINUSE`) 시 임시 포트로 자동 폴백합니다.
+- **원격 웹(`antigravity-remote-web`) 지원**: `hostProfiles: ["antigravity-desktop", "antigravity-remote-web"]` 및 `uiSlots[0].anchor: "status-bar"`를 선언합니다. 원격 웹 DOM에 `[data-testid="agent-input-box"]`가 없으면 호스트 `status-bar` 앵커/`#remote-addon-host-slot-dock`에 자동 마운트됩니다. 미설정 상태에서는 네트워크 요청 0건으로 기동하고 `packed-initial` 스냅샷을 심층 방어로 무시하며, 설정 탭의 **원격 Sidecar 연결** UI에서 사용자가 입력한 루프백 HTTP 또는 HTTPS 주소·토큰을 `addonHost.saveSettings(...)`로 브라우저 로컬 저장소에만 보관합니다.
+  - **보안 주의**: `addon-host --build-remote` 실행 시 `--include-settings-snapshots` 옵션을 절대 함께 사용하지 마십시오(데스크톱 런타임 토큰이 정적 원격 웹 번들에 평문 포함될 수 있습니다).
+  - **실사이트 CSP 참고**: `https://antigravity.google.com`에서의 실제 `fetch` 허용 여부는 대상 사이트의 `connect-src` CSP 및 브라우저 PNA 정책에 따라 달라지므로 배포 후 실브라우저 검증이 필요합니다.
 - **Ports & Adapters 벤더 중립 구조**: `src/core/`와 `src/ui/`에는 벤더 특화 코드가 전혀 없으며, 모든 Antigravity 연동은 `src/adapters/antigravity/`에 격리됩니다.
-- **Sidecar 보안 강화**: Fail-Closed 토큰 검증(명시 토큰 `>= 16`자, 헤드리스 모드에서 미설정 시 프로세스별 256-bit 임시 암호 토큰 발급), `/api/*` `POST` 전용, `Host`·`Origin` 엄격 검증, SHA-256 `timingSafeEqual`, `16KB` 본문 상한, 엄격한 CSP, `path.relative` + `realpathSync` 정적 경로 격리, 종료 시 동기 `teardownSync()` 토큰 회수.
+- **Sidecar 보안 강화**: Fail-Closed 토큰 검증(명시 토큰 `>= 16`자, 헤드리스 모드에서 미설정 시 프로세스별 256-bit 임시 암호 토큰 발급), `/api/*` `POST` 전용, `Host`·`Origin` 엄격 검증(`Access-Control-Allow-Private-Network: true` 포함), SHA-256 `timingSafeEqual`, `16KB` 본문 상한, 엄격한 CSP, `path.relative` + `realpathSync` 정적 경로 격리, 종료 시 동기 `teardownSync()` 토큰 회수.
 
 ## 주요 기능
 
@@ -37,11 +41,14 @@ npm ci --omit=dev
 npm run install-plugin
 ```
 
-설치 후 `~/.gemini/antigravity/addons.d/antigravity-statusbar.json` 매니페스트가 `v3.1.5`(`excludeHostProfiles: ["antigravity-remote-web"]`)로 갱신되도록 `antigravity-addons`에 재등록합니다:
+설치 후 `antigravity-addons`에 `v3.2.0` 매니페스트를 등록하고 `trustLevel: "trusted"`(불변 `runtime/statusbar-renderer.js` SHA-256 핀)를 승인한 뒤, 원격 웹을 사용하는 경우 원격 웹 번들을 다시 빌드합니다(`--include-settings-snapshots` 플래그는 절대 추가하지 마십시오):
 
 ```bash
 # antigravity-addons 설치 경로에서 실행
 node bin/addon-host.js --register ~/.gemini/config/plugins/antigravity-statusbar/addon-manifest.v2.json
+node bin/addon-host.js trust approve antigravity-statusbar
+# 선택: 원격 웹 번들 재빌드 (--include-settings-snapshots 제외)
+node bin/addon-host.js --build-remote --out-dir ~/.gemini/antigravity/remote-dist
 ```
 
 플러그인 복사 전 미리보기:

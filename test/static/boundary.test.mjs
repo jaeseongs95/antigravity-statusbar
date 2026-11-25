@@ -157,24 +157,34 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v2.json d
     fs.readFileSync(path.join(REPO_ROOT, 'addon-manifest.v2.json'), 'utf8'),
   );
   assert.equal(pluginManifest.name, 'antigravity-statusbar');
-  assert.equal(pluginManifest.version, '3.1.5');
+  assert.equal(pluginManifest.version, '3.2.0');
   assert.equal(sidecarManifest.has_web_ui, false);
   assert.equal(sidecarManifest.ui_config, undefined);
 
   assert.equal(addonManifest.schemaVersion, 2);
   assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-  assert.equal(addonManifest.version, '3.1.5');
-  assert.equal(addonManifest.trustLevel, 'restricted');
+  assert.equal(addonManifest.version, '3.2.0');
+  assert.equal(addonManifest.trustLevel, 'trusted');
   assert.equal(addonManifest.compatibility?.hostProfile, 'antigravity-desktop');
-  assert.deepEqual(addonManifest.compatibility?.hostProfiles, ['antigravity-desktop']);
-  assert.deepEqual(addonManifest.compatibility?.excludeHostProfiles, ['antigravity-remote-web']);
+  assert.deepEqual(addonManifest.compatibility?.hostProfiles, [
+    'antigravity-desktop',
+    'antigravity-remote-web',
+  ]);
+  assert.equal(addonManifest.compatibility?.excludeHostProfiles, undefined);
   assert.equal(addonManifest.compatibility?.minHostVersion, '2.3.0');
   assert.deepEqual(addonManifest.capabilities, ['renderer']);
   assert.equal(addonManifest.entry?.rendererScript, 'runtime/statusbar-renderer.js');
   assert.equal(addonManifest.entry?.mainHookScript, null);
+  assert.deepEqual(addonManifest.settingsBridge, {
+    fileName: 'antigravity-statusbar-runtime.json',
+    maxBytes: 16384,
+  });
+  assert.equal(addonManifest.configBridge, undefined);
   assert.equal(addonManifest.uiSlots.length, 3);
   assert.ok(addonManifest.uiSlots.every((s) => s.shadow === true));
-  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'status-bar')?.exclusive, true);
+  const statusBarSlot = addonManifest.uiSlots.find((s) => s.slot === 'status-bar');
+  assert.equal(statusBarSlot?.exclusive, true);
+  assert.equal(statusBarSlot?.anchor, 'status-bar');
   assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'overlay')?.exclusive, false);
   assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'modal')?.exclusive, false);
   assert.equal(addonManifest.loadOrder, 50);

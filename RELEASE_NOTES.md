@@ -1,3 +1,69 @@
+# Release Notes — `v3.2.0` (2026-11-25)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.2.0` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.2.0` upgrades the plugin to **`trustLevel: "trusted"`** and adds full **Remote Web (`antigravity-remote-web`) support** aligned with [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) `v2.5.3+`. Instead of rewriting `runtime/statusbar-renderer.js` on every Sidecar launch, the installer now generates a 100% static, immutable, credential-free renderer bundle (preventing `ERR_RENDERER_SHA256_MISMATCH`), Desktop Sidecar credentials flow exclusively through host `settingsBridge`, and Remote Web users configure their loopback HTTP or HTTPS Sidecar connection locally in the browser via `addonHost.saveSettings(...)`.
+
+### 2. Key Changes
+- **`AddonManifest.v2` Trusted + Remote Web Support (`addon-manifest.v2.json`, `package.json`, `plugin.json`)**:
+  - Promotes `trustLevel` from `"restricted"` to `"trusted"` and declares `settingsBridge: { fileName: "antigravity-statusbar-runtime.json", maxBytes: 16384 }`.
+  - Updates `compatibility.hostProfiles` to `["antigravity-desktop", "antigravity-remote-web"]`, removes `excludeHostProfiles`, and adds `anchor: "status-bar"` to `antigravity-statusbar.root`.
+- **Immutable Static Renderer & `settingsBridge` Runtime Delivery (`scripts/install-plugin.mjs`, `src/adapters/antigravity/addon/bundle-builder.mjs`, `src/adapters/antigravity/addon/runtime-publisher.mjs`, `src/adapters/antigravity/sidecar-entry.mjs`)**:
+  - `scripts/install-plugin.mjs` writes a deterministic, credential-free `renderAddonRendererBundle()` to `runtime/statusbar-renderer.js` on both `atomic-rename` and `in-place-fallback` installs.
+  - Introduces `createSettingsBridgePublisher` (`RendererPublisherPort` LSP) and `resolveConfinedSettingsBridgeTarget` (enforcing `HOST_DATA_DIR` confinement, rejecting reserved host files and symlinks, atomic `0o600` publish, and `teardown()`/`teardownSync()` standby scrubbing).
+  - `startSidecar` publishes exclusively to `ANTIGRAVITY_ADDON_HOST_DATA_DIR/antigravity-statusbar-runtime.json` (`~/.gemini/antigravity/antigravity-statusbar-runtime.json` by default) so `runtime/statusbar-renderer.js` SHA-256 remains 100% unchanged across Sidecar restarts and shutdowns.
+  - Adds `resolvePreferredSidecarPort(env)` supporting optional fixed loopback port (`STATUSBAR_SIDECAR_PORT` / `ANTIGRAVITY_SIDECAR_WEB_PORT` / `ANTIGRAVITY_SIDECAR_PORT`, `[1024, 65535]`) with automatic `EADDRINUSE` fallback to ephemeral port `0`.
+- **Remote Web (`antigravity-remote-web`) Runtime, Anchor Fallback & Connection UI (`src/adapters/antigravity/addon/ports.mjs`, `addon-host-adapter.mjs`, `api-client.mjs`, `bootstrap.mjs`, `bar-controller.mjs`, `bar-view.mjs`, `popover-view.mjs`, `i18n.mjs`, `styles.mjs`)**:
+  - Extends `RendererHostPort` and `createAddonHostAdapter` to forward `getSettings`, `onSettingsChange`, and `saveSettings`, and supports `mountSlot(null)` (`{}` on v2 hosts) for host `anchor: "status-bar"` / `#remote-addon-host-slot-dock` fallback when `[data-testid="agent-input-box"]` is absent (styled via owner-CSS `.agy-remote-dock`).
+  - Extends `createSidecarApiClient` with unconfigured startup mode (`isConfigured()`, `configure()`, `clearConnection()`), `allowRemoteHttps: true` validation (loopback HTTP always; `https://` without embedded credentials/query/hash on Remote Web), and 401/403 disconnect handling.
+  - Replaces the v3.1.4 Remote Web fail-closed block in `bootstrap.mjs` with dual-profile support: Desktop consumes live `settingsBridge` updates (standby → active → port/token rotation → standby), while Remote Web ignores `persistence === "packed-initial"` snapshots, boots with zero fetches when unconfigured, and persists user-entered URL + token strictly in browser `localStorage` via `addonHost.saveSettings(...)`.
+  - Adds a localized (EN/KO) **Remote Sidecar Connection** card inside the Settings tab on Remote Web (hidden on Desktop) with URL input, password token input, Connect/Disconnect buttons, and status/error feedback.
+- **Security & Deployment Notes**:
+  - **NEVER** pass `--include-settings-snapshots` to `addon-host --build-remote`; doing so would inline Desktop runtime tokens into `antigravity-remote.user.js`/`bookmarklet.txt`.
+  - Recommended deployment order: `npm run install-plugin` → `node bin/addon-host.js --register <manifest>` → `node bin/addon-host.js trust approve antigravity-statusbar` → `node bin/addon-host.js --build-remote --out-dir <remote-dist>`.
+  - Note: Direct `fetch` from `https://antigravity.google.com` to loopback/HTTPS Sidecar endpoints depends on live site `connect-src` CSP and browser PNA policy and should be verified on the live site after deployment.
+
+### 3. Verification
+- Verified on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) across `test:static`, `test:unit`, `test:integration` (including `TC-ADDON-10a` Desktop `settingsBridge` live rotation, `TC-ADDON-10b` Remote Web E2E + `packed-initial` rejection + `status-bar` dock fallback, `TC-ADDON-11` configurable port + `EADDRINUSE` fallback, and byte-for-byte SHA-256 immutability of installed `runtime/statusbar-renderer.js`), `test:security`, `test:ui` (real Headless Chromium/Edge Shadow DOM E2E), and `install-plugin.mjs --dry-run`.
+
+---
+
+## [한국어] `v3.2.0` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.2.0`은 [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) `v2.5.3+` 규격에 맞춰 플러그인을 **`trustLevel: "trusted"`(신뢰 승인)**로 승격하고 **원격 웹(`antigravity-remote-web`) 정식 지원**을 추가한 마이너 릴리즈입니다. Sidecar가 기동할 때마다 `runtime/statusbar-renderer.js`를 덮어쓰던 기존 방식을 폐지하고 설치 시 100% 정적·불변·무자격증명 렌더러 번들을 고정 생성하여 `ERR_RENDERER_SHA256_MISMATCH`를 원천 차단했습니다. 데스크톱은 호스트 `settingsBridge`로 실시간 연결 정보를 전달받으며, 원격 웹은 설정 탭의 연결 UI에서 브라우저 로컬 저장소(`addonHost.saveSettings`)로 루프백 HTTP 또는 HTTPS Sidecar에 연결합니다.
+
+### 2. 주요 변경 사항
+- **`AddonManifest.v2` 신뢰 승인 및 원격 웹 선언 (`addon-manifest.v2.json`, `package.json`, `plugin.json`)**:
+  - `trustLevel`을 `"restricted"`에서 `"trusted"`로 승격하고 `settingsBridge: { fileName: "antigravity-statusbar-runtime.json", maxBytes: 16384 }`를 선언했습니다.
+  - `compatibility.hostProfiles`를 `["antigravity-desktop", "antigravity-remote-web"]`로 확장하고 `excludeHostProfiles`를 제거했으며, `antigravity-statusbar.root` 슬롯에 `anchor: "status-bar"`를 추가했습니다.
+- **불변 정적 렌더러 및 `settingsBridge` 런타임 전달 (`scripts/install-plugin.mjs`, `src/adapters/antigravity/addon/bundle-builder.mjs`, `src/adapters/antigravity/addon/runtime-publisher.mjs`, `src/adapters/antigravity/sidecar-entry.mjs`)**:
+  - `scripts/install-plugin.mjs`가 `atomic-rename`과 `in-place-fallback` 모든 경로에서 결정론적·무자격증명 `renderAddonRendererBundle()`를 `runtime/statusbar-renderer.js`에 기록합니다.
+  - `createSettingsBridgePublisher`(`RendererPublisherPort` LSP)와 `resolveConfinedSettingsBridgeTarget`을 도입해 `HOST_DATA_DIR` 경로 격리, 호스트 예약 파일·심볼릭 링크 차단, `0o600` 원자적 쓰기, `teardown()`/`teardownSync()` 시 `mode: "standby"` 회수를 보장합니다.
+  - `startSidecar`는 `ANTIGRAVITY_ADDON_HOST_DATA_DIR/antigravity-statusbar-runtime.json`(기본 `~/.gemini/antigravity/antigravity-statusbar-runtime.json`)에만 기록하므로 Sidecar 기동·종료 전반에 걸쳐 `runtime/statusbar-renderer.js`의 SHA-256 해시가 단 1바이트도 변하지 않습니다.
+  - 선택적 고정 루프백 포트(`STATUSBAR_SIDECAR_PORT` / `ANTIGRAVITY_SIDECAR_WEB_PORT` / `ANTIGRAVITY_SIDECAR_PORT`, `[1024, 65535]`)를 해석하는 `resolvePreferredSidecarPort(env)`와 포트 충돌(`EADDRINUSE`) 시 임시 포트(`0`) 자동 폴백을 추가했습니다.
+- **원격 웹(`antigravity-remote-web`) 런타임·앵커 폴백·연결 UI (`src/adapters/antigravity/addon/ports.mjs`, `addon-host-adapter.mjs`, `api-client.mjs`, `bootstrap.mjs`, `bar-controller.mjs`, `bar-view.mjs`, `popover-view.mjs`, `i18n.mjs`, `styles.mjs`)**:
+  - `RendererHostPort`와 `createAddonHostAdapter`가 `getSettings`/`onSettingsChange`/`saveSettings`를 전달하고, 원격 웹 DOM에 `[data-testid="agent-input-box"]`가 없을 때 `mountSlot(null)`(v2 `{}`)로 호스트 `anchor: "status-bar"` / `#remote-addon-host-slot-dock`에 폴백 마운트(`.agy-remote-dock` 스타일)합니다.
+  - `createSidecarApiClient`에 미설정 기동 모드(`isConfigured()`, `configure()`, `clearConnection()`), `allowRemoteHttps: true` 검증(루프백 HTTP 상시 허용, 원격 웹에서 자격증명·쿼리·해시 없는 `https://` 허용), 401/403 연결 해제 처리를 추가했습니다.
+  - `bootstrap.mjs`의 v3.1.4 원격 웹 일괄 차단 가드를 이중 프로필 지원으로 대체했습니다. 데스크톱은 `settingsBridge` 실시간 상태(standby → active → 포트/토큰 로테이션 → standby)를 소비하고, 원격 웹은 `persistence === "packed-initial"` 스냅샷을 심층 방어로 무시하며 미설정 시 네트워크 요청 0건으로 기동합니다.
+  - 원격 웹 설정 탭에 한/영 로컬라이징된 **원격 Sidecar 연결** 카드(URL 입력, 비밀번호 토큰 입력, 연결/연결 해제 버튼, 상태·오류 피드백)를 추가했습니다(데스크톱에서는 숨김).
+- **보안 및 배포 유의 사항**:
+  - `addon-host --build-remote` 실행 시 `--include-settings-snapshots` 플래그를 **절대** 함께 사용하지 마십시오(데스크톱 런타임 토큰이 원격 웹 산출물에 평문 삽입될 수 있습니다).
+  - 권장 배포 순서: `npm run install-plugin` → `node bin/addon-host.js --register <manifest>` → `node bin/addon-host.js trust approve antigravity-statusbar` → `node bin/addon-host.js --build-remote --out-dir <remote-dist>`.
+  - 참고: `https://antigravity.google.com` 실사이트에서의 루프백/HTTPS `fetch` 허용 여부는 사이트 `connect-src` CSP와 브라우저 PNA 정책에 따라 달라지므로 배포 후 실브라우저 검증이 필요합니다.
+
+### 3. 검증 근거
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): `test:static`, `test:unit`, `test:integration`(`TC-ADDON-10a` 데스크톱 `settingsBridge` 실시간 전환, `TC-ADDON-10b` 원격 웹 E2E·`packed-initial` 차단·`status-bar` 독 폴백, `TC-ADDON-11` 고정 포트·`EADDRINUSE` 폴백, 설치된 `runtime/statusbar-renderer.js` SHA-256 불변성 포함), `test:security`, `test:ui`(실제 Headless Chromium/Edge Shadow DOM E2E), `install-plugin.mjs --dry-run` 전 항목 검증 완료.
+
+---
+
 # Release Notes — `v3.1.5` (2026-11-24)
 
 > **Document Policy / 문서 작성 기준**

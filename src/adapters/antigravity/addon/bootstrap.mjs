@@ -2,8 +2,13 @@
  * AddonManifest.v2 lifecycle bootstrap & slot/portal coordinator (SRP / DIP).
  *
  * Strictly uses `RendererHostPort` (mountSlot / unmountSlot / injectStyle / removeStyle / onDispose
- * plus optional v2 openPopover / openModal portals).
+ * plus optional v2 openPopover / openModal portals and trusted settingsBridge methods).
  * Never injects raw style tags directly and never exposes `addonHost` or Sidecar credentials on `window`.
+ *
+ * Supports both `antigravity-desktop` (live Sidecar credentials delivered via host `settingsBridge`
+ * while keeping `runtime/statusbar-renderer.js` 100% static & immutable) and `antigravity-remote-web`
+ * (browser-local connection settings persisted via `addonHost.saveSettings`, ignoring `packed-initial`
+ * snapshots, with automatic fallback to the host `status-bar` anchor / dock when `agent-input-box` is absent).
  */
 
 export function startAddonStatusbar({
@@ -20,20 +25,9 @@ export function startAddonStatusbar({
   cssText,
   styleId = 'statusbar-main',
   pollConfig = {},
+  hasStaticInitialConnection = false,
 }) {
-  // Fail closed on Remote Web host profiles (v2.3.0+ defense-in-depth alongside manifest excludeHostProfiles).
-  // Statusbar depends on the local Desktop Sidecar loopback server and must never mount, inject styles,
-  // expose globals, or issue loopback fetches inside remote browser sessions.
-  if (hostPort && hostPort.hostProfileId === 'antigravity-remote-web') {
-    return Object.freeze({
-      render() {},
-      mountToActiveBox() {
-        return false;
-      },
-      dispose() {},
-    });
-  }
-
+  const isRemoteWeb = Boolean(hostPort && hostPort.hostProfileId === 'antigravity-remote-web');
   const NORMAL_POLL_MS = pollConfig.normalPollMs || 1000;
   const BURST_POLL_MS = pollConfig.burstPollMs || 400;
   const QUOTA_POLL_MS = pollConfig.quotaPollMs || 15000;
@@ -46,6 +40,7 @@ export function startAddonStatusbar({
   let quotaPollTimer = null;
   let domActivityTimer = null;
   let observer = null;
+  let unsubscribeSettings = null;
   let currentSlotEl = null;
   let activeBoxEl = null;
 
@@ -58,6 +53,10 @@ export function startAddonStatusbar({
     quotaState: null,
     fallbackSessionId: '',
   };
+
+  function isApiConfigured() {
+    return typeof api.isConfigured === 'function' ? Boolean(api.isConfigured()) : true;
+  }
 
   const isV2Host = hostPort.schemaVersion === 2;
   if (isV2Host && hostPort.slotId) {
@@ -94,7 +93,7 @@ export function startAddonStatusbar({
       : null;
 
   const barView = createBarViewFn({ doc, i18n });
-  const popoverView = createPopoverViewFn({ doc, i18n });
+  const popoverView = createPopoverViewFn({ doc, i18n, isRemoteWeb });
   const globalModalView =
     typeof createGlobalLimitModalViewFn === 'function'
       ? createGlobalLimitModalViewFn({ doc, i18n })
@@ -140,6 +139,81 @@ export function startAddonStatusbar({
     }, delay);
   }
 
+  async function handleRemoteConnectionSave({ baseUrl, token }) {
+    if (!isRemoteWeb || typeof api.configure !== 'function') {
+      return { ok: false, code: 'ERR_REMOTE_UNAVAILABLE' };
+    }
+    const cleanToken = typeof token === 'string' ? token.trim() : '';
+    try {
+      api.configure({ baseUrl, token: cleanToken });
+    } catch (err) {
+      const msg = err?.message || '';
+      if (msg === 'ERR_INVALID_ENDPOINT_URL' || msg === 'ERR_INVALID_LOOPBACK_BASE_URL') {
+        return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
+      }
+      if (msg === 'ERR_INVALID_SIDECAR_TOKEN') {
+        return { ok: false, code: 'ERR_INVALID_SIDECAR_TOKEN' };
+      }
+      return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL', message: msg };
+    }
+
+    const normalizedUrl = typeof api.getBaseUrl === 'function' ? api.getBaseUrl() : baseUrl;
+    if (typeof hostPort.saveSettings === 'function') {
+      try {
+        const saveRes = await hostPort.saveSettings({
+          remoteBaseUrl: normalizedUrl,
+          remoteToken: cleanToken,
+          locale: i18n.getLocale(),
+        });
+        if (saveRes && saveRes.ok === false) {
+          if (typeof api.clearConnection === 'function') api.clearConnection();
+          return {
+            ok: false,
+            code: 'ERR_SAVE_SETTINGS_FAILED',
+            reason: saveRes.reason || 'ERR_SETTINGS_SAVE_FAILED',
+          };
+        }
+      } catch (saveErr) {
+        if (typeof api.clearConnection === 'function') api.clearConnection();
+        return {
+          ok: false,
+          code: 'ERR_SAVE_SETTINGS_FAILED',
+          reason: saveErr?.message || 'ERR_SETTINGS_SAVE_FAILED',
+        };
+      }
+    }
+
+    try {
+      const settings = await api.post('/api/settings/get', {});
+      applySettingsPayload(settings);
+      pollQuotaAndSettings();
+      pollSessionsAndSnapshots();
+      return { ok: true, baseUrl: normalizedUrl };
+    } catch (connErr) {
+      return {
+        ok: false,
+        status: connErr?.status,
+        code: connErr?.code || 'ERR_UNREACHABLE',
+        message: connErr?.message || 'Unable to reach Sidecar',
+      };
+    }
+  }
+
+  async function handleRemoteConnectionClear() {
+    if (typeof api.clearConnection === 'function') {
+      api.clearConnection();
+    }
+    if (isRemoteWeb && typeof hostPort.saveSettings === 'function') {
+      try {
+        await hostPort.saveSettings({
+          remoteBaseUrl: '',
+          remoteToken: '',
+          locale: i18n.getLocale(),
+        });
+      } catch {}
+    }
+  }
+
   const controller = createBarControllerFn({
     doc,
     win,
@@ -151,6 +225,7 @@ export function startAddonStatusbar({
     globalModalView,
     portalHost,
     sharedState,
+    isRemoteWeb,
     onSettingsChanged(updated) {
       applySettingsPayload(updated);
       controller.render();
@@ -159,7 +234,72 @@ export function startAddonStatusbar({
       burstUntil = Date.now() + MAX_BURST_MS;
       scheduleSnapshotPoll();
     },
+    onRemoteConnectionSave: isRemoteWeb ? handleRemoteConnectionSave : null,
+    onRemoteConnectionClear: isRemoteWeb ? handleRemoteConnectionClear : null,
   });
+
+  function applyHostSettingsBridgeSnapshot(snap, { triggerPoll = true } = {}) {
+    if (disposed) return;
+    if (!snap || typeof snap !== 'object') return;
+    const data = snap.data && typeof snap.data === 'object' ? snap.data : null;
+
+    if (isRemoteWeb) {
+      // Defense-in-depth: never accept Desktop credentials accidentally packed via --include-settings-snapshots
+      if (snap.persistence === 'packed-initial') {
+        return;
+      }
+      if (snap.status !== 'ok' || !data) {
+        return;
+      }
+      if (data.locale === 'ko' || data.locale === 'en') {
+        i18n.setLocale(data.locale);
+      }
+      const nextUrl = typeof data.remoteBaseUrl === 'string' ? data.remoteBaseUrl.trim() : '';
+      const nextToken = typeof data.remoteToken === 'string' ? data.remoteToken.trim() : '';
+      if (nextUrl && nextToken.length >= 16 && typeof api.configure === 'function') {
+        try {
+          const changed = api.configure({ baseUrl: nextUrl, token: nextToken });
+          if (changed && triggerPoll) {
+            pollQuotaAndSettings();
+            pollSessionsAndSnapshots();
+          }
+        } catch {}
+      } else if (typeof api.clearConnection === 'function') {
+        const cleared = api.clearConnection();
+        if (cleared && typeof controller.resetConnectionState === 'function') {
+          controller.resetConnectionState();
+        }
+      }
+      controller.render();
+      return;
+    }
+
+    // Desktop profile: consume live Sidecar connection published by Sidecar into HOST_DATA_DIR
+    if (snap.status === 'ok' && data) {
+      if (
+        data.mode === 'active' &&
+        typeof data.baseUrl === 'string' &&
+        typeof data.token === 'string' &&
+        typeof api.configure === 'function'
+      ) {
+        try {
+          const changed = api.configure({ baseUrl: data.baseUrl, token: data.token });
+          if (changed && triggerPoll) {
+            pollQuotaAndSettings();
+            pollSessionsAndSnapshots();
+          }
+        } catch {}
+      } else if (data.mode === 'standby' && !hasStaticInitialConnection) {
+        if (typeof api.clearConnection === 'function') {
+          const cleared = api.clearConnection();
+          if (cleared && typeof controller.resetConnectionState === 'function') {
+            controller.resetConnectionState();
+          }
+        }
+      }
+      controller.render();
+    }
+  }
 
   function isElementVisible(el) {
     if (!el) return false;
@@ -206,12 +346,29 @@ export function startAddonStatusbar({
   function mountToActiveBox() {
     if (disposed) return false;
     const boxEl = findActiveInputBox();
-    if (!boxEl) return false;
+    if (!boxEl) {
+      if (!isRemoteWeb) return false;
+      activeBoxEl = null;
+      const anchorSlotEl = hostPort.mountSlot(null);
+      if (!anchorSlotEl) return false;
+      currentSlotEl = anchorSlotEl;
+      if (typeof barView.setRemoteDockMode === 'function') {
+        barView.setRemoteDockMode(true);
+      }
+      if (controller.rootEl.parentNode !== anchorSlotEl) {
+        anchorSlotEl.appendChild(controller.rootEl);
+      }
+      controller.setTargetView(null);
+      return true;
+    }
 
     activeBoxEl = boxEl;
     const slotEl = hostPort.mountSlot(boxEl);
     if (!slotEl) return false;
     currentSlotEl = slotEl;
+    if (typeof barView.setRemoteDockMode === 'function') {
+      barView.setRemoteDockMode(false);
+    }
     if (controller.rootEl.parentNode !== slotEl) {
       slotEl.appendChild(controller.rootEl);
     }
@@ -231,13 +388,19 @@ export function startAddonStatusbar({
       domActivityTimer = null;
       if (disposed) return;
       mountToActiveBox();
-      controller.refreshSnapshot();
+      if (isApiConfigured()) {
+        controller.refreshSnapshot();
+      }
     }, DOM_DEBOUNCE_MS);
   }
 
   async function pollSessionsAndSnapshots() {
     if (disposed) return;
     mountToActiveBox();
+    if (!isApiConfigured()) {
+      controller.render();
+      return;
+    }
     const snapshotPromise = controller.refreshSnapshot();
     const sessionsPromise = api
       .post('/api/sessions', {})
@@ -255,7 +418,7 @@ export function startAddonStatusbar({
   }
 
   async function pollQuotaAndSettings() {
-    if (disposed) return;
+    if (disposed || !isApiConfigured()) return;
     try {
       const settings = await api.post('/api/settings/get', {});
       applySettingsPayload(settings);
@@ -315,7 +478,7 @@ export function startAddonStatusbar({
       }
       if (sawCascadeAttr) {
         mountToActiveBox();
-        controller.refreshSnapshot();
+        if (isApiConfigured()) controller.refreshSnapshot();
       } else if (sawExternalChange) {
         mountToActiveBox();
         triggerImmediateActivityRefresh();
@@ -346,6 +509,22 @@ export function startAddonStatusbar({
     }
   }
 
+  if (typeof hostPort.getSettings === 'function') {
+    try {
+      applyHostSettingsBridgeSnapshot(hostPort.getSettings(), { triggerPoll: false });
+    } catch {}
+  }
+  if (typeof hostPort.onSettingsChange === 'function') {
+    try {
+      const unsub = hostPort.onSettingsChange((nextSnap) => {
+        applyHostSettingsBridgeSnapshot(nextSnap, { triggerPoll: true });
+      });
+      if (typeof unsub === 'function') {
+        unsubscribeSettings = unsub;
+      }
+    } catch {}
+  }
+
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -353,6 +532,12 @@ export function startAddonStatusbar({
     if (domActivityTimer) clearTimeout(domActivityTimer);
     if (quotaPollTimer) clearInterval(quotaPollTimer);
     if (observer) observer.disconnect();
+    if (typeof unsubscribeSettings === 'function') {
+      try {
+        unsubscribeSettings();
+      } catch {}
+      unsubscribeSettings = null;
+    }
     doc.removeEventListener('focusin', onFocusIn);
     api.abortAll();
     controller.destroy();
@@ -381,8 +566,12 @@ export function startAddonStatusbar({
   hostPort.onDispose(dispose);
 
   mountToActiveBox();
-  pollQuotaAndSettings();
-  pollSessionsAndSnapshots();
+  if (isApiConfigured()) {
+    pollQuotaAndSettings();
+    pollSessionsAndSnapshots();
+  } else {
+    controller.render();
+  }
   scheduleSnapshotPoll();
   quotaPollTimer = setInterval(pollQuotaAndSettings, QUOTA_POLL_MS);
 

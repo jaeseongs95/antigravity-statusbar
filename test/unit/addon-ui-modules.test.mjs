@@ -215,6 +215,33 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   assert.ok(view.ctxBtn.textContent.includes('연결 중'));
   assert.equal(view.compactBtn.disabled, true);
 
+  // Unconfigured states: Desktop standby vs Remote Web setup hint + remote dock mode
+  view.renderSnapshot({
+    snap: null,
+    connected: false,
+    configured: false,
+    isRemoteWeb: false,
+    compacting: false,
+    hasSession: false,
+    compactPrompt: '',
+  });
+  assert.equal(view.ctxBtn.textContent, i18n.t().standby);
+
+  view.renderSnapshot({
+    snap: null,
+    connected: false,
+    configured: false,
+    isRemoteWeb: true,
+    compacting: false,
+    hasSession: false,
+    compactPrompt: '',
+  });
+  assert.equal(view.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+  view.setRemoteDockMode(true);
+  assert.equal(view.barEl.classList.contains('agy-remote-dock'), true);
+  view.setRemoteDockMode(false);
+  assert.equal(view.barEl.classList.contains('agy-remote-dock'), false);
+
   // Reconnecting state
   view.setReconnecting();
   assert.ok(view.ctxBtn.textContent.includes('재연결'));
@@ -415,6 +442,18 @@ test('TC-UNIT-04: popover-view.mjs renders 2 tabs, over-max presets, clamped lim
   rowBtns[0].click();
   rowBtns[1].click();
   assert.deepEqual(actions, [['toggle', 'p1', false, false], ['remove', 'p1', false]]);
+
+  // Desktop popover hides Remote Sidecar Connection card; Remote Web popover shows & localizes it
+  assert.equal(pop.remoteConnCard.classList.contains('hidden'), true);
+  const remotePop = createPopoverView({ doc, i18n, isRemoteWeb: true });
+  assert.equal(remotePop.remoteConnCard.classList.contains('hidden'), false);
+  assert.equal(remotePop.remoteUrlInput.type, 'text');
+  assert.equal(remotePop.remoteTokenInput.type, 'password');
+  remotePop.setRemoteConnectionStatus('Connected', false);
+  assert.equal(remotePop.remoteConnStatusEl.textContent, 'Connected');
+  assert.equal(remotePop.remoteConnStatusEl.classList.contains('err'), false);
+  remotePop.setRemoteConnectionStatus('Auth failed', true);
+  assert.equal(remotePop.remoteConnStatusEl.classList.contains('err'), true);
 });
 
 test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty edits, validates limit bounds, handles IME/keyboard, and cleans up on destroy', async () => {
@@ -598,6 +637,115 @@ test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty edits, 
   ctrl.destroy();
   assert.equal(doc.getListenerCount('keydown'), 0);
   assert.equal(doc.getListenerCount('pointerdown'), 0);
+});
+
+test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured and handles Remote Web connect/disconnect & validation', async () => {
+  const { doc } = createUnitMockDom();
+  const i18n = createInlineI18n('ko');
+  const barView = createBarView({ doc, i18n });
+  const popoverView = createPopoverView({ doc, i18n, isRemoteWeb: true });
+
+  let configured = false;
+  let connected = false;
+  let currentUrl = '';
+  let postCount = 0;
+  const savedEvents = [];
+  let clearCount = 0;
+  const api = {
+    isConfigured: () => configured,
+    isConnected: () => connected,
+    getBaseUrl: () => currentUrl,
+    abortAll() {},
+    async post() {
+      postCount += 1;
+      return {};
+    },
+  };
+
+  const sharedState = {
+    autoCompactEnabled: true,
+    compactPrompt: '',
+    defaultCustomLimit: null,
+    sessionLimits: new Map(),
+    quotaState: null,
+    fallbackSessionId: '',
+  };
+  const addons = createAddonRegistry({ api, onChange() {} });
+  const ctrl = createBarController({
+    doc,
+    api,
+    i18n,
+    addons,
+    barView,
+    popoverView,
+    sharedState,
+    isRemoteWeb: true,
+    onSettingsChanged() {},
+    onBurstRequested() {},
+    async onRemoteConnectionSave({ baseUrl, token }) {
+      savedEvents.push({ baseUrl, token });
+      if (baseUrl.startsWith('http://remote.')) {
+        return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
+      }
+      if (token === 'wrong-token-16-chars!') {
+        return { ok: false, status: 401, code: 'UNAUTHORIZED' };
+      }
+      configured = true;
+      connected = true;
+      currentUrl = baseUrl;
+      return { ok: true, baseUrl };
+    },
+    async onRemoteConnectionClear() {
+      clearCount += 1;
+      configured = false;
+      connected = false;
+      currentUrl = '';
+    },
+  });
+
+  // 1. Unconfigured Remote Web skips snapshot polling and opens Settings tab on ctxBtn click
+  ctrl.render();
+  await ctrl.refreshSnapshot();
+  assert.equal(postCount, 0, 'Unconfigured controller must issue zero API fetches');
+  assert.equal(barView.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+  barView.ctxBtn.click();
+  assert.equal(popoverView.popEl.classList.contains('hidden'), false);
+  assert.equal(popoverView.tabSettingsBtn.getAttribute('aria-selected'), 'true');
+
+  // 2. Invalid URL surfaces error feedback
+  popoverView.remoteUrlInput.value = 'http://remote.example:8080';
+  popoverView.remoteTokenInput.value = TEST_TOKEN;
+  popoverView.remoteConnectBtn.click();
+  await flush();
+  assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), true);
+  assert.equal(popoverView.remoteConnStatusEl.textContent, i18n.t().remoteErrInvalidUrl);
+
+  // 3. 401 unauthorized surfaces auth error
+  popoverView.remoteUrlInput.value = 'https://sidecar.example.com';
+  popoverView.remoteTokenInput.value = 'wrong-token-16-chars!';
+  popoverView.remoteConnectBtn.click();
+  await flush();
+  assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), true);
+  assert.equal(popoverView.remoteConnStatusEl.textContent, i18n.t().remoteErrUnauthorized);
+
+  // 4. Valid HTTPS connection succeeds and updates status; Disconnect clears connection
+  popoverView.remoteUrlInput.value = 'https://sidecar.example.com';
+  popoverView.remoteTokenInput.value = TEST_TOKEN;
+  popoverView.remoteConnectBtn.click();
+  await flush();
+  assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), false);
+  assert.ok(popoverView.remoteConnStatusEl.textContent.includes('https://sidecar.example.com'));
+  assert.equal(savedEvents.length, 3);
+
+  popoverView.remoteDisconnectBtn.click();
+  await flush();
+  assert.equal(clearCount, 1);
+  assert.equal(configured, false);
+  assert.equal(popoverView.remoteUrlInput.value, '');
+  assert.equal(popoverView.remoteTokenInput.value, '');
+  assert.equal(barView.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+
+  ctrl.destroy();
 });
 
 test('TC-UNIT-06: bootstrap.mjs picks visible/focused input box, ignores own mutations, and tears down cleanly', async () => {
