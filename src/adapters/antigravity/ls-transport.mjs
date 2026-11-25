@@ -648,13 +648,65 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     return { stepOffset: 0, steps: [] };
   }
 
+  const QUOTA_EXPIRED_MIN_REFETCH_MS = 3_000;
+  let quotaLastFetchedAt = 0;
+
+  function hasExpiredQuotaBucket(rawData, now) {
+    const container = rawData?.response ?? rawData;
+    const groups = Array.isArray(container?.groups) ? container.groups : [];
+    for (const group of groups) {
+      const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
+      for (const b of buckets) {
+        const rawRemaining =
+          b?.remaining && b.remaining.case === 'remainingFraction'
+            ? b.remaining.value
+            : b?.remainingFraction;
+        const frac = Number(rawRemaining);
+        if (Number.isFinite(frac) && frac >= 1) continue;
+        let resetMs = Number.NaN;
+        const rt = b?.resetTime;
+        if (typeof rt === 'string' && rt.trim()) {
+          resetMs = Date.parse(rt.trim());
+        } else if (rt && typeof rt === 'object' && Object.hasOwn(rt, 'seconds')) {
+          const secs = Number(rt.seconds);
+          const nanos = Number(rt.nanos ?? 0);
+          if (
+            rt.seconds !== null &&
+            rt.seconds !== undefined &&
+            String(rt.seconds).trim() !== '' &&
+            Number.isFinite(secs) &&
+            secs >= 0
+          ) {
+            resetMs = secs * 1000 + (Number.isFinite(nanos) ? Math.floor(nanos / 1e6) : 0);
+          }
+        }
+        if (Number.isFinite(resetMs) && resetMs <= now) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /**
-   * Fetches quota summary with 15s TTL cache and exponential backoff on 429.
+   * Fetches quota summary with 15s TTL cache, automatic bypass when a cached bucket's resetTime
+   * has elapsed (throttled by QUOTA_EXPIRED_MIN_REFETCH_MS), optional forceRefresh, and exponential backoff on 429.
    */
-  async function getQuotaSummaryRaw() {
+  async function getQuotaSummaryRaw(opts = {}) {
     const now = clock();
-    if (quotaCache && now < quotaCacheExpiresAt) {
-      return { data: quotaCache, stale: false, fetchedAt: quotaCacheExpiresAt - QUOTA_TTL_MS };
+    const forceRefresh = Boolean(opts && opts.forceRefresh);
+    const cacheValid = Boolean(quotaCache && now < quotaCacheExpiresAt);
+    const expiredBucketDue =
+      cacheValid &&
+      now - quotaLastFetchedAt >= QUOTA_EXPIRED_MIN_REFETCH_MS &&
+      hasExpiredQuotaBucket(quotaCache, now);
+
+    if (cacheValid && !forceRefresh && !expiredBucketDue) {
+      return {
+        data: quotaCache,
+        stale: false,
+        fetchedAt: quotaLastFetchedAt || quotaCacheExpiresAt - QUOTA_TTL_MS,
+      };
     }
     if (now < quotaNextAllowedAt) {
       return { data: quotaCache, stale: true, fetchedAt: now };
@@ -663,6 +715,7 @@ export function createLsTransport({ lsAddress, csrfToken = '', clock = () => Dat
     try {
       const resp = await callUnaryRpc('RetrieveUserQuotaSummary', {});
       quotaCache = resp;
+      quotaLastFetchedAt = now;
       quotaCacheExpiresAt = now + QUOTA_TTL_MS;
       quotaBackoffMs = QUOTA_TTL_MS;
       quotaNextAllowedAt = 0;

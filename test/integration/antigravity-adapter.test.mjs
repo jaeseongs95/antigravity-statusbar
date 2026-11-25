@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { installPlugin, parseArgs } from '../../scripts/install-plugin.mjs';
 import { createAntigravityCompactionAdapter, resolveSafeAgentApiExe } from '../../src/adapters/antigravity/compaction-adapter.mjs';
 import { createLsTransport, encodeConnectFrame, parseLoopbackLsAddress } from '../../src/adapters/antigravity/ls-transport.mjs';
-import { resolvePreferredSidecarPort, startSidecar } from '../../src/adapters/antigravity/sidecar-entry.mjs';
+import { createSidecarServer, resolvePreferredSidecarPort, startSidecar } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 import {
   extractLatestUsageMetadata,
   extractTailCheckpoint,
@@ -1075,4 +1075,134 @@ test('TC-ADAPTER-SUBAGENT-MODEL (v3.3.0): mapSessionTelemetry and statusbar-serv
   const mainSnap = await service.getSessionSnapshot('sess-main-1');
   assert.equal(mainSnap.isSubagent, false);
   assert.equal(mainSnap.modelName, 'Claude Opus 5.5');
+});
+
+test('TC-ADAPTER-QUOTA-REFRESH (v3.3.0): ls-transport bypasses 15s quotaCache on expired resetTime or forceRefresh and /api/quota forwards forceRefresh', async () => {
+  let rpcCount = 0;
+  let nowMs = Date.parse('2026-11-25T08:00:00Z');
+  const resetAtIso = '2026-11-25T08:00:10Z';
+  const nextResetIso = '2026-11-25T13:00:00Z';
+
+  const mockLs = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (req.url?.includes('RetrieveUserQuotaSummary')) {
+        rpcCount += 1;
+        const payload =
+          rpcCount === 1
+            ? {
+                response: {
+                  groups: [
+                    {
+                      displayName: 'Gemini Models',
+                      buckets: [
+                        {
+                          window: '5h',
+                          remainingFraction: 0,
+                          resetTime: resetAtIso,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }
+            : {
+                response: {
+                  groups: [
+                    {
+                      displayName: 'Gemini Models',
+                      buckets: [
+                        {
+                          window: '5h',
+                          remainingFraction: 1,
+                          resetTime: nextResetIso,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+
+  await new Promise((resolve) => mockLs.listen(0, '127.0.0.1', resolve));
+  const lsPort = mockLs.address().port;
+
+  let sidecar = null;
+  try {
+    const transport = createLsTransport({
+      lsAddress: `127.0.0.1:${lsPort}`,
+      csrfToken: 'csrf-quota-refresh',
+      clock: () => nowMs,
+    });
+
+    // 1. Initial fetch populates cache with 0% bucket expiring at +10s
+    const r1 = await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 1);
+    assert.equal(r1.data.response.groups[0].buckets[0].remainingFraction, 0);
+
+    // 2. At +2s (before resetTime & within 15s TTL) -> served from cache
+    nowMs += 2_000;
+    const r2 = await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 1);
+    assert.equal(r2.data.response.groups[0].buckets[0].remainingFraction, 0);
+
+    // 3. At +11s (still within 15s TTL, but resetTime has passed and >=3s since last fetch) -> auto bypasses cache!
+    nowMs += 9_000;
+    const r3 = await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 2, 'Expired bucket resetTime must bypass 15s quotaCache');
+    assert.equal(r3.data.response.groups[0].buckets[0].remainingFraction, 1);
+
+    // 4. At +12s (fresh 100% bucket, future resetTime) -> served from cache
+    nowMs += 1_000;
+    await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 2);
+
+    // 5. Explicit forceRefresh: true bypasses cache immediately
+    nowMs += 500;
+    await transport.getQuotaSummaryRaw({ forceRefresh: true });
+    assert.equal(rpcCount, 3, 'forceRefresh: true must bypass 15s quotaCache');
+
+    // 6. Sidecar POST /api/quota forwards { forceRefresh: true } cleanly
+    const seenOpts = [];
+    const token = 'quota-refresh-test-token-32chars!';
+    sidecar = createSidecarServer({
+      token,
+      service: {
+        listSessions: async () => ({ sessions: [], fetchedAt: nowMs }),
+        getSessionSnapshot: async () => ({}),
+        getQuotaSummary: async (opts) => {
+          seenOpts.push(opts);
+          return { available: true, groups: [], stale: false, fetchedAt: nowMs };
+        },
+        getSettings: async () => ({}),
+        updateSettings: async () => ({}),
+        requestCompaction: async () => ({ accepted: true }),
+      },
+    });
+    const { url } = await sidecar.listen();
+    const resNormal = await fetch(`${url}/api/quota`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-statusbar-token': token },
+      body: JSON.stringify({}),
+    });
+    assert.equal(resNormal.status, 200);
+    const resForce = await fetch(`${url}/api/quota`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-statusbar-token': token },
+      body: JSON.stringify({ forceRefresh: true }),
+    });
+    assert.equal(resForce.status, 200);
+    assert.deepEqual(seenOpts, [undefined, { forceRefresh: true }]);
+  } finally {
+    if (sidecar) await sidecar.close();
+    mockLs.closeAllConnections?.();
+    await new Promise((resolve) => mockLs.close(resolve));
+  }
 });

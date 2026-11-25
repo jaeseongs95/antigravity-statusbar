@@ -463,6 +463,34 @@ test('TC-UNIT-03b (v3.3.0): localized quota tooltip timestamps, 5h HH:mm local r
   );
   assert.equal(view.quota5hEl.textContent, '5시간 한도 77%');
 
+  // Neon model names without explicit "Gemini" prefix must still match Gemini Models group (never fall back to Claude 0%)
+  const neonMultiGroup = {
+    available: true,
+    stale: false,
+    groups: [
+      {
+        label: 'Gemini Models',
+        buckets: [
+          { window: '5h', remainingPercent: 100, resetTime: iso5h },
+          { window: 'weekly', remainingPercent: 80, resetTime: isoWeekly },
+        ],
+      },
+      {
+        label: 'Claude and GPT models',
+        buckets: [
+          { window: '5h', remainingPercent: 0, resetTime: iso5h },
+          { window: 'weekly', remainingPercent: 58, resetTime: isoWeekly },
+        ],
+      },
+    ],
+  };
+  view.renderQuota(neonMultiGroup, 'Neon High');
+  assert.equal(view.quota5hEl.textContent, `5시간 한도 100% (${toExpectedHHMM(iso5h)})`);
+  assert.equal(view.quotaEl.textContent, '주간한도 80%');
+  view.renderQuota(neonMultiGroup, 'Neon (High)');
+  assert.equal(view.quota5hEl.textContent, `5시간 한도 100% (${toExpectedHHMM(iso5h)})`);
+  assert.equal(view.quotaEl.textContent, '주간한도 80%');
+
   // 3. Subagent model pill visible on subagent views when modelName is present, hidden on main or empty model
   assert.ok(view.modelEl, 'createBarView must expose modelEl');
   view.renderSnapshot({
@@ -591,10 +619,24 @@ test('TC-UNIT-04: popover-view.mjs renders 2 tabs, over-max presets, clamped lim
   rowBtns[1].click();
   assert.deepEqual(actions, [['toggle', 'p1', false, false], ['remove', 'p1', false]]);
 
-  // Desktop popover hides Remote Sidecar Connection card; Remote Web popover shows & localizes it
+  // Desktop popover must NOT attach or show Remote Sidecar Connection card; Remote Web popover attaches & localizes it
   assert.equal(pop.remoteConnCard.classList.contains('hidden'), true);
+  assert.equal(pop.remoteConnCard.style.display, 'none');
+  assert.equal(pop.remoteConnCard.parentNode, null, 'Desktop popover must not attach remoteConnCard to panelSettings');
+  assert.equal(
+    pop.popEl.textContent.includes(i18n.t().remoteConnTitle),
+    false,
+    'Desktop popover text must not contain Remote Sidecar Connection card',
+  );
+  assert.equal(
+    STATUSBAR_STYLES.includes('.agy-inline-card.hidden'),
+    true,
+    'STATUSBAR_STYLES must explicitly hide .agy-inline-card.hidden',
+  );
   const remotePop = createPopoverView({ doc, i18n, isRemoteWeb: true });
   assert.equal(remotePop.remoteConnCard.classList.contains('hidden'), false);
+  assert.ok(remotePop.remoteConnCard.parentNode, 'Remote Web popover must attach remoteConnCard to panelSettings');
+  assert.equal(remotePop.popEl.textContent.includes(i18n.t().remoteConnTitle), true);
   assert.equal(remotePop.remoteUrlInput.type, 'text');
   assert.equal(remotePop.remoteTokenInput.type, 'password');
   remotePop.setRemoteConnectionStatus('Connected', false);
@@ -985,6 +1027,7 @@ test('TC-UNIT-06: bootstrap.mjs picks visible/focused input box, ignores own mut
   assert.equal(styleRemoved, true);
   assert.equal(win.statusbarAddons, undefined);
   assert.equal(doc.getListenerCount('focusin'), 0);
+  assert.equal(doc.getListenerCount('visibilitychange'), 0);
   // Idempotent second dispose
   runtime.dispose();
 
@@ -1014,6 +1057,163 @@ test('TC-UNIT-06: bootstrap.mjs picks visible/focused input box, ignores own mut
   assert.equal(reloaded, 1);
   standbyDisposers[0]();
   assert.equal(slotEl.parentNode, null);
+});
+
+test('TC-UNIT-06c (v3.3.0): bootstrap.mjs force-refreshes /api/quota on click, visibilitychange/focus, and expired resetTime, and cleans up listeners on dispose', async () => {
+  const { doc, El } = createUnitMockDom();
+  doc.hidden = false;
+  const viewEl = new El('div', doc);
+  viewEl.setAttribute('data-testid', 'conversation-view');
+  viewEl.setAttribute('data-cascade-id', 'sess-quota-1');
+  const boxEl = new El('div', doc);
+  boxEl.setAttribute('data-testid', 'agent-input-box');
+  viewEl.appendChild(boxEl);
+  doc.body.appendChild(viewEl);
+
+  const slotEl = new El('div', doc);
+  slotEl.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
+  const hostPort = {
+    pluginId: 'antigravity-statusbar',
+    mountSlot(parentEl) {
+      parentEl.appendChild(slotEl);
+      return slotEl;
+    },
+    unmountSlot() {
+      slotEl.remove();
+      return true;
+    },
+    injectStyle() {},
+    removeStyle() { return true; },
+    onDispose() {},
+  };
+
+  const quotaCalls = [];
+  let quotaReturnCount = 0;
+  const pastIso = new Date(Date.now() - 60_000).toISOString();
+  const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+  const api = {
+    isConnected: () => true,
+    isConfigured: () => true,
+    abortAll() {},
+    async post(pathname, body) {
+      if (pathname === '/api/quota') {
+        quotaCalls.push(body);
+        quotaReturnCount += 1;
+        if (quotaReturnCount === 1) {
+          return {
+            available: true,
+            stale: false,
+            groups: [
+              {
+                label: 'Gemini Models',
+                buckets: [{ window: '5h', remainingPercent: 0, resetTime: pastIso }],
+              },
+            ],
+          };
+        }
+        return {
+          available: true,
+          stale: false,
+          groups: [
+            {
+              label: 'Gemini Models',
+              buckets: [{ window: '5h', remainingPercent: 100, resetTime: futureIso }],
+            },
+          ],
+        };
+      }
+      if (pathname === '/api/snapshot') {
+        return {
+          sessionId: 'sess-quota-1',
+          usedTokens: 10_000,
+          effectiveLimit: 200_000,
+          maxContextTokens: 200_000,
+          usagePercent: 5,
+          modelName: 'Neon High',
+          compaction: { inProgress: false, status: 'idle' },
+        };
+      }
+      return {};
+    },
+  };
+
+  const winListeners = new Map();
+  const win = {
+    location: { reload() {} },
+    addEventListener(type, fn) {
+      if (!winListeners.has(type)) winListeners.set(type, new Set());
+      winListeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      winListeners.get(type)?.delete(fn);
+    },
+    dispatchEvent(evt) {
+      for (const fn of winListeners.get(evt.type) || []) fn(evt);
+    },
+  };
+
+  const runtime = startAddonStatusbar({
+    hostPort,
+    api,
+    i18n: createInlineI18n('ko'),
+    addons: createAddonRegistry({ api, onChange() {} }),
+    createBarViewFn: createBarView,
+    createPopoverViewFn: createPopoverView,
+    createBarControllerFn: createBarController,
+    doc,
+    win,
+    cssText: STATUSBAR_STYLES,
+    styleId: STATUSBAR_STYLE_ID,
+    pollConfig: {
+      normalPollMs: 40,
+      quotaPollMs: 60_000,
+      quotaExpiredRetryMs: 10,
+      quotaFocusThrottleMs: 10,
+    },
+  });
+
+  try {
+    await flush();
+    // Wait for 1 normalPoll tick so expired resetTime triggers automatic forceRefresh: true
+    await new Promise((r) => setTimeout(r, 80));
+    await flush();
+    assert.ok(
+      quotaCalls.some((b) => b && b.forceRefresh === true),
+      `Expired quota bucket must auto-trigger forceRefresh: true, got ${JSON.stringify(quotaCalls)}`,
+    );
+    const metricsAfterAuto = slotEl.querySelectorAll('.agy-inline-metric');
+    assert.ok(
+      metricsAfterAuto[1].textContent.includes('5시간 한도 100%'),
+      `5h quota should refresh from 0% to 100% after reset, got "${metricsAfterAuto[1].textContent}"`,
+    );
+
+    // Click on 5h quota element triggers immediate forceRefresh: true
+    const beforeClick = quotaCalls.length;
+    metricsAfterAuto[1].click();
+    await flush();
+    assert.equal(quotaCalls.length, beforeClick + 1);
+    assert.deepEqual(quotaCalls[quotaCalls.length - 1], { forceRefresh: true });
+
+    // Window focus & visibilitychange trigger forceRefresh: true after throttle
+    await new Promise((r) => setTimeout(r, 20));
+    const beforeFocus = quotaCalls.length;
+    win.dispatchEvent({ type: 'focus' });
+    await flush();
+    assert.equal(quotaCalls.length, beforeFocus + 1);
+    assert.deepEqual(quotaCalls[quotaCalls.length - 1], { forceRefresh: true });
+
+    await new Promise((r) => setTimeout(r, 20));
+    const beforeVis = quotaCalls.length;
+    doc.dispatchEvent({ type: 'visibilitychange' });
+    await flush();
+    assert.equal(quotaCalls.length, beforeVis + 1);
+    assert.deepEqual(quotaCalls[quotaCalls.length - 1], { forceRefresh: true });
+  } finally {
+    runtime.dispose();
+  }
+
+  assert.equal(doc.getListenerCount('visibilitychange'), 0);
+  assert.equal(winListeners.get('focus')?.size || 0, 0);
 });
 
 test('TC-UNIT-06b: subagent & side-question views stay strictly pinned to their own data-cascade-id without fallback fluctuation, support sibling/nested/pointerdown switching, and fail closed when unattributed', async () => {

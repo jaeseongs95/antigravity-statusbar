@@ -646,6 +646,7 @@ export function createBarController({
     renderAddons();
 
     const configured = isApiConfigured();
+    const isSubagentView = Boolean(snap?.isSubagent || isIsolatedSubagentView(state.viewEl));
     barView.renderSnapshot({
       snap,
       connected: api.isConnected(),
@@ -654,6 +655,7 @@ export function createBarController({
       compacting: state.compacting,
       hasSession: Boolean(getSessionId()),
       compactPrompt: sharedState.compactPrompt,
+      isSubagent: isSubagentView,
     });
     if (configured && (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected()))) {
       barView.setReconnecting();

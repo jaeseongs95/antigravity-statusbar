@@ -273,6 +273,9 @@ export function createPopoverView({ doc, i18n, presets, isRemoteWeb = false }) {
 
   const remoteConnCard = doc.createElement('div');
   remoteConnCard.className = isRemoteWeb ? 'agy-inline-card' : 'agy-inline-card hidden';
+  if (!isRemoteWeb && remoteConnCard.style) {
+    remoteConnCard.style.display = 'none';
+  }
   const remoteConnTitle = doc.createElement('div');
   remoteConnTitle.className = 'agy-inline-pop-subtitle';
   remoteConnTitle.textContent = i18n.t().remoteConnTitle;
@@ -337,7 +340,9 @@ export function createPopoverView({ doc, i18n, presets, isRemoteWeb = false }) {
   globalLimitRow.appendChild(openGlobalModalSettingsBtn);
   globalLimitCard.appendChild(globalLimitRow);
 
-  panelSettings.appendChild(remoteConnCard);
+  if (isRemoteWeb) {
+    panelSettings.appendChild(remoteConnCard);
+  }
   panelSettings.appendChild(globalLimitCard);
   panelSettings.appendChild(compactionCard);
   panelSettings.appendChild(addonSection);

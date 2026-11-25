@@ -31,6 +31,8 @@ export function startAddonStatusbar({
   const NORMAL_POLL_MS = pollConfig.normalPollMs || 1000;
   const BURST_POLL_MS = pollConfig.burstPollMs || 400;
   const QUOTA_POLL_MS = pollConfig.quotaPollMs || 15000;
+  const QUOTA_EXPIRED_RETRY_MS = pollConfig.quotaExpiredRetryMs || 5000;
+  const QUOTA_FOCUS_THROTTLE_MS = pollConfig.quotaFocusThrottleMs || 3000;
   const MAX_BURST_MS = pollConfig.maxBurstMs || 20000;
   const DOM_DEBOUNCE_MS = pollConfig.domDebounceMs || 150;
 
@@ -39,6 +41,9 @@ export function startAddonStatusbar({
   let snapshotPollTimer = null;
   let quotaPollTimer = null;
   let domActivityTimer = null;
+  let quotaInFlight = false;
+  let lastQuotaRefreshAt = 0;
+  let lastExpiredQuotaRetryAt = 0;
   let observer = null;
   let unsubscribeSettings = null;
   let currentSlotEl = null;
@@ -508,12 +513,49 @@ export function startAddonStatusbar({
     }, DOM_DEBOUNCE_MS);
   }
 
+  function hasExpiredQuotaBucket(quotaState, now) {
+    if (!quotaState || !quotaState.available || !Array.isArray(quotaState.groups)) return false;
+    for (const g of quotaState.groups) {
+      const buckets = Array.isArray(g?.buckets) ? g.buckets : [];
+      for (const b of buckets) {
+        if (typeof b?.remainingPercent !== 'number' || b.remainingPercent >= 100) continue;
+        if (typeof b?.resetTime !== 'string' || !b.resetTime.trim()) continue;
+        const resetMs = Date.parse(b.resetTime.trim());
+        if (Number.isFinite(resetMs) && resetMs <= now) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async function refreshQuotaNow({ forceRefresh = false } = {}) {
+    if (disposed || !isApiConfigured() || quotaInFlight) return;
+    quotaInFlight = true;
+    lastQuotaRefreshAt = Date.now();
+    try {
+      const payload = forceRefresh ? { forceRefresh: true } : {};
+      sharedState.quotaState = await api.post('/api/quota', payload);
+      controller.render();
+    } catch {} finally {
+      quotaInFlight = false;
+    }
+  }
+
   async function pollSessionsAndSnapshots() {
     if (disposed) return;
     mountToActiveBox();
     if (!isApiConfigured()) {
       controller.render();
       return;
+    }
+    const now = Date.now();
+    if (
+      hasExpiredQuotaBucket(sharedState.quotaState, now) &&
+      now - lastExpiredQuotaRetryAt >= QUOTA_EXPIRED_RETRY_MS
+    ) {
+      lastExpiredQuotaRetryAt = now;
+      refreshQuotaNow({ forceRefresh: true });
     }
     const snapshotPromise = controller.refreshSnapshot();
     const sessionsPromise = api
@@ -546,10 +588,8 @@ export function startAddonStatusbar({
       applySettingsPayload(settings);
       controller.render();
     } catch {}
-    try {
-      sharedState.quotaState = await api.post('/api/quota', {});
-      controller.render();
-    } catch {}
+    const shouldForce = hasExpiredQuotaBucket(sharedState.quotaState, Date.now());
+    await refreshQuotaNow({ forceRefresh: shouldForce });
   }
 
   function isOwnNode(node) {
@@ -611,8 +651,30 @@ export function startAddonStatusbar({
       mountToActiveBox();
     }
   };
+  const onQuotaFocusOrVisible = () => {
+    if (disposed || !isApiConfigured()) return;
+    if (doc && doc.hidden === true) return;
+    const now = Date.now();
+    if (now - lastQuotaRefreshAt < QUOTA_FOCUS_THROTTLE_MS) return;
+    refreshQuotaNow({ forceRefresh: true });
+  };
+  const onQuotaClick = () => {
+    if (disposed || !isApiConfigured()) return;
+    refreshQuotaNow({ forceRefresh: true });
+  };
+
   doc.addEventListener('focusin', onFocusIn);
   doc.addEventListener('pointerdown', onPointerDown);
+  doc.addEventListener('visibilitychange', onQuotaFocusOrVisible);
+  if (win && typeof win.addEventListener === 'function') {
+    win.addEventListener('focus', onQuotaFocusOrVisible);
+  }
+  if (barView.quota5hEl && typeof barView.quota5hEl.addEventListener === 'function') {
+    barView.quota5hEl.addEventListener('click', onQuotaClick);
+  }
+  if (barView.quotaEl && typeof barView.quotaEl.addEventListener === 'function') {
+    barView.quotaEl.addEventListener('click', onQuotaClick);
+  }
 
   if (typeof MutationObserver !== 'undefined' && doc.body) {
     observer = new MutationObserver((mutations) => {
@@ -690,6 +752,16 @@ export function startAddonStatusbar({
     }
     doc.removeEventListener('focusin', onFocusIn);
     doc.removeEventListener('pointerdown', onPointerDown);
+    doc.removeEventListener('visibilitychange', onQuotaFocusOrVisible);
+    if (win && typeof win.removeEventListener === 'function') {
+      win.removeEventListener('focus', onQuotaFocusOrVisible);
+    }
+    if (barView.quota5hEl && typeof barView.quota5hEl.removeEventListener === 'function') {
+      barView.quota5hEl.removeEventListener('click', onQuotaClick);
+    }
+    if (barView.quotaEl && typeof barView.quotaEl.removeEventListener === 'function') {
+      barView.quotaEl.removeEventListener('click', onQuotaClick);
+    }
     api.abortAll();
     controller.destroy();
     addons.clear();

@@ -353,7 +353,9 @@ export function createSidecarServer({
         return;
       }
       if (pathname === '/api/quota') {
-        const result = await service.getQuotaSummary();
+        const result = await service.getQuotaSummary(
+          body && body.forceRefresh === true ? { forceRefresh: true } : undefined,
+        );
         sendJson(res, 200, result, corsHeaders);
         return;
       }

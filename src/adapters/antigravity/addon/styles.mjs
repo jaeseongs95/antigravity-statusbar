@@ -45,6 +45,28 @@ export const STATUSBAR_STYLES = `
   gap: 5px;
   white-space: nowrap;
 }
+.agy-inline-quota-refreshable {
+  cursor: pointer;
+}
+.agy-inline-quota-refreshable:hover {
+  color: rgba(255, 255, 255, 0.92);
+}
+.agy-inline-model-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(78, 161, 255, 0.14);
+  border: 1px solid rgba(78, 161, 255, 0.28);
+  color: #b7d7ff;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
 .agy-inline-metric-btn {
   display: inline-flex;
   align-items: center;
@@ -343,6 +365,9 @@ export const STATUSBAR_STYLES = `
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.agy-inline-card.hidden {
+  display: none;
 }
 .agy-inline-switch-wrap {
   display: inline-flex;

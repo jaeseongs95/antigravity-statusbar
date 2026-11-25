@@ -143,6 +143,7 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
 
   const token = 'real-addon-e2e-token-32chars-valid';
   const settingsUpdates = [];
+  const quotaRequests = [];
   let failSnapshots = false;
   let sessionLimit = 256_000;
   let defaultLimit = 200_000;
@@ -192,20 +193,23 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
           disabledRuntimeAddonIds: [],
         };
       },
-      getQuotaSummary: async () => ({
-        available: true,
-        stale: false,
-        groups: [
-          {
-            label: 'Gemini Models',
-            buckets: [
-              { window: '5h', remainingPercent: 85, resetTime: '2026-11-23T14:00:00Z' },
-              { window: 'weekly', remainingPercent: 60, resetTime: '2026-11-30T00:00:00Z' },
-            ],
-          },
-        ],
-        fetchedAt: Date.now(),
-      }),
+      getQuotaSummary: async (opts) => {
+        quotaRequests.push(opts || null);
+        return {
+          available: true,
+          stale: false,
+          groups: [
+            {
+              label: 'Gemini Models',
+              buckets: [
+                { window: '5h', remainingPercent: 85, resetTime: '2026-11-23T14:00:00Z' },
+                { window: 'weekly', remainingPercent: 60, resetTime: '2026-11-30T00:00:00Z' },
+              ],
+            },
+          ],
+          fetchedAt: Date.now(),
+        };
+      },
       getSettings: async () => ({
         locale: 'ko',
         autoCompact: true,
@@ -506,6 +510,17 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
       `Shadow DOM quota tooltip must not expose raw UTC ISO strings, got "${quotaTooltip}"`,
     );
 
+    // Click 5h quota metric in Shadow DOM -> triggers forceRefresh: true request to /api/quota
+    await evalExpr(`(() => {
+      const metrics = Array.from(window.__e2eShadows.root.querySelectorAll('.agy-inline-metric'));
+      metrics[metrics.length - 2].click();
+    })()`);
+    await new Promise((r) => setTimeout(r, 250));
+    assert.ok(
+      quotaRequests.some((req) => req && req.forceRefresh === true),
+      `Clicking 5h quota must send forceRefresh: true, got ${JSON.stringify(quotaRequests)}`,
+    );
+
     // Verify window.statusbarAddons is non-writable (P1)
     const writableDesc = await evalExpr("Object.getOwnPropertyDescriptor(window, 'statusbarAddons')?.writable");
     assert.equal(writableDesc, false, 'window.statusbarAddons must be non-writable');
@@ -538,6 +553,20 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
     })()`);
     await waitFor("window.__e2eShadows.popover.querySelector('.agy-inline-pop-feedback')?.textContent?.includes('저장')");
     assert.deepEqual(settingsUpdates[0], { sessionLimit: { sessionId: 'sess-e2e-1', limit: 32_000 } });
+
+    // 2b. Desktop Settings tab must NOT render or display Remote Sidecar Connection card in real Chromium Shadow DOM
+    await evalExpr(`(() => {
+      const settingsTab = Array.from(window.__e2eShadows.popover.querySelectorAll('button[role="tab"]'))
+        .find((b) => b.textContent === '설정');
+      settingsTab.click();
+    })()`);
+    await waitFor("Array.from(window.__e2eShadows.popover.querySelectorAll('button[role=\"tab\"]')).find((b) => b.textContent === '설정')?.getAttribute('aria-selected') === 'true'");
+    const desktopSettingsText = await evalExpr("window.__e2eShadows.popover.textContent");
+    assert.equal(
+      desktopSettingsText.includes('원격 Sidecar 연결'),
+      false,
+      `Desktop Settings tab must NEVER render Remote Sidecar Connection card, got "${desktopSettingsText}"`,
+    );
 
     // 3. ISS-10: Open Global Limit Modal, focus model Delete button, wait >2.2s across live polls -> focus MUST stay on the same button!
     await evalExpr(`(() => {

@@ -15,6 +15,7 @@ export function createInlineI18n(initialLocale = 'ko') {
       quota5h: '5h Limit',
       quotaWeekly: 'Weekly',
       quotaOther: 'Quota',
+      quotaReset: 'Reset',
       softLimit: 'Limit Reached',
       autoCompacting: 'Auto-compacting…',
       autoCompactDeferred: 'Compact pending',
@@ -113,6 +114,7 @@ export function createInlineI18n(initialLocale = 'ko') {
       quota5h: '5시간 한도',
       quotaWeekly: '주간한도',
       quotaOther: '할당량',
+      quotaReset: '초기화',
       softLimit: '한도 도달',
       autoCompacting: '자동 컴팩션 중…',
       autoCompactDeferred: '압축 대기',
@@ -252,6 +254,36 @@ export function createInlineI18n(initialLocale = 'ko') {
     return rawLabel;
   }
 
+  function parseValidTimestamp(raw) {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const ms = Date.parse(trimmed);
+    if (!Number.isFinite(ms)) return null;
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return null;
+    return d;
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function formatLocalTimeHHMM(raw) {
+    const d = parseValidTimestamp(raw);
+    if (!d) return '';
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function formatLocalDateTime(raw) {
+    if (typeof raw !== 'string') return '';
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    const d = parseValidTimestamp(trimmed);
+    if (!d) return trimmed;
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
   return Object.freeze({
     getLocale,
     setLocale,
@@ -259,5 +291,7 @@ export function createInlineI18n(initialLocale = 'ko') {
     formatTokens,
     formatTemplate,
     localizeBreakdownLabel,
+    formatLocalTimeHHMM,
+    formatLocalDateTime,
   });
 }

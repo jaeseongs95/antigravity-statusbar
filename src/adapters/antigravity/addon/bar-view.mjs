@@ -24,6 +24,10 @@ export function createBarView({ doc, i18n }) {
   const leftEl = doc.createElement('div');
   leftEl.className = 'agy-inline-left';
 
+  const modelEl = doc.createElement('span');
+  modelEl.className = 'agy-inline-model-pill';
+  modelEl.style.display = 'none';
+
   const ctxBtn = doc.createElement('button');
   ctxBtn.type = 'button';
   ctxBtn.className = 'agy-inline-metric-btn';
@@ -58,7 +62,7 @@ export function createBarView({ doc, i18n }) {
   sep2.textContent = '·';
 
   const quota5hEl = doc.createElement('span');
-  quota5hEl.className = 'agy-inline-metric';
+  quota5hEl.className = 'agy-inline-metric agy-inline-quota-refreshable';
   quota5hEl.textContent = `${i18n.t().quota5h} --`;
 
   const sep3 = doc.createElement('span');
@@ -66,9 +70,10 @@ export function createBarView({ doc, i18n }) {
   sep3.textContent = '·';
 
   const quotaEl = doc.createElement('span');
-  quotaEl.className = 'agy-inline-metric';
+  quotaEl.className = 'agy-inline-metric agy-inline-quota-refreshable';
   quotaEl.textContent = `${i18n.t().quotaWeekly} --`;
 
+  leftEl.appendChild(modelEl);
   leftEl.appendChild(ctxBtn);
   leftEl.appendChild(softBadgeEl);
   leftEl.appendChild(sep1);
@@ -115,6 +120,7 @@ export function createBarView({ doc, i18n }) {
     compacting,
     hasSession,
     compactPrompt,
+    isSubagent = false,
   }) {
     const tr = i18n.t();
     const isBackendCompacting = Boolean(snap?.compaction?.inProgress);
@@ -123,6 +129,25 @@ export function createBarView({ doc, i18n }) {
     setText(compactBtn, isCompactingNow ? tr.compacting : tr.compact);
     compactBtn.title = compactPrompt ? `/compact ${compactPrompt}` : '/compact';
     settingsBtn.setAttribute('aria-label', tr.settingsTitle);
+
+    const rawModelName = typeof snap?.modelName === 'string' ? snap.modelName.trim() : '';
+    const showSubagentModel = Boolean((isSubagent || snap?.isSubagent) && rawModelName);
+    if (showSubagentModel) {
+      const modelLabel = `${tr.model}: ${rawModelName}`;
+      modelEl.style.display = '';
+      setText(modelEl, rawModelName);
+      modelEl.title = modelLabel;
+      modelEl.setAttribute('aria-label', modelLabel);
+    } else {
+      modelEl.style.display = 'none';
+      setText(modelEl, '');
+      modelEl.title = '';
+      if (typeof modelEl.removeAttribute === 'function') {
+        modelEl.removeAttribute('aria-label');
+      } else if (typeof modelEl.setAttribute === 'function') {
+        modelEl.setAttribute('aria-label', '');
+      }
+    }
 
     if (!snap) {
       if (!configured) {
@@ -207,7 +232,7 @@ export function createBarView({ doc, i18n }) {
     const lowerModel = typeof modelName === 'string' ? modelName.toLowerCase() : '';
     if (!lowerModel) return groups;
     const isThirdParty = /(?:^|[^a-z0-9])(?:claude|gpt|openai|o1|o3|o4)(?:$|[^a-z0-9])/.test(lowerModel);
-    const isGemini = /(?:^|[^a-z0-9])(?:gemini|orchestrator)(?:$|[^a-z0-9])/.test(lowerModel);
+    const isGemini = /(?:^|[^a-z0-9])(?:gemini|neon|orchestrator)(?:$|[^a-z0-9])/.test(lowerModel);
     if (isThirdParty) {
       const matched = groups.filter((g) =>
         /(?:^|[^a-z0-9])(?:claude|gpt|3p|openai)(?:$|[^a-z0-9])/i.test(String(g?.label || '')),
@@ -215,7 +240,7 @@ export function createBarView({ doc, i18n }) {
       if (matched.length > 0) return matched;
     } else if (isGemini) {
       const matched = groups.filter((g) =>
-        /(?:^|[^a-z0-9])gemini(?:$|[^a-z0-9])/i.test(String(g?.label || '')),
+        /(?:^|[^a-z0-9])(?:gemini|neon)(?:$|[^a-z0-9])/i.test(String(g?.label || '')),
       );
       if (matched.length > 0) return matched;
     }
@@ -241,7 +266,7 @@ export function createBarView({ doc, i18n }) {
       }
       if (allBuckets.length > 0) {
         const targetGroups = matchQuotaGroupsForModel(quotaState.groups, modelName);
-        const fiveHourPcts = [];
+        const fiveHourBuckets = [];
         const weeklyPcts = [];
         const otherBuckets = [];
         for (const g of targetGroups) {
@@ -249,13 +274,37 @@ export function createBarView({ doc, i18n }) {
           for (const b of buckets) {
             if (typeof b.remainingPercent !== 'number') continue;
             const kind = classifyQuotaWindow(b.window);
-            if (kind === '5h') fiveHourPcts.push(b.remainingPercent);
-            else if (kind === 'weekly') weeklyPcts.push(b.remainingPercent);
-            else otherBuckets.push({ window: String(b.window || '').trim(), pct: b.remainingPercent });
+            if (kind === '5h') {
+              fiveHourBuckets.push({
+                pct: b.remainingPercent,
+                resetTime: typeof b.resetTime === 'string' ? b.resetTime : '',
+              });
+            } else if (kind === 'weekly') {
+              weeklyPcts.push(b.remainingPercent);
+            } else {
+              otherBuckets.push({ window: String(b.window || '').trim(), pct: b.remainingPercent });
+            }
           }
         }
 
-        const fiveHourPct = fiveHourPcts.length > 0 ? Math.min(...fiveHourPcts) : null;
+        let bindingFiveHour = null;
+        for (const fb of fiveHourBuckets) {
+          if (bindingFiveHour === null || fb.pct < bindingFiveHour.pct) {
+            bindingFiveHour = fb;
+          } else if (fb.pct === bindingFiveHour.pct) {
+            const curMs = fb.resetTime ? Date.parse(fb.resetTime) : Number.NaN;
+            const bestMs = bindingFiveHour.resetTime ? Date.parse(bindingFiveHour.resetTime) : Number.NaN;
+            if (Number.isFinite(curMs) && (!Number.isFinite(bestMs) || curMs < bestMs)) {
+              bindingFiveHour = fb;
+            }
+          }
+        }
+        const fiveHourPct = bindingFiveHour !== null ? bindingFiveHour.pct : null;
+        const fiveHourResetHHMM =
+          bindingFiveHour && bindingFiveHour.resetTime && typeof i18n.formatLocalTimeHHMM === 'function'
+            ? i18n.formatLocalTimeHHMM(bindingFiveHour.resetTime)
+            : '';
+        const fiveHourResetPart = fiveHourResetHHMM ? ` (${fiveHourResetHHMM})` : '';
         const weeklyPct = weeklyPcts.length > 0 ? Math.min(...weeklyPcts) : null;
         let otherMin = null;
         for (const ob of otherBuckets) {
@@ -263,10 +312,15 @@ export function createBarView({ doc, i18n }) {
         }
 
         const staleTag = quotaState.stale ? ` (${tr.stale})` : '';
+        const resetLabel = tr.quotaReset || tr.reset || 'Reset';
         const tooltip = allBuckets
           .map((b) => {
             const winPart = b.window ? ` (${b.window})` : '';
-            const resetPart = b.resetTime ? ` · reset ${b.resetTime}` : '';
+            const formattedReset =
+              b.resetTime && typeof i18n.formatLocalDateTime === 'function'
+                ? i18n.formatLocalDateTime(b.resetTime)
+                : b.resetTime;
+            const resetPart = formattedReset ? ` · ${resetLabel} ${formattedReset}` : '';
             return `${b.label}${winPart}: ${Math.round(b.pct)}%${resetPart}`;
           })
           .join('\n');
@@ -283,13 +337,13 @@ export function createBarView({ doc, i18n }) {
           quota5hEl.style.display = '';
           sep3.style.display = '';
           quotaEl.style.display = '';
-          setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%`);
+          setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%${fiveHourResetPart}`);
           setText(quotaEl, `${secondaryLabel} ${Math.round(secondaryPct)}%${staleTag}`);
         } else if (fiveHourPct !== null) {
           quota5hEl.style.display = '';
           sep3.style.display = 'none';
           quotaEl.style.display = 'none';
-          setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%${staleTag}`);
+          setText(quota5hEl, `${tr.quota5h} ${Math.round(fiveHourPct)}%${fiveHourResetPart}${staleTag}`);
         } else if (secondaryPct !== null) {
           quota5hEl.style.display = 'none';
           sep3.style.display = 'none';
@@ -355,6 +409,7 @@ export function createBarView({ doc, i18n }) {
 
   return Object.freeze({
     barEl,
+    modelEl,
     ctxBtn,
     ctxTextEl,
     quota5hEl,
