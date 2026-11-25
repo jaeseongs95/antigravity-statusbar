@@ -484,7 +484,10 @@ test('TC-ADDON-05: i18n.mjs, api-client.mjs (Desktop + Remote HTTPS reconfigurat
   );
   assert.equal(remoteApi.isConfigured(), false);
   assert.equal(remoteApi.getBaseUrl(), '');
-  await assert.rejects(() => remoteApi.post('/api/settings/get', {}), /ERR_NOT_CONFIGURED/);
+  await assert.rejects(
+    () => remoteApi.post('/api/settings/get', {}),
+    (err) => err?.code === 'ERR_SIDECAR_NOT_CONFIGURED',
+  );
   assert.throws(
     () => remoteApi.configure({ baseUrl: 'http://remote.example.com:8080', token: TEST_TOKEN }),
     /ERR_INVALID_ENDPOINT_URL/,

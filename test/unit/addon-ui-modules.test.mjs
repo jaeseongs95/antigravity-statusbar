@@ -713,26 +713,29 @@ test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured a
   assert.equal(popoverView.tabSettingsBtn.getAttribute('aria-selected'), 'true');
 
   // 2. Invalid URL surfaces error feedback
+  const popFeedback = popoverView.popEl.querySelector('.agy-inline-pop-feedback');
   popoverView.remoteUrlInput.value = 'http://remote.example:8080';
   popoverView.remoteTokenInput.value = TEST_TOKEN;
   popoverView.remoteConnectBtn.click();
   await flush();
-  assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), true);
-  assert.equal(popoverView.remoteConnStatusEl.textContent, i18n.t().remoteErrInvalidUrl);
+  assert.equal(popFeedback.classList.contains('err'), true);
+  assert.equal(popFeedback.textContent, i18n.t().remoteInvalidUrl);
 
   // 3. 401 unauthorized surfaces auth error
   popoverView.remoteUrlInput.value = 'https://sidecar.example.com';
   popoverView.remoteTokenInput.value = 'wrong-token-16-chars!';
   popoverView.remoteConnectBtn.click();
   await flush();
+  assert.equal(popFeedback.classList.contains('err'), true);
+  assert.equal(popFeedback.textContent, i18n.formatTemplate(i18n.t().remoteAuthFailed, { status: 401 }));
   assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), true);
-  assert.equal(popoverView.remoteConnStatusEl.textContent, i18n.t().remoteErrUnauthorized);
 
   // 4. Valid HTTPS connection succeeds and updates status; Disconnect clears connection
   popoverView.remoteUrlInput.value = 'https://sidecar.example.com';
   popoverView.remoteTokenInput.value = TEST_TOKEN;
   popoverView.remoteConnectBtn.click();
   await flush();
+  assert.equal(popFeedback.classList.contains('err'), false);
   assert.equal(popoverView.remoteConnStatusEl.classList.contains('err'), false);
   assert.ok(popoverView.remoteConnStatusEl.textContent.includes('https://sidecar.example.com'));
   assert.equal(savedEvents.length, 3);
