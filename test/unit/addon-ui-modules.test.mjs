@@ -1639,3 +1639,79 @@ test('TC-UNIT-07: api-client, addon-bridge, i18n dictionary symmetry, and styles
   assert.equal(sorted[1].description.length, 120);
   assert.equal(await reg.setEnabled('a_btn', false), false);
 });
+
+test('TC-UNIT-07b (v3.3.0): api-client.mjs supports optional GM_xmlhttpRequest fallback on Remote Web CORS/network errors with abort & status handling, never on Desktop', async () => {
+  // 1. Desktop (allowRemoteHttps: false) must NEVER invoke gmXhrImpl even when fetch fails
+  let desktopXhrCalls = 0;
+  const desktopApi = createSidecarApiClient({
+    baseUrl: 'http://127.0.0.1:41222',
+    token: TEST_TOKEN,
+    allowRemoteHttps: false,
+    fetchImpl: async () => {
+      throw new TypeError('Failed to fetch');
+    },
+    gmXhrImpl() {
+      desktopXhrCalls += 1;
+    },
+  });
+  await assert.rejects(() => desktopApi.post('/api/quota', {}), /Failed to fetch/);
+  assert.equal(desktopXhrCalls, 0);
+
+  // 2. Remote Web (allowRemoteHttps: true) falls back to gmXhrImpl when fetch hits CORS/CSP TypeError
+  const xhrCalls = [];
+  let abortCalled = 0;
+  const remoteApi = createSidecarApiClient({
+    baseUrl: 'https://sidecar.example.com',
+    token: TEST_TOKEN,
+    allowRemoteHttps: true,
+    fetchImpl: async () => {
+      throw new TypeError('CORS blocked');
+    },
+    gmXhrImpl(opts) {
+      xhrCalls.push(opts);
+      if (opts.url.endsWith('/api/quota')) {
+        queueMicrotask(() => {
+          opts.onload({ status: 200, responseText: JSON.stringify({ available: true, groups: [] }) });
+        });
+        return { abort() {} };
+      }
+      if (opts.url.endsWith('/api/unauth')) {
+        queueMicrotask(() => {
+          opts.onload({
+            status: 401,
+            responseText: JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Bad token' } }),
+          });
+        });
+        return { abort() {} };
+      }
+      if (opts.url.endsWith('/api/hang')) {
+        return {
+          abort() {
+            abortCalled += 1;
+          },
+        };
+      }
+      return { abort() {} };
+    },
+  });
+
+  const okRes = await remoteApi.post('/api/quota', { forceRefresh: true });
+  assert.equal(okRes.available, true);
+  assert.equal(remoteApi.isConnected(), true);
+  assert.equal(xhrCalls[0].headers['x-statusbar-token'], TEST_TOKEN);
+  assert.equal(xhrCalls[0].data, JSON.stringify({ forceRefresh: true }));
+
+  // 401 error propagates status/code and marks disconnected
+  await assert.rejects(
+    () => remoteApi.post('/api/unauth', {}),
+    (err) => err.status === 401 && err.code === 'UNAUTHORIZED',
+  );
+  assert.equal(remoteApi.isConnected(), false);
+
+  // abortAll() cancels in-flight GM_xmlhttpRequest via handle.abort()
+  const hanging = remoteApi.post('/api/hang', {});
+  await flush();
+  remoteApi.abortAll();
+  await assert.rejects(() => hanging, /aborted/);
+  assert.equal(abortCalled, 1);
+});

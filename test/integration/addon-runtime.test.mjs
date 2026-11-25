@@ -1054,6 +1054,9 @@ test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots
   const mountOptsLog = [];
   const savedPayloads = [];
   const portals = [];
+  const registeredTabs = [];
+  const registeredActions = [];
+  const unregisteredIds = [];
   const disposers = [];
   let unsubscribedCount = 0;
 
@@ -1120,6 +1123,43 @@ test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots
       };
       portals.push(entry);
       return Object.freeze({ id: `pop-${portals.length}`, element: pop, bodyEl, close: entry.close });
+    },
+    openModal(slotId, opts = {}) {
+      const dlg = new MockElement('dialog', doc);
+      const bodyEl = new MockElement('div', doc);
+      dlg.appendChild(bodyEl);
+      doc.body.appendChild(dlg);
+      let closed = false;
+      const entry = {
+        kind: 'modal',
+        slotId,
+        element: dlg,
+        bodyEl,
+        close() {
+          if (closed) return;
+          closed = true;
+          dlg.remove();
+          if (typeof opts.onClose === 'function') opts.onClose();
+        },
+      };
+      portals.push(entry);
+      return Object.freeze({ id: `modal-${portals.length}`, element: dlg, bodyEl, close: entry.close });
+    },
+    registerSettingsTab(tabId, opts) {
+      registeredTabs.push({ tabId, opts });
+      return Object.freeze({
+        unregister() {
+          unregisteredIds.push(`tab:${tabId}`);
+        },
+      });
+    },
+    registerAction(actionId, spec) {
+      registeredActions.push({ actionId, spec });
+      return Object.freeze({
+        unregister() {
+          unregisteredIds.push(`action:${actionId}`);
+        },
+      });
     },
     getSettings() {
       return hostSettings;
@@ -1199,6 +1239,21 @@ test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots
     assert.equal(rootRec.container, remoteDock);
     assert.equal(rootRec.rootEl.querySelector('.agy-inline-statusbar').classList.contains('agy-remote-dock'), true);
 
+    // 2b. Host v2.8.0 Remote Web Drawer registers Settings tab & Quick Actions
+    assert.equal(registeredTabs.length, 1);
+    assert.equal(registeredTabs[0].tabId, 'settings');
+    assert.deepEqual(
+      registeredActions.map((a) => a.actionId),
+      ['open-settings', 'open-global-limits', 'refresh-quota'],
+    );
+    // Invoking Drawer Settings tab opens popover on Settings tab
+    registeredTabs[0].opts.onSelect();
+    assert.ok(portals.some((p) => p.slotId === 'antigravity-statusbar.popover'));
+    // Invoking Drawer Global Limits action opens modal portal
+    registeredActions.find((a) => a.actionId === 'open-global-limits').spec.run();
+    assert.ok(portals.some((p) => p.kind === 'modal' && p.slotId === 'antigravity-statusbar.global-limit-modal'));
+    portals.find((p) => p.kind === 'modal').close();
+
     // 3. Clicking bar opens Settings tab with visible Remote Sidecar Connection card
     const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
     ctxBtn.getBoundingClientRect = () => ({ left: 400, top: 760, right: 560, width: 160, height: 24 });
@@ -1233,10 +1288,14 @@ test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots
     assert.equal(savedPayloads[1].remoteBaseUrl, '');
     assert.equal(savedPayloads[1].remoteToken, '');
 
-    // 6. Dispose unsubscribes & unmounts cleanly
+    // 6. Dispose unsubscribes, unregisters drawer tabs/actions & unmounts cleanly
     remoteWebHost.dispose();
     assert.equal(unsubscribedCount, 1);
     assert.equal(mountedSlots.size, 0);
+    assert.ok(unregisteredIds.includes('tab:settings'));
+    assert.ok(unregisteredIds.includes('action:open-settings'));
+    assert.ok(unregisteredIds.includes('action:open-global-limits'));
+    assert.ok(unregisteredIds.includes('action:refresh-quota'));
   } finally {
     remoteWebHost.dispose();
   }

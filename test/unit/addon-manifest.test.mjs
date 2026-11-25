@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { buildStaticRenderer, parseBuildArgs } from '../../scripts/build-renderer.mjs';
 import { createAddonRegistry } from '../../src/adapters/antigravity/addon/addon-bridge.mjs';
 import { createAddonHostAdapter } from '../../src/adapters/antigravity/addon/addon-host-adapter.mjs';
 import { createSidecarApiClient } from '../../src/adapters/antigravity/addon/api-client.mjs';
@@ -119,6 +120,8 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
     getSettings() {},
     onSettingsChange() {},
     saveSettings() {},
+    registerSettingsTab() {},
+    registerAction() {},
   };
   assert.equal(assertRendererHostPort(validHost), validHost);
   assert.throws(
@@ -136,6 +139,14 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
   assert.throws(
     () => assertRendererHostPort({ ...validHost, saveSettings: true }),
     /invalid_saveSettings/,
+  );
+  assert.throws(
+    () => assertRendererHostPort({ ...validHost, registerSettingsTab: 'bad' }),
+    /invalid_registerSettingsTab/,
+  );
+  assert.throws(
+    () => assertRendererHostPort({ ...validHost, registerAction: 42 }),
+    /invalid_registerAction/,
   );
 
   assert.throws(() => assertPortalHostPort(validHost), /missing_openModal/);
@@ -257,6 +268,14 @@ test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM /
       v2Calls.push(['saveSettings', data]);
       return { ok: true, persistence: 'browser-local' };
     },
+    registerSettingsTab(tabId, opts) {
+      v2Calls.push(['registerSettingsTab', tabId, opts?.label || '']);
+      return { unregister() { v2Calls.push(['unregisterSettingsTab', tabId]); } };
+    },
+    registerAction(actionId, spec) {
+      v2Calls.push(['registerAction', actionId, spec?.label || '']);
+      return { unregister() { v2Calls.push(['unregisterAction', actionId]); } };
+    },
     onDispose(fn) {
       v2Calls.push(['onDispose', typeof fn]);
     },
@@ -293,6 +312,10 @@ test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM /
   assert.equal(typeof settingsSubscriber, 'function');
   unsub();
   portV2.saveSettings({ locale: 'ko' });
+  const tabReg = portV2.registerSettingsTab('settings', { label: 'Statusbar' });
+  const actReg = portV2.registerAction('open-settings', { label: 'Settings', run() {} });
+  tabReg.unregister();
+  actReg.unregister();
 
   assert.deepEqual(v2Calls, [
     ['mountSlot', 'antigravity-statusbar.root', { container: box1 }],
@@ -309,6 +332,10 @@ test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM /
     ['onSettingsChange', 'function'],
     ['unsubscribeSettings'],
     ['saveSettings', { locale: 'ko' }],
+    ['registerSettingsTab', 'settings', 'Statusbar'],
+    ['registerAction', 'open-settings', 'Settings'],
+    ['unregisterSettingsTab', 'settings'],
+    ['unregisterAction', 'open-settings'],
   ]);
 });
 
@@ -557,4 +584,32 @@ test('TC-ADDON-05: i18n.mjs, api-client.mjs (Desktop + Remote HTTPS reconfigurat
   assert.equal(registry.isRuntimeDisabled('rt-1'), true);
   assert.equal(registry.unregister('rt-1'), true);
   assert.equal(registry.list().length, 0);
+});
+
+test('TC-ADDON-13 (v3.3.0): build-renderer.mjs emits deterministic credential-free runtime/statusbar-renderer.js for --build-addon-userscript', async () => {
+  assert.throws(() => parseBuildArgs(['--out']), /valid output file path/);
+  assert.throws(() => parseBuildArgs(['--out', '--check']), /valid output file path/);
+  const parsed = parseBuildArgs(['--check', '--out', 'runtime/test-out.js']);
+  assert.equal(parsed.check, true);
+  assert.ok(parsed.outPath.endsWith(path.join('runtime', 'test-out.js')));
+
+  const checkRes = await buildStaticRenderer({ check: true });
+  assert.equal(checkRes.ok, true);
+  assert.equal(checkRes.check, true);
+  assert.match(checkRes.sha256, /^[a-f0-9]{64}$/);
+  assert.ok(checkRes.bytes > 1000);
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-build-renderer-'));
+  try {
+    const outFile = path.join(tmpDir, 'runtime', 'statusbar-renderer.js');
+    const writeRes = await buildStaticRenderer({ outPath: outFile, check: false });
+    assert.equal(writeRes.sha256, checkRes.sha256);
+    const content = await fs.readFile(outFile, 'utf8');
+    assert.equal(content.includes('\r\n'), false, 'Static bundle must use deterministic LF line endings');
+    assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(content), false);
+    assert.ok(content.includes('registerSettingsTab'));
+    assert.ok(content.includes('registerAction'));
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
 });

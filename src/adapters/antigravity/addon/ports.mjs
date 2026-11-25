@@ -15,7 +15,15 @@ export function assertRendererHostPort(port) {
       throw new Error(`ERR_INVALID_RENDERER_HOST_PORT:missing_${required[i]}`);
     }
   }
-  const optionalMethods = ['openModal', 'openPopover', 'getSettings', 'onSettingsChange', 'saveSettings'];
+  const optionalMethods = [
+    'openModal',
+    'openPopover',
+    'getSettings',
+    'onSettingsChange',
+    'saveSettings',
+    'registerSettingsTab',
+    'registerAction',
+  ];
   for (let i = 0; i < optionalMethods.length; i += 1) {
     const key = optionalMethods[i];
     if (port[key] !== undefined && port[key] !== null && typeof port[key] !== 'function') {

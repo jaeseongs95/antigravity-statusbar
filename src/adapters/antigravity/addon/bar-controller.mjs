@@ -1457,6 +1457,16 @@ export function createBarController({
     } catch {}
   }
 
+  function openSettings() {
+    if (state.disposed) return;
+    setPopoverOpen(true, 'settings', barView.settingsBtn);
+  }
+
+  function openGlobalLimits() {
+    if (state.disposed) return;
+    openGlobalModal(barView.settingsBtn);
+  }
+
   render();
 
   return Object.freeze({
@@ -1466,6 +1476,8 @@ export function createBarController({
     render,
     refreshSnapshot,
     resetConnectionState,
+    openSettings,
+    openGlobalLimits,
     destroy,
   });
 }

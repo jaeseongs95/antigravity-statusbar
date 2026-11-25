@@ -13,6 +13,7 @@
   },
   "scripts": {
     "start": "node sidecars/statusbar/main.mjs",
+    "build:renderer": "node scripts/build-renderer.mjs",
     "install-plugin": "node scripts/install-plugin.mjs",
     "test:static": "node --test test/static/boundary.test.mjs",
     "test:unit": "node --test test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/autocompact-tdd.test.mjs test/unit/p0-hardening-tdd.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs",

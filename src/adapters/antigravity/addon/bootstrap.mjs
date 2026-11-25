@@ -46,6 +46,7 @@ export function startAddonStatusbar({
   let lastExpiredQuotaRetryAt = 0;
   let observer = null;
   let unsubscribeSettings = null;
+  const hostRegistrations = [];
   let currentSlotEl = null;
   let activeBoxEl = null;
   let preferredBoxEl = null;
@@ -721,6 +722,65 @@ export function startAddonStatusbar({
     }
   }
 
+  if (isRemoteWeb && typeof hostPort.registerSettingsTab === 'function') {
+    try {
+      const reg = hostPort.registerSettingsTab('settings', {
+        label: i18n.t().settingsTitle,
+        onSelect() {
+          if (!disposed && typeof controller.openSettings === 'function') {
+            controller.openSettings();
+          }
+        },
+      });
+      if (reg && typeof reg.unregister === 'function') {
+        hostRegistrations.push(reg);
+      }
+    } catch {}
+  }
+
+  if (isRemoteWeb && typeof hostPort.registerAction === 'function') {
+    const remoteActions = [
+      {
+        id: 'open-settings',
+        label: i18n.t().tabSettings,
+        run() {
+          if (!disposed && typeof controller.openSettings === 'function') {
+            controller.openSettings();
+          }
+        },
+      },
+      {
+        id: 'open-global-limits',
+        label: i18n.t().globalLimitBtn,
+        run() {
+          if (!disposed && typeof controller.openGlobalLimits === 'function') {
+            controller.openGlobalLimits();
+          }
+        },
+      },
+      {
+        id: 'refresh-quota',
+        label: i18n.t().reloadNow,
+        run() {
+          if (!disposed && isApiConfigured()) {
+            refreshQuotaNow({ forceRefresh: true });
+          }
+        },
+      },
+    ];
+    for (const act of remoteActions) {
+      try {
+        const reg = hostPort.registerAction(act.id, {
+          label: act.label,
+          run: act.run,
+        });
+        if (reg && typeof reg.unregister === 'function') {
+          hostRegistrations.push(reg);
+        }
+      } catch {}
+    }
+  }
+
   if (typeof hostPort.getSettings === 'function') {
     try {
       applyHostSettingsBridgeSnapshot(hostPort.getSettings(), { triggerPoll: false });
@@ -749,6 +809,12 @@ export function startAddonStatusbar({
         unsubscribeSettings();
       } catch {}
       unsubscribeSettings = null;
+    }
+    while (hostRegistrations.length > 0) {
+      const reg = hostRegistrations.pop();
+      try {
+        reg.unregister();
+      } catch {}
     }
     doc.removeEventListener('focusin', onFocusIn);
     doc.removeEventListener('pointerdown', onPointerDown);

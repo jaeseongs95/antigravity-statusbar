@@ -119,6 +119,12 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
   if (typeof addonHost.saveSettings === 'function') {
     adapter.saveSettings = (nextData) => addonHost.saveSettings(nextData);
   }
+  if (typeof addonHost.registerSettingsTab === 'function') {
+    adapter.registerSettingsTab = (tabId, opts) => addonHost.registerSettingsTab(tabId, opts);
+  }
+  if (typeof addonHost.registerAction === 'function') {
+    adapter.registerAction = (actionId, spec) => addonHost.registerAction(actionId, spec);
+  }
 
   return Object.freeze(adapter);
 }

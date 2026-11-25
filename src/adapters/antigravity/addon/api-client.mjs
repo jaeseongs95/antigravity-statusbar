@@ -14,6 +14,7 @@ export function createSidecarApiClient({
   token = null,
   allowRemoteHttps = false,
   fetchImpl,
+  gmXhrImpl,
 } = {}) {
   const LOOPBACK_RE = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})\/?$/;
 
@@ -67,6 +68,110 @@ export function createSidecarApiClient({
   const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch;
   const activeControllers = new Set();
   let connected = false;
+
+  function resolveGmXhr() {
+    if (!allowRemoteHttps) return null;
+    if (typeof gmXhrImpl === 'function') return gmXhrImpl;
+    if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
+    if (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') {
+      return GM.xmlHttpRequest.bind(GM);
+    }
+    return null;
+  }
+
+  function postViaGmXhr(gmXhr, url, targetToken, payloadText, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal && signal.aborted) {
+        const abortErr = new Error('aborted');
+        abortErr.name = 'AbortError';
+        reject(abortErr);
+        return;
+      }
+      let settled = false;
+      let handle = null;
+      const cleanup = () => {
+        if (signal) signal.removeEventListener('abort', onAbortSignal);
+      };
+      const finishResolve = (val) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      };
+      const finishReject = (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const onAbortSignal = () => {
+        try {
+          if (handle && typeof handle.abort === 'function') handle.abort();
+        } catch {}
+        const abortErr = new Error('aborted');
+        abortErr.name = 'AbortError';
+        finishReject(abortErr);
+      };
+      if (signal) {
+        signal.addEventListener('abort', onAbortSignal, { once: true });
+      }
+      try {
+        handle = gmXhr({
+          method: 'POST',
+          url,
+          headers: {
+            'content-type': 'application/json',
+            'x-statusbar-token': targetToken,
+          },
+          data: payloadText,
+          responseType: 'text',
+          onload(resp) {
+            const status = typeof resp?.status === 'number' ? resp.status : 0;
+            const rawText = typeof resp?.responseText === 'string' ? resp.responseText : '';
+            let json = {};
+            if (rawText) {
+              try {
+                json = JSON.parse(rawText);
+              } catch {
+                json = {};
+              }
+            }
+            if (status < 200 || status >= 300) {
+              if (status >= 500 || status === 401 || status === 403 || status === 0) {
+                connected = false;
+              }
+              const err = new Error(json?.error?.message || `HTTP ${status}`);
+              err.status = status;
+              err.code = json?.error?.code || 'HTTP_ERROR';
+              finishReject(err);
+              return;
+            }
+            connected = true;
+            finishResolve(json);
+          },
+          onerror() {
+            connected = false;
+            const err = new Error('Network error');
+            err.code = 'ERR_GM_XHR_NETWORK';
+            finishReject(err);
+          },
+          ontimeout() {
+            connected = false;
+            const err = new Error('Request timed out');
+            err.code = 'ERR_GM_XHR_TIMEOUT';
+            finishReject(err);
+          },
+          onabort() {
+            const abortErr = new Error('aborted');
+            abortErr.name = 'AbortError';
+            finishReject(abortErr);
+          },
+        });
+      } catch (err) {
+        finishReject(err);
+      }
+    });
+  }
 
   if (baseUrl !== null && baseUrl !== undefined || token !== null && token !== undefined) {
     normalizedBaseUrl = normalizeValidatedBaseUrl(baseUrl);
@@ -130,14 +235,16 @@ export function createSidecarApiClient({
     }
     const targetBase = normalizedBaseUrl;
     const targetToken = sealedToken;
+    const targetUrl = `${targetBase}${pathname}`;
+    const payloadText = JSON.stringify(bodyObj || {});
     try {
-      const res = await doFetch(`${targetBase}${pathname}`, {
+      const res = await doFetch(targetUrl, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           'x-statusbar-token': targetToken,
         },
-        body: JSON.stringify(bodyObj || {}),
+        body: payloadText,
         signal: ctrl.signal,
       });
       const json = await res.json().catch(() => ({}));
@@ -153,7 +260,12 @@ export function createSidecarApiClient({
       connected = true;
       return json;
     } catch (err) {
-      if (err?.name !== 'AbortError' && err?.message !== 'aborted' && (err?.status === undefined || err.status >= 500 || err.status === 401 || err.status === 403)) {
+      const isAborted = err?.name === 'AbortError' || err?.message === 'aborted' || ctrl.signal.aborted;
+      const gmXhr = !isAborted && err?.status === undefined ? resolveGmXhr() : null;
+      if (gmXhr) {
+        return await postViaGmXhr(gmXhr, targetUrl, targetToken, payloadText, ctrl.signal);
+      }
+      if (!isAborted && (err?.status === undefined || err.status >= 500 || err.status === 401 || err.status === 403)) {
         connected = false;
       }
       throw err;
