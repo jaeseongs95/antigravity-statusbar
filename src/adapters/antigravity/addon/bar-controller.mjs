@@ -204,11 +204,82 @@ export function createBarController({
     }
   }
 
-  function getSessionId() {
-    if (state.viewEl && typeof state.viewEl.getAttribute === 'function') {
-      const attr = state.viewEl.getAttribute('data-cascade-id') || '';
-      if (attr && attr !== 'remote-session') return attr;
+  const SUBAGENT_VIEW_TESTIDS = new Set([
+    'subagent-tab-conversation',
+    'side-question-tab-conversation',
+  ]);
+  const CONVERSATION_VIEW_TESTIDS = new Set([
+    'conversation-view',
+    'subagent-tab-conversation',
+    'side-question-tab-conversation',
+  ]);
+
+  function readCascadeId(el) {
+    if (!el || typeof el.getAttribute !== 'function') return '';
+    const raw = String(el.getAttribute('data-cascade-id') || '').trim();
+    return raw && raw !== 'remote-session' ? raw : '';
+  }
+
+  function isIsolatedSubagentView(el) {
+    let cur = el && el.nodeType === 3 ? el.parentElement : el;
+    while (cur && cur.nodeType === 1) {
+      if (
+        typeof cur.getAttribute === 'function' &&
+        SUBAGENT_VIEW_TESTIDS.has(cur.getAttribute('data-testid'))
+      ) {
+        return true;
+      }
+      cur = cur.parentElement;
     }
+    return false;
+  }
+
+  function resolveDomSessionId() {
+    if (!state.viewEl) return '';
+    let cur = state.viewEl;
+    while (cur && cur.nodeType === 1) {
+      const attr = readCascadeId(cur);
+      if (attr) return attr;
+      cur = cur.parentElement;
+    }
+    if (
+      typeof state.viewEl.getAttribute === 'function' &&
+      CONVERSATION_VIEW_TESTIDS.has(state.viewEl.getAttribute('data-testid')) &&
+      state.viewEl.childNodes
+    ) {
+      let foundId = '';
+      let ambiguous = false;
+      const walk = (node) => {
+        if (ambiguous || !node || !node.childNodes) return;
+        for (let i = 0; i < node.childNodes.length; i += 1) {
+          const ch = node.childNodes[i];
+          if (!ch || ch.nodeType !== 1) continue;
+          const cid = readCascadeId(ch);
+          if (cid) {
+            if (!foundId) foundId = cid;
+            else if (cid !== foundId) {
+              ambiguous = true;
+              return;
+            }
+          }
+          walk(ch);
+        }
+      };
+      walk(state.viewEl);
+      if (!ambiguous && foundId) return foundId;
+    }
+    return '';
+  }
+
+  function hasExplicitSessionId() {
+    return Boolean(resolveDomSessionId());
+  }
+
+  function getSessionId() {
+    const domSid = resolveDomSessionId();
+    if (domSid) return domSid;
+    // Fail-Closed: never fall back to global fallbackSessionId inside an unattributed subagent/side-question view
+    if (isIsolatedSubagentView(state.viewEl)) return '';
     return sharedState.fallbackSessionId || '';
   }
 
@@ -745,7 +816,27 @@ export function createBarController({
       return;
     }
     const sid = getSessionId();
-    if (!sid) return;
+    if (!sid) {
+      const hadState = Boolean(state.lastSessionId || state.snapshot !== null || state.inFlight);
+      if (hadState) {
+        state.epoch += 1;
+        if (state.abortCtrl) {
+          try {
+            state.abortCtrl.abort();
+          } catch {}
+          state.abortCtrl = null;
+        }
+        state.inFlight = false;
+        state.inFlightPromise = null;
+        state.pendingRefresh = false;
+        state.lastSessionId = '';
+        state.snapshot = null;
+        state.limitDirty = false;
+        state.syncedLimitKey = '';
+        render();
+      }
+      return;
+    }
     const sessionChanged = Boolean(state.lastSessionId && state.lastSessionId !== sid);
     if (sessionChanged) {
       state.snapshot = null;
@@ -773,6 +864,10 @@ export function createBarController({
       try {
         const snap = await api.post('/api/snapshot', { sessionId: sid }, state.abortCtrl.signal);
         if (state.disposed || reqEpoch !== state.epoch) return;
+        if (getSessionId() !== sid) return;
+        if (snap && typeof snap.sessionId === 'string' && snap.sessionId && snap.sessionId !== sid) {
+          return;
+        }
         state.consecutiveSnapshotFailures = 0;
         state.lastConnectionError = null;
         state.snapshot = snap;
@@ -1311,8 +1406,11 @@ export function createBarController({
   doc.addEventListener('pointerdown', onDocPointerDown);
 
   function setTargetView(viewEl) {
-    if (state.viewEl === viewEl) return;
-    state.viewEl = viewEl || null;
+    const nextView = viewEl || null;
+    const prevView = state.viewEl;
+    state.viewEl = nextView;
+    const nextSid = getSessionId();
+    if (prevView === nextView && nextSid === state.lastSessionId) return;
     refreshSnapshot();
   }
 
@@ -1362,6 +1460,7 @@ export function createBarController({
   return Object.freeze({
     rootEl: barView.barEl,
     setTargetView,
+    hasExplicitSessionId,
     render,
     refreshSnapshot,
     resetConnectionState,

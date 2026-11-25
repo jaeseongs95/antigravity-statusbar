@@ -43,6 +43,13 @@ export function startAddonStatusbar({
   let unsubscribeSettings = null;
   let currentSlotEl = null;
   let activeBoxEl = null;
+  let preferredBoxEl = null;
+
+  const CONVERSATION_VIEW_TESTIDS = new Set([
+    'conversation-view',
+    'subagent-tab-conversation',
+    'side-question-tab-conversation',
+  ]);
 
   const sharedState = {
     autoCompactEnabled: true,
@@ -310,9 +317,121 @@ export function startAddonStatusbar({
     return el.offsetParent !== null;
   }
 
+  function readCascadeId(el) {
+    if (!el || typeof el.getAttribute !== 'function') return '';
+    const raw = String(el.getAttribute('data-cascade-id') || '').trim();
+    return raw && raw !== 'remote-session' ? raw : '';
+  }
+
+  function isConversationViewEl(el) {
+    if (!el || typeof el.getAttribute !== 'function') return false;
+    return CONVERSATION_VIEW_TESTIDS.has(el.getAttribute('data-testid'));
+  }
+
+  function findClosestCascadeCarrier(startEl) {
+    let cur = startEl && startEl.nodeType === 3 ? startEl.parentElement : startEl;
+    while (cur && cur.nodeType === 1) {
+      if (readCascadeId(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function findClosestConversationView(startEl) {
+    let cur = startEl && startEl.nodeType === 3 ? startEl.parentElement : startEl;
+    while (cur && cur.nodeType === 1) {
+      if (isConversationViewEl(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function findSingleDescendantViewOrCarrier(rootEl) {
+    if (!rootEl || !rootEl.childNodes) return null;
+    let firstCarrier = null;
+    let matchedCascadeId = '';
+    let ambiguousCarrier = false;
+    let matchedView = null;
+    let viewCount = 0;
+
+    function walk(node) {
+      if (!node || !node.childNodes) return;
+      for (let i = 0; i < node.childNodes.length; i += 1) {
+        const ch = node.childNodes[i];
+        if (!ch || ch.nodeType !== 1 || isOwnNode(ch)) continue;
+        const cid = readCascadeId(ch);
+        if (cid) {
+          if (!firstCarrier) {
+            firstCarrier = ch;
+            matchedCascadeId = cid;
+          } else if (cid !== matchedCascadeId) {
+            ambiguousCarrier = true;
+          }
+        }
+        if (isConversationViewEl(ch)) {
+          if (!matchedView) matchedView = ch;
+          viewCount += 1;
+        }
+        walk(ch);
+      }
+    }
+
+    walk(rootEl);
+    if (ambiguousCarrier) return null;
+    if (firstCarrier) return firstCarrier;
+    if (viewCount === 1 && matchedView) return matchedView;
+    return null;
+  }
+
+  function resolveConversationView(boxEl) {
+    if (!boxEl) return null;
+    const carrier = findClosestCascadeCarrier(boxEl);
+    if (carrier) return carrier;
+    const viewEl = findClosestConversationView(boxEl);
+    if (viewEl) return viewEl;
+
+    // Sibling / wrapper pane layout: walk upward only while within a single input-box pane
+    let cur = boxEl.parentElement;
+    while (cur && cur.nodeType === 1 && cur !== doc.body) {
+      const paneBoxes =
+        typeof cur.querySelectorAll === 'function'
+          ? Array.from(cur.querySelectorAll('[data-testid="agent-input-box"]'))
+          : [];
+      const visiblePaneBoxes = paneBoxes.filter(isElementVisible);
+      const effectiveCount =
+        visiblePaneBoxes.length > 0 ? visiblePaneBoxes.length : paneBoxes.length;
+      if (effectiveCount > 1) break;
+      const candidate = findSingleDescendantViewOrCarrier(cur);
+      if (candidate) return candidate;
+      cur = cur.parentElement;
+    }
+    return boxEl;
+  }
+
+  function findBoxForView(viewEl, boxes) {
+    if (!viewEl || !Array.isArray(boxes) || boxes.length === 0) return null;
+    const directMatches = boxes.filter((b) => resolveConversationView(b) === viewEl);
+    if (directMatches.length > 0) {
+      const vis = directMatches.filter(isElementVisible);
+      return vis.length > 0 ? vis[vis.length - 1] : directMatches[0];
+    }
+    if (typeof viewEl.querySelector === 'function') {
+      const boxInView = viewEl.querySelector('[data-testid="agent-input-box"]');
+      if (boxInView && boxes.includes(boxInView)) return boxInView;
+    }
+    return null;
+  }
+
   function findActiveInputBox() {
     const boxes = Array.from(doc.querySelectorAll('[data-testid="agent-input-box"]'));
     if (boxes.length === 0) return null;
+
+    if (preferredBoxEl) {
+      if (doc.contains(preferredBoxEl) && boxes.includes(preferredBoxEl) && isElementVisible(preferredBoxEl)) {
+        return preferredBoxEl;
+      }
+      preferredBoxEl = null;
+    }
 
     const focused = doc.activeElement;
     if (focused && focused.nodeType === 1) {
@@ -323,12 +442,10 @@ export function startAddonStatusbar({
       if (focusedBox && boxes.includes(focusedBox)) return focusedBox;
 
       const focusedView =
-        typeof focused.closest === 'function'
-          ? focused.closest('[data-testid="conversation-view"]')
-          : null;
+        findClosestConversationView(focused) || findClosestCascadeCarrier(focused);
       if (focusedView) {
-        const boxInView = focusedView.querySelector('[data-testid="agent-input-box"]');
-        if (boxInView && boxes.includes(boxInView)) return boxInView;
+        const boxInView = findBoxForView(focusedView, boxes);
+        if (boxInView) return boxInView;
       }
     }
 
@@ -372,10 +489,7 @@ export function startAddonStatusbar({
     if (controller.rootEl.parentNode !== slotEl) {
       slotEl.appendChild(controller.rootEl);
     }
-    const viewEl =
-      typeof boxEl.closest === 'function'
-        ? boxEl.closest('[data-testid="conversation-view"]') || boxEl
-        : boxEl;
+    const viewEl = resolveConversationView(boxEl) || boxEl;
     controller.setTargetView(viewEl);
     return true;
   }
@@ -406,10 +520,18 @@ export function startAddonStatusbar({
       .post('/api/sessions', {})
       .then((sessRes) => {
         if (Array.isArray(sessRes?.sessions) && sessRes.sessions.length > 0) {
-          const topSid = sessRes.sessions[0].sessionId || '';
+          const preferredSession =
+            sessRes.sessions.find((s) => s && s.sessionId && !s.isSubagent) ||
+            sessRes.sessions[0];
+          const topSid = preferredSession?.sessionId || '';
           if (topSid && topSid !== sharedState.fallbackSessionId) {
             sharedState.fallbackSessionId = topSid;
-            controller.refreshSnapshot();
+            if (
+              typeof controller.hasExplicitSessionId !== 'function' ||
+              !controller.hasExplicitSessionId()
+            ) {
+              controller.refreshSnapshot();
+            }
           }
         }
       })
@@ -460,9 +582,37 @@ export function startAddonStatusbar({
 
   const onFocusIn = () => {
     if (disposed) return;
+    preferredBoxEl = null;
     mountToActiveBox();
   };
+  const onPointerDown = (e) => {
+    if (disposed || !e || !e.target) return;
+    const target = e.target.nodeType === 3 ? e.target.parentElement : e.target;
+    if (!target || target.nodeType !== 1 || isOwnNode(target)) return;
+    const boxes = Array.from(doc.querySelectorAll('[data-testid="agent-input-box"]'));
+    if (boxes.length === 0) return;
+    let targetBox =
+      typeof target.closest === 'function'
+        ? target.closest('[data-testid="agent-input-box"]')
+        : null;
+    if (targetBox && !boxes.includes(targetBox)) {
+      targetBox = null;
+    }
+    if (!targetBox) {
+      const clickedView =
+        findClosestConversationView(target) || findClosestCascadeCarrier(target);
+      if (clickedView) {
+        targetBox = findBoxForView(clickedView, boxes);
+      }
+    }
+    if (targetBox && isElementVisible(targetBox)) {
+      preferredBoxEl = targetBox;
+      activeBoxEl = targetBox;
+      mountToActiveBox();
+    }
+  };
   doc.addEventListener('focusin', onFocusIn);
+  doc.addEventListener('pointerdown', onPointerDown);
 
   if (typeof MutationObserver !== 'undefined' && doc.body) {
     observer = new MutationObserver((mutations) => {
@@ -539,6 +689,7 @@ export function startAddonStatusbar({
       unsubscribeSettings = null;
     }
     doc.removeEventListener('focusin', onFocusIn);
+    doc.removeEventListener('pointerdown', onPointerDown);
     api.abortAll();
     controller.destroy();
     addons.clear();

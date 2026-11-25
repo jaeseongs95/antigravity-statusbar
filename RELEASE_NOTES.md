@@ -25,13 +25,17 @@
   - Extends `createSidecarApiClient` with unconfigured startup mode (`isConfigured()`, `configure()`, `clearConnection()`), `allowRemoteHttps: true` validation (loopback HTTP always; `https://` without embedded credentials/query/hash on Remote Web), and 401/403 disconnect handling.
   - Replaces the v3.1.4 Remote Web fail-closed block in `bootstrap.mjs` with dual-profile support: Desktop consumes live `settingsBridge` updates (standby → active → port/token rotation → standby), while Remote Web ignores `persistence === "packed-initial"` snapshots, boots with zero fetches when unconfigured, and persists user-entered URL + token strictly in browser `localStorage` via `addonHost.saveSettings(...)`.
   - Adds a localized (EN/KO) **Remote Sidecar Connection** card inside the Settings tab on Remote Web (hidden on Desktop) with URL input, password token input, Connect/Disconnect buttons, and status/error feedback.
+- **Subagent & Side-Question Session Pinning Fix (`src/adapters/antigravity/addon/bootstrap.mjs`, `src/adapters/antigravity/addon/bar-controller.mjs`)**:
+  - Fixes a defect where viewing a subagent (`[data-testid="subagent-tab-conversation"]`) or side-question (`[data-testid="side-question-tab-conversation"]`) tab caused the statusbar metrics to jump erratically ("stock-chart fluctuation") across parallel agents every second: `bootstrap.mjs` previously matched only `[data-testid="conversation-view"]`, falling back to `agent-input-box` (no `data-cascade-id`), which caused `bar-controller.mjs` to fall back to `sharedState.fallbackSessionId` as it was continuously overwritten by the globally most-recently-updated trajectory in `/api/sessions`.
+  - Resolves the nearest `data-cascade-id` ancestor/conversation container across `conversation-view`, `subagent-tab-conversation`, and `side-question-tab-conversation` (supporting nested subagents where the innermost ID wins, single-pane sibling layouts, and multi-pane `pointerdown`/`focusin` switching).
+  - Hardens `bar-controller.mjs` to fail closed inside unattributed subagent/side-question views (clearing stale snapshots instead of falling back to another session), rejects mismatched `snap.sessionId` responses, and updates `fallbackSessionId` selection (used in Remote Web dock / unattributed views) to prefer the latest non-subagent session without interrupting explicitly pinned views.
 - **Security & Deployment Notes**:
   - **NEVER** pass `--include-settings-snapshots` to `addon-host --build-remote`; doing so would inline Desktop runtime tokens into `antigravity-remote.user.js`/`bookmarklet.txt`.
   - Recommended deployment order: `npm run install-plugin` → `node bin/addon-host.js --register <manifest>` → `node bin/addon-host.js trust approve antigravity-statusbar` → `node bin/addon-host.js --build-remote --out-dir <remote-dist>`.
   - Note: Direct `fetch` from `https://antigravity.google.com` to loopback/HTTPS Sidecar endpoints depends on live site `connect-src` CSP and browser PNA policy and should be verified on the live site after deployment.
 
 ### 3. Verification
-- Verified on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) across `test:static`, `test:unit`, `test:integration` (including `TC-ADDON-10a` Desktop `settingsBridge` live rotation, `TC-ADDON-10b` Remote Web E2E + `packed-initial` rejection + `status-bar` dock fallback, `TC-ADDON-11` configurable port + `EADDRINUSE` fallback, and byte-for-byte SHA-256 immutability of installed `runtime/statusbar-renderer.js`), `test:security`, `test:ui` (real Headless Chromium/Edge Shadow DOM E2E), and `install-plugin.mjs --dry-run`.
+- Verified on 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20) across `test:static`, `test:unit` (including `TC-UNIT-06b` subagent/side-question pinning & fail-closed isolation), `test:integration` (including `TC-ADDON-10a` Desktop `settingsBridge` live rotation, `TC-ADDON-10b` Remote Web E2E + `packed-initial` rejection + `status-bar` dock fallback, `TC-ADDON-11` configurable port + `EADDRINUSE` fallback, `TC-ADDON-12` bundled subagent session pinning, and byte-for-byte SHA-256 immutability of installed `runtime/statusbar-renderer.js`), `test:security`, `test:ui` (real Headless Chromium/Edge Shadow DOM E2E), and `install-plugin.mjs --dry-run`.
 
 ---
 
@@ -54,13 +58,17 @@
   - `createSidecarApiClient`에 미설정 기동 모드(`isConfigured()`, `configure()`, `clearConnection()`), `allowRemoteHttps: true` 검증(루프백 HTTP 상시 허용, 원격 웹에서 자격증명·쿼리·해시 없는 `https://` 허용), 401/403 연결 해제 처리를 추가했습니다.
   - `bootstrap.mjs`의 v3.1.4 원격 웹 일괄 차단 가드를 이중 프로필 지원으로 대체했습니다. 데스크톱은 `settingsBridge` 실시간 상태(standby → active → 포트/토큰 로테이션 → standby)를 소비하고, 원격 웹은 `persistence === "packed-initial"` 스냅샷을 심층 방어로 무시하며 미설정 시 네트워크 요청 0건으로 기동합니다.
   - 원격 웹 설정 탭에 한/영 로컬라이징된 **원격 Sidecar 연결** 카드(URL 입력, 비밀번호 토큰 입력, 연결/연결 해제 버튼, 상태·오류 피드백)를 추가했습니다(데스크톱에서는 숨김).
+- **서브에이전트·사이드 질문 세션 고정 결함 수정 (`src/adapters/antigravity/addon/bootstrap.mjs`, `src/adapters/antigravity/addon/bar-controller.mjs`)**:
+  - 서브에이전트 탭(`[data-testid="subagent-tab-conversation"]`)이나 사이드 질문 탭(`[data-testid="side-question-tab-conversation"]`)에서 상태바 컨텍스트 수치가 병렬 에이전트 활동에 따라 매 초 다른 대화 수치로 오르내리던(주식그래프 현상) 결함을 근본 수정했습니다. 기존 `bootstrap.mjs`가 `[data-testid="conversation-view"]`만 탐색해 `data-cascade-id`가 없는 `agent-input-box`로 폴백했고, `bar-controller.mjs`가 `/api/sessions`의 전역 최신 세션(`fallbackSessionId`)을 그대로 따라가며 발생하던 문제입니다.
+  - `conversation-view`, `subagent-tab-conversation`, `side-question-tab-conversation` 전반에서 가장 가까운 `data-cascade-id` 조상/컨테이너를 해석하도록 개선했습니다(중첩 서브에이전트 내부 우선, 단일 패널 형제 레이아웃 지원, 멀티 패널 `pointerdown`/`focusin` 전환 포함).
+  - `data-cascade-id`가 아직 없는 서브에이전트·사이드 질문 뷰에서는 전역 폴백 세션으로 빠지지 않고 Fail-Closed(이전 스냅샷 초기화) 처리하며, 응답 `snap.sessionId` 불일치를 차단하고, 폴백 모드(원격 웹 독 등)에서는 비서브에이전트(`!isSubagent`) 세션을 우선 선택하도록 보강했습니다.
 - **보안 및 배포 유의 사항**:
   - `addon-host --build-remote` 실행 시 `--include-settings-snapshots` 플래그를 **절대** 함께 사용하지 마십시오(데스크톱 런타임 토큰이 원격 웹 산출물에 평문 삽입될 수 있습니다).
   - 권장 배포 순서: `npm run install-plugin` → `node bin/addon-host.js --register <manifest>` → `node bin/addon-host.js trust approve antigravity-statusbar` → `node bin/addon-host.js --build-remote --out-dir <remote-dist>`.
   - 참고: `https://antigravity.google.com` 실사이트에서의 루프백/HTTPS `fetch` 허용 여부는 사이트 `connect-src` CSP와 브라우저 PNA 정책에 따라 달라지므로 배포 후 실브라우저 검증이 필요합니다.
 
 ### 3. 검증 근거
-- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): `test:static`, `test:unit`, `test:integration`(`TC-ADDON-10a` 데스크톱 `settingsBridge` 실시간 전환, `TC-ADDON-10b` 원격 웹 E2E·`packed-initial` 차단·`status-bar` 독 폴백, `TC-ADDON-11` 고정 포트·`EADDRINUSE` 폴백, 설치된 `runtime/statusbar-renderer.js` SHA-256 불변성 포함), `test:security`, `test:ui`(실제 Headless Chromium/Edge Shadow DOM E2E), `install-plugin.mjs --dry-run` 전 항목 검증 완료.
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): `test:static`, `test:unit`(`TC-UNIT-06b` 서브에이전트·사이드 질문 세션 고정 및 Fail-Closed 격리 포함), `test:integration`(`TC-ADDON-10a` 데스크톱 `settingsBridge` 실시간 전환, `TC-ADDON-10b` 원격 웹 E2E·`packed-initial` 차단·`status-bar` 독 폴백, `TC-ADDON-11` 고정 포트·`EADDRINUSE` 폴백, `TC-ADDON-12` 번들 렌더러 서브에이전트 고정, 설치된 `runtime/statusbar-renderer.js` SHA-256 불변성 포함), `test:security`, `test:ui`(실제 Headless Chromium/Edge Shadow DOM E2E), `install-plugin.mjs --dry-run` 전 항목 검증 완료.
 
 ---
 
