@@ -88,7 +88,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
     surfaces: ['desktop', 'remote-web'],
     hostProfile: 'antigravity-desktop',
     hostProfiles: ['antigravity-desktop', 'antigravity-remote-web'],
-    minHostVersion: '3.1.1',
+    minHostVersion: '3.3.0',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {

@@ -281,7 +281,34 @@ test('TC-V3-PARITY-01 (Desktop): @antigravity-addons/sdk createTestHost({ surfac
     assert.ok(globalSummaryEl.textContent.includes('200.0K'));
     assert.ok(globalSummaryEl.textContent.includes('1'));
     assert.ok(settingsHandle.getElementById('set-autocompact-toggle'));
-    assert.ok(settingsHandle.getElementById('set-lang-select'));
+    const langSegEl = settingsHandle.getElementById('set-lang-select');
+    assert.ok(langSegEl, 'Settings must render Extenra v3.3.0 Tier-2 segmented language control');
+    assert.equal(langSegEl.getAttribute('data-ag-segmented'), '1');
+    assert.equal(langSegEl.getAttribute('role'), 'group');
+    const koSegBtn = langSegEl.childNodes.find((b) => b.getAttribute?.('data-ag-segment-value') === 'ko');
+    const enSegBtn = langSegEl.childNodes.find((b) => b.getAttribute?.('data-ag-segment-value') === 'en');
+    assert.equal(koSegBtn?.textContent, '한국어');
+    assert.equal(enSegBtn?.textContent, 'EN');
+    assert.equal(koSegBtn?.getAttribute('aria-pressed'), 'true');
+    assert.equal(enSegBtn?.getAttribute('aria-pressed'), 'false');
+    // Clicking EN in segmented switch updates UI to English
+    enSegBtn.click();
+    assert.equal(mountedApp.i18n.getLocale(), 'en');
+    assert.equal(enSegBtn.getAttribute('aria-pressed'), 'true');
+    koSegBtn.click();
+    assert.equal(mountedApp.i18n.getLocale(), 'ko');
+    assert.equal(koSegBtn.getAttribute('aria-pressed'), 'true');
+    // Extenra v3.3.0 centralized host.setLocale('en' -> 'ko') broadcasts via ctx.i18n.onDidChange
+    if (typeof host.setLocale === 'function') {
+      host.setLocale('en');
+      assert.equal(mountedApp.i18n.getLocale(), 'en');
+      assert.equal(enSegBtn.getAttribute('aria-pressed'), 'true');
+      assert.equal(koSegBtn.getAttribute('aria-pressed'), 'false');
+      host.setLocale('ko');
+      assert.equal(mountedApp.i18n.getLocale(), 'ko');
+      assert.equal(koSegBtn.getAttribute('aria-pressed'), 'true');
+      assert.equal(enSegBtn.getAttribute('aria-pressed'), 'false');
+    }
     const compactPromptEl = settingsHandle.getElementById('set-compact-prompt');
     assert.equal(compactPromptEl?.getAttribute('rows'), '4');
     // Switching to Global Limits inside Settings updates in-place (zero modal-on-modal) and supports Back

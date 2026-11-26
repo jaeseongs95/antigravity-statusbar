@@ -49,7 +49,9 @@ export function startAddonStatusbar({
   let observer = null;
   let unsubscribeSettings = null;
   let unsubscribeTheme = null;
+  let unsubscribeI18n = null;
   let unsubscribeRemoteBridge = null;
+  let hostLocaleOverride = null;
   let statusbarServiceHandle = null;
   const hostDisposables = [];
   let currentSlotEl = null;
@@ -119,12 +121,18 @@ export function startAddonStatusbar({
     }
   }
 
+  function normalizeHostUiLocale(raw) {
+    const lower = String(raw || '').trim().toLowerCase();
+    if (lower === 'en' || lower.startsWith('en-')) return 'en';
+    if (lower === 'ko' || lower.startsWith('ko-')) return 'ko';
+    return null;
+  }
+
   // Respect host i18n locale on initial boot before Sidecar settings override it
   if (hostPort.hostI18n && typeof hostPort.hostI18n.getLocale === 'function') {
     try {
-      const hostLoc = String(hostPort.hostI18n.getLocale() || '').toLowerCase();
-      if (hostLoc.startsWith('en')) i18n.setLocale('en');
-      else if (hostLoc.startsWith('ko')) i18n.setLocale('ko');
+      const hostLoc = normalizeHostUiLocale(hostPort.hostI18n.getLocale());
+      if (hostLoc) i18n.setLocale(hostLoc);
     } catch {}
   }
 
@@ -147,10 +155,19 @@ export function startAddonStatusbar({
   const barView = createBarViewFn({ doc, i18n });
   const uiSchemas = createDeclarativeUiSchemasFn({ i18n });
 
-  function applySettingsPayload(settings) {
+  function applySettingsPayload(settings, { fromUser = false } = {}) {
     if (!settings || typeof settings !== 'object') return;
     if (settings.locale === 'ko' || settings.locale === 'en') {
-      i18n.setLocale(settings.locale);
+      if (fromUser) {
+        hostLocaleOverride = null;
+        i18n.setLocale(settings.locale);
+      } else if (hostLocaleOverride) {
+        if (settings.locale === hostLocaleOverride) {
+          hostLocaleOverride = null;
+        }
+      } else {
+        i18n.setLocale(settings.locale);
+      }
     }
     if (typeof settings.autoCompact === 'boolean') {
       sharedState.autoCompactEnabled = settings.autoCompact;
@@ -198,7 +215,7 @@ export function startAddonStatusbar({
     isRemoteWeb,
     getRemoteBridgeState,
     onSettingsChanged(updated) {
-      applySettingsPayload(updated);
+      applySettingsPayload(updated, { fromUser: true });
       controller.render();
     },
     onBurstRequested() {
@@ -751,6 +768,28 @@ export function startAddonStatusbar({
     }
   }
 
+  // Subscribe to Extenra v3.3.0 centralized host global locale changes (Desktop Addon Manager & Remote Web drawer)
+  if (hostPort.hostI18n && typeof hostPort.hostI18n.onDidChange === 'function') {
+    try {
+      const unsub = hostPort.hostI18n.onDidChange((nextLocale) => {
+        if (disposed) return;
+        const normalized = normalizeHostUiLocale(nextLocale);
+        if (!normalized) return;
+        hostLocaleOverride = normalized;
+        i18n.setLocale(normalized);
+        controller.render();
+        if (canPollSidecar()) {
+          api
+            .post('/api/settings/update', { locale: normalized }, hostPort.lifecycleSignal || undefined)
+            .catch(() => {});
+        }
+      });
+      if (typeof unsub === 'function') {
+        unsubscribeI18n = unsub;
+      }
+    } catch {}
+  }
+
   // Subscribe to Native Host v3.1.1 central Remote Host Bridge transitions on Remote Web
   if (isRemoteWeb && hostPort.events && typeof hostPort.events.on === 'function') {
     try {
@@ -796,6 +835,12 @@ export function startAddonStatusbar({
         unsubscribeTheme();
       } catch {}
       unsubscribeTheme = null;
+    }
+    if (typeof unsubscribeI18n === 'function') {
+      try {
+        unsubscribeI18n();
+      } catch {}
+      unsubscribeI18n = null;
     }
     if (typeof unsubscribeRemoteBridge === 'function') {
       try {
@@ -882,6 +927,15 @@ export function startStandbyStatusbar({
   let disposed = false;
   let observer = null;
   let currentSlotEl = null;
+  let unsubscribeI18n = null;
+
+  if (hostPort.hostI18n && typeof hostPort.hostI18n.getLocale === 'function') {
+    try {
+      const hostLoc = String(hostPort.hostI18n.getLocale() || '').trim().toLowerCase();
+      if (hostLoc === 'en' || hostLoc.startsWith('en-')) i18n.setLocale('en');
+      else if (hostLoc === 'ko' || hostLoc.startsWith('ko-')) i18n.setLocale('ko');
+    } catch {}
+  }
 
   let tokenCss = '';
   if (hostPort.theme && typeof hostPort.theme.getTokenCss === 'function') {
@@ -926,6 +980,21 @@ export function startStandbyStatusbar({
   barEl.appendChild(leftEl);
   barEl.appendChild(rightEl);
 
+  if (hostPort.hostI18n && typeof hostPort.hostI18n.onDidChange === 'function') {
+    try {
+      const unsub = hostPort.hostI18n.onDidChange((nextLocale) => {
+        if (disposed) return;
+        const lower = String(nextLocale || '').trim().toLowerCase();
+        if (lower === 'en' || lower.startsWith('en-')) i18n.setLocale('en');
+        else if (lower === 'ko' || lower.startsWith('ko-')) i18n.setLocale('ko');
+        else return;
+        msgEl.textContent = i18n.t().standby;
+        reloadBtn.textContent = i18n.t().reloadNow;
+      });
+      if (typeof unsub === 'function') unsubscribeI18n = unsub;
+    } catch {}
+  }
+
   function mountIfFound() {
     if (disposed) return false;
     const boxes = Array.from(doc.querySelectorAll('[data-testid="agent-input-box"]'));
@@ -962,6 +1031,12 @@ export function startStandbyStatusbar({
     if (disposed) return;
     disposed = true;
     if (observer) observer.disconnect();
+    if (typeof unsubscribeI18n === 'function') {
+      try {
+        unsubscribeI18n();
+      } catch {}
+      unsubscribeI18n = null;
+    }
     try {
       barEl.remove();
     } catch {}

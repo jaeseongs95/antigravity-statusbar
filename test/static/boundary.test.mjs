@@ -176,7 +176,7 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v3.json d
   assert.equal(addonManifest.version, '3.3.1');
   assert.equal(addonManifest.trustLevel, 'trusted');
   assert.deepEqual(addonManifest.compatibility?.surfaces, ['desktop', 'remote-web']);
-  assert.equal(addonManifest.compatibility?.minHostVersion, '3.1.1');
+  assert.equal(addonManifest.compatibility?.minHostVersion, '3.3.0');
   assert.deepEqual(addonManifest.capabilities, ['renderer']);
   assert.equal(addonManifest.entry?.rendererScript, 'runtime/statusbar-renderer.js');
   assert.equal(addonManifest.entry?.mainHookScript, null);
