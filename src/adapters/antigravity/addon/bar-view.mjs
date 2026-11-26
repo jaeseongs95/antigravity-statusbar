@@ -141,10 +141,19 @@ export function createBarView({ doc, i18n }) {
   }) {
     const tr = i18n.t();
     const isBackendCompacting = Boolean(snap?.compaction?.inProgress);
+    const hasCompactionBadge = Boolean(
+      snap &&
+        (snap.autoResumeTriggered ||
+          snap.autoResumePending ||
+          snap.autoCompactTriggered ||
+          snap.compaction?.trigger === 'auto' ||
+          isBackendCompacting),
+    );
     const isCompactingNow = Boolean(compacting || isBackendCompacting);
     const effectiveConfigured = Boolean(configured && (!isRemoteWeb || remoteBridgeConnected));
     compactBtn.disabled = isCompactingNow || !hasSession || !effectiveConfigured;
-    setText(compactBtn, isCompactingNow ? tr.compacting : tr.compact);
+    compactBtn.style.display = hasCompactionBadge ? 'none' : '';
+    setText(compactBtn, isCompactingNow && !hasCompactionBadge ? tr.compacting : tr.compact);
     compactBtn.title = compactPrompt ? `/compact ${compactPrompt}` : '/compact';
     settingsBtn.setAttribute('aria-label', tr.settingsTitle);
 

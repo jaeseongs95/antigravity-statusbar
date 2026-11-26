@@ -1,3 +1,67 @@
+# Release Notes — `v3.3.1` (2026-11-26)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.3.1` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.3.1` is a UI/UX polish patch release aligned with **Extenra** (formerly `antigravity-addons`) **`v3.2.1`**. It eliminates duplicate inline/toast notifications and redundant compaction controls, refines 2-row inline statusbar wrapping, cleans up Settings form fields, replaces modal-on-modal stacking with in-place Global Context Limits navigation, and unifies action button row alignment.
+
+### 2. Key Changes
+- **Inline Statusbar Deduplication, Wrapping & Compaction State (`bar-controller.mjs`, `bar-view.mjs`, `styles.mjs`)**:
+  - `showNote()` omits the duplicate inline `.agy-inline-status-note` text whenever `hostPort.showToast()` succeeds, preserving inline note output solely as a fallback when host toasts are unavailable.
+  - Hides the redundant disabled `'…'` `compact` button while a compaction progress badge (`Compacting…` / `Auto-compacting…` / `Resuming…`) is already visible.
+  - Right-aligns `.agy-inline-right` (`margin-left: auto; justify-content: flex-end;`) with compact flex gaps and hides `:empty` note/addon containers to prevent dead gaps and awkward left-aligned 2nd-row wraps.
+- **Settings Form Cleanup (`ui-schemas.mjs`)**:
+  - Removes the duplicate `label` on `set-lang-select` (already titled by `set-lang-sec`).
+  - Expands `set-compact-prompt` `textarea` from `rows: 3` to `rows: 4` so multi-line default prompts remain readable without clipping.
+- **Zero Modal-on-Modal Navigation (`bar-controller.mjs`, `ui-schemas.mjs`, `i18n.mjs`)**:
+  - Clicking **Global Context Limits…** from Settings switches in-place inside the same Settings view with a top **`← Back to Settings`** button across Desktop modal, Desktop inline Settings tab, and Remote Web Drawer (standalone Context Popup / Command Palette entry still opens a single modal cleanly).
+- **Consistent Action Button Row Sizing (`ui-schemas.mjs`)**:
+  - Wraps `gm-model-save-btn` (plus `gm-clear-session-btn`, `gm-use-current-model-btn`, and `set-open-global-btn`) in `.ag-row` containers so single buttons match the content-sized left-aligned button style of `[Apply][Reset]` instead of stretching 100% width.
+- **Extenra SDK Parity Lookup (`test/integration/addon-v3-parity.test.mjs`)**:
+  - Adds `@extenra/sdk` and `../extenra/packages/sdk/src/index.js` ahead of legacy `@antigravity-addons/sdk` candidates.
+
+### 3. Verification
+- `node scripts/build-renderer.mjs`: **PASS** (`151,824 bytes`, `sha256: d9db2704d67362826d140d8f0baa9c56ae9833fb9583ac17d97f9c3b6f70f831`).
+- `extenra --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `version: "3.3.1"`).
+- `@extenra/sdk v3.2.1` parity tests (`REQUIRE_ADDONS_SDK=1`): **PASS 3/3**.
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, real Headless Chromium Shadow DOM E2E, and installer dry-run **100% PASS**.
+
+---
+
+## [한국어] `v3.3.1` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.3.1`은 **Extenra**(구 `antigravity-addons`) **`v3.2.1`** 호스트 UI 업그레이드에 맞춘 상태바 UI/UX 개선 패치 릴리즈입니다. 인라인 상태바 중복 알림·줄바꿈 정렬·컴팩션 버튼 중복을 정리하고, 설정 모달 중복 라벨과 요약 문구 입력 높이를 개선했으며, 설정 → 전역 컨텍스트 한도 전환 시 중첩 모달을 없애고 버튼 크기·정렬을 통일했습니다.
+
+### 2. 주요 변경 사항
+- **인라인 상태바 중복 알림·줄바꿈·컴팩션 상태 정리 (`bar-controller.mjs`, `bar-view.mjs`, `styles.mjs`)**:
+  - `showNote()`에서 `hostPort.showToast()`가 성공적으로 토스트를 띄우면 인라인 `.agy-inline-status-note` 중복 표시를 생략합니다(토스트 미지원 환경에서만 인라인 폴백 유지).
+  - `컴팩션 중…` / `자동 컴팩션 중…` / `자동 재개 중…` 배지가 이미 표시될 때는 비활성 `'…'` `compact` 버튼을 숨겨 중복 표시를 제거했습니다.
+  - `.agy-inline-right`에 `margin-left: auto; justify-content: flex-end;`와 컴팩트 간격을 적용하고 빈 컨테이너(`:empty`)를 숨겨 2줄 줄바꿈 시 우측 정렬과 불필요한 줄바꿈 방지를 개선했습니다.
+- **설정 스키마 정리 (`ui-schemas.mjs`)**:
+  - `set-lang-sec` 제목과 중복되던 `set-lang-select`의 `label`을 제거했습니다.
+  - `set-compact-prompt` `textarea`를 `rows: 3`에서 `rows: 4`로 확대해 기본 한국어 요약 문구가 잘리지 않도록 보강했습니다.
+- **중첩 모달(Modal-on-Modal) 제거 (`bar-controller.mjs`, `ui-schemas.mjs`, `i18n.mjs`)**:
+  - 설정 화면에서 **전역 컨텍스트 한도 설정…** 클릭 시 두 번째 모달을 겹쳐 띄우지 않고 동일 설정 뷰 내부에서 인플레이스 전환하며 상단에 **`← 설정으로 돌아가기`** 버튼을 제공합니다(데스크톱 설정 모달·데스크톱 설정 인라인 탭·원격 웹 드로어 공통 적용).
+- **전역 컨텍스트 한도 버튼 정렬 통일 (`ui-schemas.mjs`)**:
+  - `gm-model-save-btn`(및 `gm-clear-session-btn`, `gm-use-current-model-btn`, `set-open-global-btn`)을 `row` 컨테이너로 감싸 위 카드의 `[적용][초기화]`와 버튼 크기·정렬을 통일했습니다.
+- **Extenra SDK 패리티 탐색 지원 (`test/integration/addon-v3-parity.test.mjs`)**:
+  - `@extenra/sdk` 및 `../extenra/packages/sdk/src/index.js` 경로를 우선 탐색하도록 보강했습니다.
+
+### 3. 검증 근거
+- `node scripts/build-renderer.mjs`: **PASS** (`151,824 bytes`, `sha256: d9db2704d67362826d140d8f0baa9c56ae9833fb9583ac17d97f9c3b6f70f831`).
+- `extenra --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `version: "3.3.1"`).
+- `@extenra/sdk v3.2.1` 패리티 테스트(`REQUIRE_ADDONS_SDK=1`): **PASS 3/3**.
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, 실제 Headless Chromium Shadow DOM E2E 및 설치 드라이런 전 항목 **100% PASS**.
+
+---
+
 # Release Notes — `v3.3.0` (2026-11-26)
 
 > **Document Policy / 문서 작성 기준**

@@ -14,7 +14,7 @@ export const STATUSBAR_STYLES = `
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px 8px;
   padding: 4px 10px;
   margin-top: 4px;
   border-top: 1px solid var(--ag-border, rgba(255, 255, 255, 0.08));
@@ -35,13 +35,21 @@ export const STATUSBAR_STYLES = `
   color: var(--ag-text, #e6edf3);
   box-shadow: var(--ag-shadow, 0 8px 24px rgba(0, 0, 0, 0.45));
 }
-.agy-inline-left,
+.agy-inline-left {
+  display: flex;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
 .agy-inline-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 5px;
   min-width: 0;
   flex-wrap: wrap;
+  margin-left: auto;
 }
 .agy-inline-metric {
   display: inline-flex;
@@ -165,6 +173,11 @@ export const STATUSBAR_STYLES = `
 .agy-inline-status-note {
   font-size: 10px;
   color: var(--ag-text-muted, rgba(255, 255, 255, 0.6));
+}
+.agy-inline-status-note:empty,
+.agy-inline-delegated-btns:empty,
+.agy-inline-custom-btns:empty {
+  display: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .agy-inline-bar-fill {

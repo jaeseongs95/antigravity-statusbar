@@ -36,6 +36,7 @@ export function createBarController({
     globalModalHandle: null,
     settingsPageHandle: null,
     settingsPageOpen: false,
+    settingsSubView: 'main',
     noteTimer: null,
     popupFeedbackTimer: null,
     modalFeedbackTimer: null,
@@ -110,12 +111,14 @@ export function createBarController({
   }
 
   function emitToast(message, variant = 'info', durationMs = 3500) {
-    if (!message || state.disposed) return;
+    if (!message || state.disposed) return false;
     if (hostPort && typeof hostPort.showToast === 'function') {
       try {
         hostPort.showToast({ message, variant, durationMs });
+        return true;
       } catch {}
     }
+    return false;
   }
 
   function showNote(text, durationMs = 4000, toastVariant = null) {
@@ -123,10 +126,11 @@ export function createBarController({
       clearTimeout(state.noteTimer);
       state.noteTimer = null;
     }
-    barView.setNote(text);
-    if (text && toastVariant) {
-      emitToast(text, toastVariant, durationMs);
+    if (text && toastVariant && emitToast(text, toastVariant, durationMs)) {
+      barView.setNote('');
+      return;
     }
+    barView.setNote(text);
     if (text && durationMs > 0) {
       state.noteTimer = setTimeout(() => {
         state.noteTimer = null;
@@ -448,7 +452,7 @@ export function createBarController({
     });
   }
 
-  function buildCurrentGlobalModalSpec() {
+  function buildCurrentGlobalModalSpec({ showBackToSettings = false } = {}) {
     return uiSchemas.buildGlobalLimitModalSpec({
       defaultCustomLimit:
         typeof sharedState.defaultCustomLimit === 'number' ? sharedState.defaultCustomLimit : null,
@@ -460,12 +464,16 @@ export function createBarController({
       modelLimitInput: state.modalDraft.modelLimitInput,
       modelPreset: state.modalDraft.modelPreset,
       sessionOverrideLimit: getSavedLimitForScope('session'),
+      showBackToSettings,
       feedback: state.modalDraft.feedback,
       feedbackIsErr: state.modalDraft.feedbackIsErr,
     });
   }
 
   function buildCurrentSettingsPageSpec() {
+    if (state.settingsSubView === 'global-limits') {
+      return buildCurrentGlobalModalSpec({ showBackToSettings: true });
+    }
     const remoteBridge = buildRemoteBridgeSummary();
     return uiSchemas.buildSettingsPageSpec({
       isRemoteWeb,
@@ -492,11 +500,16 @@ export function createBarController({
   }
 
   function updateGlobalModalInPlace() {
-    if (!state.globalModalHandle || state.disposed) return;
-    try {
-      const { tree, state: nextState } = buildCurrentGlobalModalSpec();
-      state.globalModalHandle.update(tree, nextState);
-    } catch {}
+    if (state.disposed) return;
+    if (state.globalModalHandle) {
+      try {
+        const { tree, state: nextState } = buildCurrentGlobalModalSpec({ showBackToSettings: false });
+        state.globalModalHandle.update(tree, nextState);
+      } catch {}
+    }
+    if (state.settingsPageOpen && state.settingsSubView === 'global-limits') {
+      updateSettingsPageInPlace();
+    }
   }
 
   function updateSettingsPageInPlace() {
@@ -607,6 +620,74 @@ export function createBarController({
     return handle;
   }
 
+  function handleGlobalLimitFieldChange({ field, value }) {
+    if (field === 'defaultPreset') {
+      state.modalDraft.defaultDirty = true;
+      state.modalDraft.defaultPreset = String(value || '');
+      state.modalDraft.defaultLimitInput = String(value || '');
+      state.modalDraft.feedback = '';
+      updateGlobalModalInPlace();
+      return;
+    }
+    if (field === 'defaultLimitInput') {
+      state.modalDraft.defaultDirty = true;
+      state.modalDraft.defaultLimitInput = String(value ?? '');
+      const raw = state.modalDraft.defaultLimitInput.replace(/[\s,]/g, '').trim();
+      const parsed = raw ? Number(raw) : NaN;
+      state.modalDraft.defaultPreset = PRESETS.includes(parsed) ? String(parsed) : '';
+      state.modalDraft.feedback = '';
+      updateGlobalModalInPlace();
+      return;
+    }
+    if (field === 'modelNameInput') {
+      state.modalDraft.modelNameInput = String(value ?? '');
+      state.modalDraft.feedback = '';
+      return;
+    }
+    if (field === 'modelPreset') {
+      state.modalDraft.modelPreset = String(value || '');
+      state.modalDraft.modelLimitInput = String(value || '');
+      state.modalDraft.feedback = '';
+      updateGlobalModalInPlace();
+      return;
+    }
+    if (field === 'modelLimitInput') {
+      state.modalDraft.modelLimitInput = String(value ?? '');
+      const raw = state.modalDraft.modelLimitInput.replace(/[\s,]/g, '').trim();
+      const parsed = raw ? Number(raw) : NaN;
+      state.modalDraft.modelPreset = PRESETS.includes(parsed) ? String(parsed) : '';
+      state.modalDraft.feedback = '';
+      updateGlobalModalInPlace();
+    }
+  }
+
+  function handleGlobalLimitAction({ actionId, payload }) {
+    if (actionId === 'clear-session-limit') {
+      handleClearCurrentSessionLimit();
+    } else if (actionId === 'save-default-limit') {
+      handleSaveGlobalDefault(state.modalDraft.defaultLimitInput);
+    } else if (actionId === 'reset-default-limit') {
+      state.modalDraft.defaultLimitInput = '';
+      state.modalDraft.defaultPreset = '';
+      handleSaveGlobalDefault('');
+    } else if (actionId === 'use-current-model') {
+      const curModel = state.snapshot?.modelName || '';
+      if (curModel) {
+        state.modalDraft.modelNameInput = curModel;
+        updateGlobalModalInPlace();
+      }
+    } else if (actionId === 'save-model-limit') {
+      handleSaveModelLimit(state.modalDraft.modelNameInput, state.modalDraft.modelLimitInput);
+    } else if (actionId === 'edit-model-limit' && payload) {
+      state.modalDraft.modelNameInput = String(payload.model || '');
+      state.modalDraft.modelLimitInput = String(payload.limit || '');
+      state.modalDraft.modelPreset = PRESETS.includes(payload.limit) ? String(payload.limit) : '';
+      updateGlobalModalInPlace();
+    } else if (actionId === 'remove-model-limit' && payload) {
+      handleSaveModelLimit(payload.model, null);
+    }
+  }
+
   function openGlobalLimits() {
     if (state.disposed || !hostPort || typeof hostPort.openModal !== 'function') return null;
     closeContextPopup();
@@ -617,78 +698,14 @@ export function createBarController({
     state.modalDraft.feedback = '';
     state.modalDraft.feedbackIsErr = false;
     syncModalDefaultDraft(true);
-    const { tree, state: initState } = buildCurrentGlobalModalSpec();
+    const { tree, state: initState } = buildCurrentGlobalModalSpec({ showBackToSettings: false });
     const handle = hostPort.openModal({
       title: i18n.t().globalModalTitle,
       placement: { zone: 'surface-center', width: 460 },
       tree,
       state: initState,
-      onChange({ field, value }) {
-        if (field === 'defaultPreset') {
-          state.modalDraft.defaultDirty = true;
-          state.modalDraft.defaultPreset = String(value || '');
-          state.modalDraft.defaultLimitInput = String(value || '');
-          state.modalDraft.feedback = '';
-          updateGlobalModalInPlace();
-          return;
-        }
-        if (field === 'defaultLimitInput') {
-          state.modalDraft.defaultDirty = true;
-          state.modalDraft.defaultLimitInput = String(value ?? '');
-          const raw = state.modalDraft.defaultLimitInput.replace(/[\s,]/g, '').trim();
-          const parsed = raw ? Number(raw) : NaN;
-          state.modalDraft.defaultPreset = PRESETS.includes(parsed) ? String(parsed) : '';
-          state.modalDraft.feedback = '';
-          updateGlobalModalInPlace();
-          return;
-        }
-        if (field === 'modelNameInput') {
-          state.modalDraft.modelNameInput = String(value ?? '');
-          state.modalDraft.feedback = '';
-          return;
-        }
-        if (field === 'modelPreset') {
-          state.modalDraft.modelPreset = String(value || '');
-          state.modalDraft.modelLimitInput = String(value || '');
-          state.modalDraft.feedback = '';
-          updateGlobalModalInPlace();
-          return;
-        }
-        if (field === 'modelLimitInput') {
-          state.modalDraft.modelLimitInput = String(value ?? '');
-          const raw = state.modalDraft.modelLimitInput.replace(/[\s,]/g, '').trim();
-          const parsed = raw ? Number(raw) : NaN;
-          state.modalDraft.modelPreset = PRESETS.includes(parsed) ? String(parsed) : '';
-          state.modalDraft.feedback = '';
-          updateGlobalModalInPlace();
-        }
-      },
-      onAction({ actionId, payload }) {
-        if (actionId === 'clear-session-limit') {
-          handleClearCurrentSessionLimit();
-        } else if (actionId === 'save-default-limit') {
-          handleSaveGlobalDefault(state.modalDraft.defaultLimitInput);
-        } else if (actionId === 'reset-default-limit') {
-          state.modalDraft.defaultLimitInput = '';
-          state.modalDraft.defaultPreset = '';
-          handleSaveGlobalDefault('');
-        } else if (actionId === 'use-current-model') {
-          const curModel = state.snapshot?.modelName || '';
-          if (curModel) {
-            state.modalDraft.modelNameInput = curModel;
-            updateGlobalModalInPlace();
-          }
-        } else if (actionId === 'save-model-limit') {
-          handleSaveModelLimit(state.modalDraft.modelNameInput, state.modalDraft.modelLimitInput);
-        } else if (actionId === 'edit-model-limit' && payload) {
-          state.modalDraft.modelNameInput = String(payload.model || '');
-          state.modalDraft.modelLimitInput = String(payload.limit || '');
-          state.modalDraft.modelPreset = PRESETS.includes(payload.limit) ? String(payload.limit) : '';
-          updateGlobalModalInPlace();
-        } else if (actionId === 'remove-model-limit' && payload) {
-          handleSaveModelLimit(payload.model, null);
-        }
-      },
+      onChange: handleGlobalLimitFieldChange,
+      onAction: handleGlobalLimitAction,
       onClose() {
         state.globalModalHandle = null;
       },
@@ -710,6 +727,7 @@ export function createBarController({
       state: initial.state,
       getSchema() {
         state.settingsPageOpen = true;
+        state.settingsSubView = 'main';
         syncSettingsDraft(false);
         return buildCurrentSettingsPageSpec().tree;
       },
@@ -717,7 +735,12 @@ export function createBarController({
         syncSettingsDraft(false);
         return buildCurrentSettingsPageSpec().state;
       },
-      onChange({ field, value }) {
+      onChange(ev) {
+        if (state.settingsSubView === 'global-limits') {
+          handleGlobalLimitFieldChange(ev);
+          return;
+        }
+        const { field, value } = ev;
         if (field === 'autoCompact') {
           handleToggleAutoCompact(Boolean(value));
         } else if (field === 'compactPrompt') {
@@ -729,10 +752,29 @@ export function createBarController({
           applyLocale(String(value || 'ko'));
         }
       },
-      onAction({ actionId, payload }) {
+      onAction(ev) {
+        const { actionId, payload } = ev;
         if (actionId === 'open-global-limits') {
-          openGlobalLimits();
-        } else if (actionId === 'save-compact-prompt') {
+          state.settingsSubView = 'global-limits';
+          state.modalDraft.feedback = '';
+          state.modalDraft.feedbackIsErr = false;
+          syncModalDefaultDraft(true);
+          updateSettingsPageInPlace();
+          return;
+        }
+        if (actionId === 'back-to-settings') {
+          state.settingsSubView = 'main';
+          state.settingsDraft.feedback = '';
+          state.settingsDraft.feedbackIsErr = false;
+          syncSettingsDraft(false);
+          updateSettingsPageInPlace();
+          return;
+        }
+        if (state.settingsSubView === 'global-limits') {
+          handleGlobalLimitAction(ev);
+          return;
+        }
+        if (actionId === 'save-compact-prompt') {
           saveCompactPromptValue(state.settingsDraft.compactPrompt);
         } else if (actionId === 'reset-compact-prompt') {
           state.settingsDraft.compactPrompt = '';
@@ -745,6 +787,7 @@ export function createBarController({
       },
       onClose() {
         state.settingsPageOpen = false;
+        state.settingsSubView = 'main';
         barView.setExpandedState({
           open: Boolean(state.contextPopupHandle),
           activeTab: state.contextPopupHandle ? 'context' : 'settings',
@@ -758,6 +801,8 @@ export function createBarController({
   function openSettings() {
     if (state.disposed) return null;
     closeContextPopup();
+    closeGlobalModal();
+    state.settingsSubView = 'main';
     state.settingsDraft.feedback = '';
     state.settingsDraft.feedbackIsErr = false;
     syncSettingsDraft(true);
@@ -916,6 +961,9 @@ export function createBarController({
       updateGlobalModalInPlace();
     }
     if (state.settingsPageOpen && state.settingsPageHandle) {
+      if (state.settingsSubView === 'global-limits') {
+        syncModalDefaultDraft(false);
+      }
       updateSettingsPageInPlace();
     }
   }

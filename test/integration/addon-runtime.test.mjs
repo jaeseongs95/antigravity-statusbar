@@ -270,7 +270,7 @@ function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', remot
     meta: Object.freeze({
       pluginId,
       displayName: 'Antigravity Statusbar',
-      version: '3.3.0',
+      version: '3.3.1',
       trustLevel: 'trusted',
       sourceSchemaVersion: 3,
     }),

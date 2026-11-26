@@ -14,6 +14,8 @@ const TEST_TOKEN = 'v3-parity-sdk-secret-token-32-ok';
 function loadAddonsSdk() {
   const req = createRequire(import.meta.url);
   const candidates = [
+    '@extenra/sdk',
+    path.resolve(REPO_ROOT, '..', 'extenra', 'packages', 'sdk', 'src', 'index.js'),
     '@antigravity-addons/sdk',
     path.resolve(REPO_ROOT, '..', 'antigravity-addons', 'packages', 'sdk', 'src', 'index.js'),
   ];
@@ -280,6 +282,14 @@ test('TC-V3-PARITY-01 (Desktop): @antigravity-addons/sdk createTestHost({ surfac
     assert.ok(globalSummaryEl.textContent.includes('1'));
     assert.ok(settingsHandle.getElementById('set-autocompact-toggle'));
     assert.ok(settingsHandle.getElementById('set-lang-select'));
+    const compactPromptEl = settingsHandle.getElementById('set-compact-prompt');
+    assert.equal(compactPromptEl?.getAttribute('rows'), '4');
+    // Switching to Global Limits inside Settings updates in-place (zero modal-on-modal) and supports Back
+    settingsHandle.getElementById('set-open-global-btn')?.click();
+    assert.ok(settingsHandle.getElementById('gm-back-settings-btn'), 'Settings must switch in-place to Global Limits with Back button');
+    assert.equal(settingsHandle.getElementById('gm-model-actions')?.className, 'ag-row');
+    settingsHandle.getElementById('gm-back-settings-btn')?.click();
+    assert.ok(settingsHandle.getElementById('set-lang-select'), 'Back button must restore main Settings view');
     settingsHandle.close();
 
     // 4. Tier-2 Context Popup via ui.openPopup + in-place update preserving focused input + <=640px mobile sheet
