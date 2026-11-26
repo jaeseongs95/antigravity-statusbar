@@ -600,83 +600,90 @@ test('TC-ADDON-06, TC-ADDON-07 & TC-ADDON-08: bundled v3 renderer uses AddonCont
     clearInterval,
     addonHost: host.ctx,
   });
-  await flushMicrotasks();
+  try {
+    await flushMicrotasks();
 
-  // 1. Capability-only canvas & style injection with theme tokens, zero credential leak
-  assert.equal(doc.getDirectStyleCreateCount(), 0);
-  assert.ok(host.styles.has('statusbar-main'));
-  assert.ok(host.styles.get('statusbar-main').cssText.includes('--ag-accent'));
-  assert.equal(host.slots.size, 1);
-  const rootRec = host.slots.get('antigravity-statusbar.root');
-  assert.equal(rootRec.container, v1.box);
-  assert.equal(JSON.stringify(sandboxWindow).includes(TEST_TOKEN), false);
+    // 1. Capability-only canvas & style injection with theme tokens, zero credential leak
+    assert.equal(doc.getDirectStyleCreateCount(), 0);
+    assert.ok(host.styles.has('statusbar-main'));
+    assert.ok(host.styles.get('statusbar-main').cssText.includes('--ag-accent'));
+    assert.equal(host.slots.size, 1);
+    const rootRec = host.slots.get('antigravity-statusbar.root');
+    assert.equal(rootRec.container, v1.box);
+    assert.equal(JSON.stringify(sandboxWindow).includes(TEST_TOKEN), false);
 
-  // 2. Well-known `host.statusbar` service delegation
-  assert.ok(host.services.has('host.statusbar'));
-  const sbSvc = host.services.get('host.statusbar').impl;
-  let delegatedClicked = null;
-  const itemHandle = sbSvc.registerItem({
-    pluginId: 'peer-x',
-    id: 'btn1',
-    label: 'PeerX',
-    badge: '1',
-    align: 'right',
-    onClick(ev) { delegatedClicked = ev; },
-  });
-  const delegatedEl = rootRec.rootEl.querySelector('[data-status-plugin-id="peer-x"]');
-  assert.ok(delegatedEl);
-  delegatedEl.click({ ctrlKey: true });
-  assert.equal(delegatedClicked?.ctrlKey, true);
-  itemHandle.dispose();
-  assert.equal(rootRec.rootEl.querySelector('[data-status-plugin-id="peer-x"]'), null);
+    // 2. Well-known `host.statusbar` service delegation
+    assert.ok(host.services.has('host.statusbar'));
+    const sbSvc = host.services.get('host.statusbar').impl;
+    let delegatedClicked = null;
+    const itemHandle = sbSvc.registerItem({
+      pluginId: 'peer-x',
+      id: 'btn1',
+      label: 'PeerX',
+      badge: '1',
+      align: 'right',
+      onClick(ev) { delegatedClicked = ev; },
+    });
+    const delegatedEl = rootRec.rootEl.querySelector('[data-status-plugin-id="peer-x"]');
+    assert.ok(delegatedEl);
+    delegatedEl.click({ ctrlKey: true });
+    assert.equal(delegatedClicked?.ctrlKey, true);
+    itemHandle.dispose();
+    assert.equal(rootRec.rootEl.querySelector('[data-status-plugin-id="peer-x"]'), null);
 
-  // 3. Focus switch reattaches canvas to v2.box
-  v2.editor.focus();
-  doc.dispatchEvent({ type: 'focusin', target: v2.editor });
-  await flushMicrotasks();
-  assert.equal(host.slots.get('antigravity-statusbar.root').container, v2.box);
+    // 3. Focus switch reattaches canvas to v2.box (mountSlot unmounts old slot & mounts fresh slot)
+    v2.editor.focus();
+    doc.dispatchEvent({ type: 'focusin', target: v2.editor });
+    await flushMicrotasks();
+    const activeRootRec = host.slots.get('antigravity-statusbar.root');
+    assert.equal(activeRootRec.container, v2.box);
 
-  // 4. Tier-2 Context Popup & Global Limits Modal + Tier-1 Settings Page (autoCompact rollback + prompt save)
-  const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
-  ctxBtn.click();
-  assert.equal(host.popups.length, 1);
-  assert.equal(host.popups[0].opts.placement.zone, 'anchor');
-  host.popups[0].opts.onAction({ actionId: 'open-global-limits' });
-  assert.equal(host.popups[0].closed, true);
-  assert.equal(host.modals.length, 1);
-  host.modals[0].close();
+    // 4. Tier-2 Context Popup & Global Limits Modal + Tier-1 Settings Page (autoCompact rollback + prompt save)
+    const ctxBtn = activeRootRec.rootEl.querySelector('.agy-inline-metric-btn');
+    assert.ok(ctxBtn, 'Expected context metric button inside active slot after focus switch');
+    ctxBtn.click();
+    assert.equal(host.popups.length, 1);
+    assert.equal(host.popups[0].opts.placement.zone, 'anchor');
+    host.popups[0].opts.onAction({ actionId: 'open-global-limits' });
+    assert.equal(host.popups[0].closed, true);
+    assert.equal(host.modals.length, 1);
+    host.modals[0].close();
 
-  const settingsPage = host.getSettingsPage();
-  assert.ok(settingsPage);
-  settingsPage.open();
-  assert.equal(findNodeById(settingsPage.tree, 'set-remote-sec'), null, 'Desktop settings must omit Remote Sidecar Connection');
+    const settingsPage = host.getSettingsPage();
+    assert.ok(settingsPage);
+    settingsPage.open();
+    assert.equal(findNodeById(settingsPage.tree, 'set-remote-sec'), null, 'Desktop settings must omit Remote Sidecar Connection');
 
-  failNextAutoCompact = true;
-  settingsPage.spec.onChange({ field: 'autoCompact', value: false });
-  await flushMicrotasks();
-  assert.equal(settingsPage.state.autoCompact, true, 'Failed autoCompact update must roll back');
+    failNextAutoCompact = true;
+    settingsPage.spec.onChange({ field: 'autoCompact', value: false });
+    await flushMicrotasks();
+    assert.equal(settingsPage.state.autoCompact, true, 'Failed autoCompact update must roll back');
 
-  settingsPage.spec.onChange({ field: 'compactPrompt', value: '변경된 파일만 요약' });
-  settingsPage.spec.onAction({ actionId: 'save-compact-prompt' });
-  await flushMicrotasks();
-  assert.equal(storedSettings.compactPrompt, '변경된 파일만 요약');
+    settingsPage.spec.onChange({ field: 'compactPrompt', value: '변경된 파일만 요약' });
+    settingsPage.spec.onAction({ actionId: 'save-compact-prompt' });
+    await flushMicrotasks();
+    assert.equal(storedSettings.compactPrompt, '변경된 파일만 요약');
 
-  // 5. Manual compact request
-  const compactBtn = rootRec.rootEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent === 'compact');
-  compactBtn.click();
-  await flushMicrotasks();
-  assert.ok(apiCalls.some((c) => c.pathname === '/api/compact' && c.body.sessionId === 'sess-beta'));
+    // 5. Manual compact request
+    const compactBtn = activeRootRec.rootEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent === 'compact');
+    assert.ok(compactBtn, 'Expected compact button inside active slot');
+    compactBtn.click();
+    await flushMicrotasks();
+    assert.ok(apiCalls.some((c) => c.pathname === '/api/compact' && c.body.sessionId === 'sess-beta'));
 
-  // 6. Dispose cleans up everything
-  host.ctx.lifecycle.dispose();
-  assert.equal(host.isDisposed(), true);
-  assert.equal(host.slots.size, 0);
-  assert.equal(host.styles.size, 0);
-  assert.equal(host.services.size, 0);
-  assert.equal(host.commands.size, 0);
-  assert.equal(sandboxWindow.statusbarAddons, undefined);
-  assert.equal(doc.getListenerCount('focusin'), 0);
-  assert.equal(doc.getListenerCount('pointerdown'), 0);
+    // 6. Dispose cleans up everything
+    host.ctx.lifecycle.dispose();
+    assert.equal(host.isDisposed(), true);
+    assert.equal(host.slots.size, 0);
+    assert.equal(host.styles.size, 0);
+    assert.equal(host.services.size, 0);
+    assert.equal(host.commands.size, 0);
+    assert.equal(sandboxWindow.statusbarAddons, undefined);
+    assert.equal(doc.getListenerCount('focusin'), 0);
+    assert.equal(doc.getListenerCount('pointerdown'), 0);
+  } finally {
+    host.ctx.lifecycle.dispose();
+  }
 });
 
 test('TC-ADDON-08: v3 standby stub mounts via AddonContextV3 with zero credentials, triggers reload on click, and cleans up on dispose', () => {
