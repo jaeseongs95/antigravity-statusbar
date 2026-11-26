@@ -62,7 +62,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
   assert.equal(manifest.pluginId, 'antigravity-statusbar');
   assert.equal(manifest.displayName, 'Antigravity Statusbar');
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(manifest.version, '3.2.0');
+  assert.equal(manifest.version, '3.3.0');
   assert.equal(manifest.trustLevel, 'trusted');
   assert.deepEqual(manifest.settingsBridge, {
     fileName: DEFAULT_SETTINGS_BRIDGE_FILE,
@@ -176,7 +176,7 @@ test('TC-ADDON-03: addon-host-adapter.mjs adapts AddonContextV3 (surface/capabil
 
   const fakeV3Ctx = {
     apiVersion: 3,
-    meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.2.0', trustLevel: 'trusted' },
+    meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.3.0', trustLevel: 'trusted' },
     env: {
       surface: 'desktop',
       layoutMode: 'desktop',
