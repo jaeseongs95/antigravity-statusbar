@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Deterministic static renderer bundle builder for AddonManifest.v2 (v3.3.0).
+ * Deterministic static renderer bundle builder for AddonManifest.v3 (v3.3.0).
  *
  * Emits the credential-free `runtime/statusbar-renderer.js` expected by
- * `antigravity-addons --build-addon-userscript` (v2.8.0+) and trusted SHA-256 pinning.
+ * `antigravity-addons` v3.0.0+ (`--build-addon-userscript` and Desktop trusted SHA-256 pinning).
  *
  * Usage:
  *   node scripts/build-renderer.mjs [--out <path>] [--check]

@@ -1,20 +1,23 @@
 /**
  * Sidecar HTTP API client implementing `StatusbarApiPort` (SRP / DIP).
  *
- * Security Invariants:
+ * AddonManifest.v3 Networking & Security Invariants:
+ * - Routes requests through `ctx.net.fetch` (`netFetchImpl`) whenever granted by the host
+ *   (Desktop `permissions.net.localLoopback` or Remote Web `permissions.net.httpsHosts`).
+ * - Removes non-standard direct `GM_xmlhttpRequest` probing; all userscript/host network
+ *   privileges remain behind the host `ctx.net.fetch` broker.
  * - On Desktop (default), restricts requests strictly to loopback `http://127.0.0.1|localhost|[::1]:<port>`.
  * - On Remote Web (`allowRemoteHttps: true`), allows loopback HTTP or explicit `https://` endpoints
  *   with zero embedded URL credentials, query strings, or fragments (rejects cleartext remote HTTP).
  * - Seals `token` strictly inside closure scope; never writes or returns it on `window`, DOM, or API getters.
- * - Supports live reconfiguration via `configure()` and credential revocation via `clearConnection()`.
  */
 
 export function createSidecarApiClient({
   baseUrl = null,
   token = null,
   allowRemoteHttps = false,
+  netFetchImpl = null,
   fetchImpl,
-  gmXhrImpl,
 } = {}) {
   const LOOPBACK_RE = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})\/?$/;
 
@@ -48,9 +51,10 @@ export function createSidecarApiClient({
       ) {
         throw new Error('ERR_INVALID_ENDPOINT_URL');
       }
-      const cleanedPath = parsed.pathname && parsed.pathname !== '/'
-        ? parsed.pathname.replace(/\/+$/, '')
-        : '';
+      const cleanedPath =
+        parsed.pathname && parsed.pathname !== '/'
+          ? parsed.pathname.replace(/\/+$/, '')
+          : '';
       return `${parsed.origin}${cleanedPath}`;
     }
     throw new Error('ERR_INVALID_LOOPBACK_BASE_URL');
@@ -65,115 +69,12 @@ export function createSidecarApiClient({
 
   let normalizedBaseUrl = '';
   let sealedToken = '';
-  const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch;
+  const doNetFetch = typeof netFetchImpl === 'function' ? netFetchImpl : null;
+  const doFetch = typeof fetchImpl === 'function' ? fetchImpl : typeof fetch === 'function' ? fetch : null;
   const activeControllers = new Set();
   let connected = false;
 
-  function resolveGmXhr() {
-    if (!allowRemoteHttps) return null;
-    if (typeof gmXhrImpl === 'function') return gmXhrImpl;
-    if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
-    if (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') {
-      return GM.xmlHttpRequest.bind(GM);
-    }
-    return null;
-  }
-
-  function postViaGmXhr(gmXhr, url, targetToken, payloadText, signal) {
-    return new Promise((resolve, reject) => {
-      if (signal && signal.aborted) {
-        const abortErr = new Error('aborted');
-        abortErr.name = 'AbortError';
-        reject(abortErr);
-        return;
-      }
-      let settled = false;
-      let handle = null;
-      const cleanup = () => {
-        if (signal) signal.removeEventListener('abort', onAbortSignal);
-      };
-      const finishResolve = (val) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(val);
-      };
-      const finishReject = (err) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(err);
-      };
-      const onAbortSignal = () => {
-        try {
-          if (handle && typeof handle.abort === 'function') handle.abort();
-        } catch {}
-        const abortErr = new Error('aborted');
-        abortErr.name = 'AbortError';
-        finishReject(abortErr);
-      };
-      if (signal) {
-        signal.addEventListener('abort', onAbortSignal, { once: true });
-      }
-      try {
-        handle = gmXhr({
-          method: 'POST',
-          url,
-          headers: {
-            'content-type': 'application/json',
-            'x-statusbar-token': targetToken,
-          },
-          data: payloadText,
-          responseType: 'text',
-          onload(resp) {
-            const status = typeof resp?.status === 'number' ? resp.status : 0;
-            const rawText = typeof resp?.responseText === 'string' ? resp.responseText : '';
-            let json = {};
-            if (rawText) {
-              try {
-                json = JSON.parse(rawText);
-              } catch {
-                json = {};
-              }
-            }
-            if (status < 200 || status >= 300) {
-              if (status >= 500 || status === 401 || status === 403 || status === 0) {
-                connected = false;
-              }
-              const err = new Error(json?.error?.message || `HTTP ${status}`);
-              err.status = status;
-              err.code = json?.error?.code || 'HTTP_ERROR';
-              finishReject(err);
-              return;
-            }
-            connected = true;
-            finishResolve(json);
-          },
-          onerror() {
-            connected = false;
-            const err = new Error('Network error');
-            err.code = 'ERR_GM_XHR_NETWORK';
-            finishReject(err);
-          },
-          ontimeout() {
-            connected = false;
-            const err = new Error('Request timed out');
-            err.code = 'ERR_GM_XHR_TIMEOUT';
-            finishReject(err);
-          },
-          onabort() {
-            const abortErr = new Error('aborted');
-            abortErr.name = 'AbortError';
-            finishReject(abortErr);
-          },
-        });
-      } catch (err) {
-        finishReject(err);
-      }
-    });
-  }
-
-  if (baseUrl !== null && baseUrl !== undefined || token !== null && token !== undefined) {
+  if ((baseUrl !== null && baseUrl !== undefined) || (token !== null && token !== undefined)) {
     normalizedBaseUrl = normalizeValidatedBaseUrl(baseUrl);
     sealedToken = normalizeValidatedToken(token);
   }
@@ -217,6 +118,49 @@ export function createSidecarApiClient({
     return normalizedBaseUrl;
   }
 
+  async function postViaNetBroker(targetUrl, targetToken, payloadText, signal) {
+    if (signal && signal.aborted) {
+      const abortErr = new Error('aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    const resp = await doNetFetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-statusbar-token': targetToken,
+      },
+      body: payloadText,
+    });
+    if (signal && signal.aborted) {
+      const abortErr = new Error('aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    const status = typeof resp?.status === 'number' ? resp.status : 0;
+    const rawText = typeof resp?.bodyText === 'string' ? resp.bodyText : '';
+    let json = {};
+    if (rawText) {
+      try {
+        json = JSON.parse(rawText);
+      } catch {
+        json = {};
+      }
+    }
+    if (!resp || resp.ok === false || (status > 0 && (status < 200 || status >= 300))) {
+      if (status === 0 || status >= 500 || status === 401 || status === 403) {
+        connected = false;
+      }
+      const reason = resp?.reason || json?.error?.code || 'HTTP_ERROR';
+      const err = new Error(json?.error?.message || resp?.reason || `HTTP ${status}`);
+      if (status > 0) err.status = status;
+      err.code = reason;
+      throw err;
+    }
+    connected = true;
+    return json;
+  }
+
   async function post(pathname, bodyObj, externalSignal) {
     if (!normalizedBaseUrl || !sealedToken) {
       const err = new Error('Sidecar connection is not configured.');
@@ -229,7 +173,9 @@ export function createSidecarApiClient({
     if (externalSignal) {
       if (externalSignal.aborted) {
         activeControllers.delete(ctrl);
-        throw new Error('aborted');
+        const abortErr = new Error('aborted');
+        abortErr.name = 'AbortError';
+        throw abortErr;
       }
       externalSignal.addEventListener('abort', onAbort, { once: true });
     }
@@ -238,6 +184,14 @@ export function createSidecarApiClient({
     const targetUrl = `${targetBase}${pathname}`;
     const payloadText = JSON.stringify(bodyObj || {});
     try {
+      if (doNetFetch) {
+        return await postViaNetBroker(targetUrl, targetToken, payloadText, ctrl.signal);
+      }
+      if (!doFetch) {
+        const err = new Error('No permitted network transport available.');
+        err.code = 'ERR_NET_UNAVAILABLE';
+        throw err;
+      }
       const res = await doFetch(targetUrl, {
         method: 'POST',
         headers: {
@@ -261,10 +215,6 @@ export function createSidecarApiClient({
       return json;
     } catch (err) {
       const isAborted = err?.name === 'AbortError' || err?.message === 'aborted' || ctrl.signal.aborted;
-      const gmXhr = !isAborted && err?.status === undefined ? resolveGmXhr() : null;
-      if (gmXhr) {
-        return await postViaGmXhr(gmXhr, targetUrl, targetToken, payloadText, ctrl.signal);
-      }
       if (!isAborted && (err?.status === undefined || err.status >= 500 || err.status === 401 || err.status === 403)) {
         connected = false;
       }

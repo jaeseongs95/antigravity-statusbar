@@ -1,7 +1,7 @@
 {
   "name": "antigravity-statusbar",
   "version": "3.2.0",
-  "description": "Official Antigravity Native Plugin (AddonManifest.v2 Inline Statusbar + Headless Native Sidecar) for real-time context usage, prompt cache hit rate, 5h/weekly quota, 4-tier context limits, guarded auto-compact & auto-resume, editable compaction prompt, and one-click compaction.",
+  "description": "Official Antigravity Native Plugin (AddonManifest.v3 API-First Statusbar + Headless Native Sidecar) for real-time context usage, prompt cache hit rate, 5h/weekly quota, 4-tier context limits, guarded auto-compact & auto-resume, editable compaction prompt, and host.statusbar delegation.",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -17,10 +17,10 @@
     "install-plugin": "node scripts/install-plugin.mjs",
     "test:static": "node --test test/static/boundary.test.mjs",
     "test:unit": "node --test test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/autocompact-tdd.test.mjs test/unit/p0-hardening-tdd.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs",
-    "test:integration": "node --test test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs",
+    "test:integration": "node --test test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs test/integration/addon-v3-parity.test.mjs",
     "test:security": "node --test test/security/sidecar-security.test.mjs",
     "test:ui": "node --test --test-concurrency=1 test/ui/ui-app.test.mjs test/ui/addon-browser-e2e.test.mjs",
-    "test": "node --test test/static/boundary.test.mjs test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/autocompact-tdd.test.mjs test/unit/p0-hardening-tdd.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs test/security/sidecar-security.test.mjs test/ui/ui-app.test.mjs test/ui/addon-browser-e2e.test.mjs"
+    "test": "node --test test/static/boundary.test.mjs test/unit/core.test.mjs test/unit/core-and-cli.test.mjs test/unit/context-limit-bva.test.mjs test/unit/global-limit-and-autocompact.test.mjs test/unit/autocompact-tdd.test.mjs test/unit/p0-hardening-tdd.test.mjs test/unit/addon-manifest.test.mjs test/unit/addon-ui-modules.test.mjs test/integration/storage-lock.test.mjs test/integration/antigravity-adapter.test.mjs test/integration/addon-runtime.test.mjs test/integration/addon-v3-parity.test.mjs test/security/sidecar-security.test.mjs test/ui/ui-app.test.mjs test/ui/addon-browser-e2e.test.mjs"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2",

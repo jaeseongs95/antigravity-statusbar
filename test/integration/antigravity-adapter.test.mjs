@@ -873,22 +873,28 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
     assert.equal(manifest.version, '3.2.0');
     const addonManifest = JSON.parse(
-      await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
+      await fs.readFile(path.join(destDir, 'addon-manifest.v3.json'), 'utf8'),
     );
-    assert.equal(addonManifest.schemaVersion, 2);
+    assert.equal(addonManifest.schemaVersion, 3);
+    assert.equal(addonManifest.apiVersion, 3);
     assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
     assert.equal(addonManifest.version, '3.2.0');
     assert.equal(addonManifest.trustLevel, 'trusted');
+    assert.deepEqual(addonManifest.compatibility.surfaces, ['desktop', 'remote-web']);
     assert.deepEqual(addonManifest.compatibility.hostProfiles, [
       'antigravity-desktop',
       'antigravity-remote-web',
     ]);
     assert.equal(addonManifest.compatibility.excludeHostProfiles, undefined);
-    assert.equal(addonManifest.compatibility.minHostVersion, '2.3.0');
+    assert.equal(addonManifest.compatibility.minHostVersion, '3.0.0');
+    assert.deepEqual(addonManifest.permissions.services, {
+      provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }],
+    });
     assert.deepEqual(addonManifest.settingsBridge, {
       fileName: 'antigravity-statusbar-runtime.json',
       maxBytes: 16384,
     });
+    assert.equal(addonManifest.uiSlots.length, 1);
     assert.equal(addonManifest.uiSlots[0].anchor, 'status-bar');
     assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');
 

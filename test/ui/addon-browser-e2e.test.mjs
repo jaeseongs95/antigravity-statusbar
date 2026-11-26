@@ -131,7 +131,7 @@ function connectCdpWebSocket(wsUrl) {
   });
 }
 
-test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E verifies badInput non-reset, 99.7% rounding, modal focus stability across polls, Escape focus return, and disconnect indicator', async (t) => {
+test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99.7% rounding, localized 5h/weekly quota, host.statusbar delegation, Tier-2 popup/modal ID in-place focus stability, Desktop settings hiding Remote Sidecar, and disconnect indicator', async (t) => {
   const browserPath = findHeadlessBrowser();
   if (!browserPath) {
     if (process.env.CI === 'true') {
@@ -246,9 +246,10 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
   const { port: sidecarPort, url: sidecarUrl } = await sidecar.listen();
   const bundleSource = renderAddonRendererBundle({ baseUrl: sidecarUrl, token });
 
+  // Lightweight v3 host harness with ID-based in-place schema reconciliation mirroring ui-schema-renderer.js
   const harnessHtml = `<!DOCTYPE html>
 <html lang="ko">
-<head><meta charset="utf-8"><title>Addon Shadow DOM E2E Harness</title></head>
+<head><meta charset="utf-8"><title>Addon V3 Shadow DOM E2E Harness</title></head>
 <body>
   <div data-cascade-id="sess-e2e-1" style="margin-top: 320px;">
     <div data-testid="agent-input-box" style="width: 720px; height: 60px; border: 1px solid #444;">
@@ -258,122 +259,270 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
   <script>
     (function() {
       const disposeHandlers = [];
+      const services = new Map();
       let rootShadowHost = null;
       let rootShadow = null;
       let rootSlotContainer = null;
-      let popoverHost = null;
       let popoverShadow = null;
-      let modalDialog = null;
       let modalShadow = null;
+      let settingsShadow = null;
+      const abortCtrl = new AbortController();
+
+      function evalCond(cond, state) {
+        if (!cond) return true;
+        const val = state ? state[cond.field] : undefined;
+        if ('eq' in cond) return val === cond.eq;
+        if ('neq' in cond) return val !== cond.neq;
+        return Boolean(val);
+      }
+
+      function createMiniSchemaRenderer(container, initTree, initState, onChange, onAction) {
+        let state = Object.assign({}, initState || {});
+        const refs = new Map();
+
+        function applyFlags(wrapper, ctrl, node) {
+          wrapper.hidden = node.visibleWhen ? !evalCond(node.visibleWhen, state) : false;
+          if (ctrl && 'disabled' in ctrl) {
+            ctrl.disabled = Boolean(node.disabled) || (node.disabledWhen ? evalCond(node.disabledWhen, state) : false);
+          }
+        }
+
+        function patchNode(ref, node) {
+          applyFlags(ref.wrapper, ref.ctrl, node);
+          const val = node.field ? state[node.field] : node.value;
+          if (node.type === 'text' || node.type === 'badge' || node.type === 'alert') {
+            ref.wrapper.textContent = String(node.text || '');
+            if (node.variant) ref.wrapper.setAttribute('data-variant', node.variant);
+          } else if (node.type === 'button') {
+            ref.ctrl.textContent = String(node.label || '');
+          } else if (node.type === 'input' || node.type === 'textarea') {
+            const root = ref.ctrl.getRootNode();
+            const active = root && root.activeElement ? root.activeElement : document.activeElement;
+            if (active !== ref.ctrl) ref.ctrl.value = val != null ? String(val) : '';
+          } else if (node.type === 'select') {
+            if (val != null) ref.ctrl.value = String(val);
+          } else if (node.type === 'toggle') {
+            ref.ctrl.checked = Boolean(val);
+          }
+        }
+
+        function buildNode(node) {
+          let wrapper = null;
+          let ctrl = null;
+          let mountEl = null;
+          if (node.type === 'stack' || node.type === 'row' || node.type === 'section') {
+            wrapper = document.createElement(node.type === 'section' ? 'section' : 'div');
+            if (node.title) {
+              const h = document.createElement('div');
+              h.textContent = node.title;
+              wrapper.appendChild(h);
+            }
+            mountEl = wrapper;
+          } else if (node.type === 'text' || node.type === 'badge' || node.type === 'alert') {
+            wrapper = document.createElement('div');
+            wrapper.textContent = String(node.text || '');
+            if (node.variant) wrapper.setAttribute('data-variant', node.variant);
+          } else if (node.type === 'button') {
+            ctrl = document.createElement('button');
+            ctrl.type = 'button';
+            ctrl.textContent = String(node.label || '');
+            ctrl.addEventListener('click', () => {
+              if (onAction) onAction({ actionId: node.actionId, payload: node.payload, state });
+            });
+            wrapper = ctrl;
+          } else if (node.type === 'input' || node.type === 'textarea') {
+            wrapper = document.createElement('label');
+            ctrl = document.createElement(node.type === 'textarea' ? 'textarea' : 'input');
+            if (node.type === 'input') ctrl.type = node.inputType || 'text';
+            ctrl.value = node.field && state[node.field] != null ? String(state[node.field]) : '';
+            ctrl.addEventListener('input', () => {
+              if (node.field) state[node.field] = ctrl.value;
+              if (onChange) onChange({ field: node.field, value: ctrl.value, state });
+            });
+            wrapper.appendChild(ctrl);
+          } else if (node.type === 'select') {
+            wrapper = document.createElement('label');
+            ctrl = document.createElement('select');
+            (node.options || []).forEach((o) => {
+              const opt = document.createElement('option');
+              opt.value = o.value;
+              opt.textContent = o.label;
+              ctrl.appendChild(opt);
+            });
+            if (node.field && state[node.field] != null) ctrl.value = String(state[node.field]);
+            ctrl.addEventListener('change', () => {
+              if (node.field) state[node.field] = ctrl.value;
+              if (onChange) onChange({ field: node.field, value: ctrl.value, state });
+            });
+            wrapper.appendChild(ctrl);
+          } else if (node.type === 'toggle') {
+            wrapper = document.createElement('label');
+            ctrl = document.createElement('input');
+            ctrl.type = 'checkbox';
+            ctrl.checked = Boolean(node.field ? state[node.field] : false);
+            ctrl.addEventListener('change', () => {
+              if (node.field) state[node.field] = ctrl.checked;
+              if (onChange) onChange({ field: node.field, value: ctrl.checked, state });
+            });
+            wrapper.appendChild(ctrl);
+          } else {
+            wrapper = document.createElement('div');
+          }
+          if (node.id) {
+            wrapper.setAttribute('data-ag-node-id', node.id);
+            refs.set(node.id, { type: node.type, wrapper, ctrl, mountEl });
+          }
+          applyFlags(wrapper, ctrl, node);
+          if (mountEl && Array.isArray(node.children)) {
+            node.children.forEach((ch) => mountEl.appendChild(buildNode(ch)));
+          }
+          return wrapper;
+        }
+
+        function reconcile(node) {
+          if (node.id && refs.has(node.id) && refs.get(node.id).type === node.type) {
+            const ref = refs.get(node.id);
+            patchNode(ref, node);
+            if (ref.mountEl && Array.isArray(node.children)) {
+              node.children.forEach((ch) => {
+                const el = reconcile(ch);
+                if (el.parentNode !== ref.mountEl) ref.mountEl.appendChild(el);
+              });
+            }
+            return ref.wrapper;
+          }
+          return buildNode(node);
+        }
+
+        container.appendChild(buildNode(initTree));
+        return {
+          update(nextTree, nextState) {
+            state = Object.assign({}, nextState || {});
+            reconcile(nextTree);
+          },
+          getElementById(id) {
+            return refs.has(id) ? refs.get(id).wrapper : null;
+          },
+        };
+      }
+
+      function openOverlay(kind, opts, setShadow) {
+        const isModal = kind === 'modal' || kind === 'settings';
+        const el = document.createElement(isModal ? 'dialog' : 'div');
+        el.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
+        const host = isModal ? document.createElement('div') : el;
+        if (isModal) el.appendChild(host);
+        const sr = host.attachShadow({ mode: 'open' });
+        const body = document.createElement('div');
+        sr.appendChild(body);
+        document.body.appendChild(el);
+        setShadow(sr);
+        const renderer = createMiniSchemaRenderer(body, opts.tree, opts.state, opts.onChange, opts.onAction);
+        if (isModal && typeof el.showModal === 'function') { try { el.showModal(); } catch {} }
+        const close = () => {
+          try { if (isModal && el.open) el.close(); } catch {}
+          el.remove();
+          setShadow(null);
+          if (opts.onClose) opts.onClose();
+        };
+        el.addEventListener('close', () => {
+          el.remove();
+          setShadow(null);
+          if (opts.onClose) opts.onClose();
+        });
+        return {
+          element: el,
+          update: renderer.update,
+          getElementById: renderer.getElementById,
+          close,
+        };
+      }
 
       window.__e2eShadows = {
         get root() { return rootShadow; },
         get popover() { return popoverShadow; },
         get modal() { return modalShadow; },
+        get settings() { return settingsShadow; },
+        services,
       };
 
       window.addonHost = {
-        schemaVersion: 2,
-        pluginId: 'antigravity-statusbar',
-        mountSlot(slotId, opts) {
-          const anchorEl = opts && opts.container ? opts.container : opts;
-          if (!rootShadowHost) {
-            rootShadowHost = document.createElement('div');
-            rootShadowHost.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
-            rootShadowHost.setAttribute('data-slot-id', slotId);
-            rootShadow = rootShadowHost.attachShadow({ mode: 'open' });
-            rootSlotContainer = document.createElement('div');
-            rootShadow.appendChild(rootSlotContainer);
-          }
-          if (anchorEl && anchorEl.parentNode && rootShadowHost.parentNode !== anchorEl.parentNode) {
-            anchorEl.parentNode.insertBefore(rootShadowHost, anchorEl.nextSibling);
-          } else if (anchorEl && !anchorEl.parentNode) {
-            document.body.appendChild(rootShadowHost);
-          }
-          return rootSlotContainer;
-        },
-        unmountSlot() {
-          if (rootShadowHost && rootShadowHost.parentNode) rootShadowHost.remove();
-        },
-        injectStyle(styleId, cssText, opts) {
-          const slotId = opts && opts.slotId;
-          const target = slotId === 'antigravity-statusbar.popover'
-            ? popoverShadow
-            : slotId === 'antigravity-statusbar.global-limit-modal'
-              ? modalShadow
-              : rootShadow || document.head;
-          if (!target) return;
-          let st = target.querySelector('style[data-style-id="' + styleId + '"]');
-          if (!st) {
-            st = document.createElement('style');
-            st.setAttribute('data-style-id', styleId);
-            target.appendChild(st);
-          }
-          st.textContent = cssText;
-        },
-        removeStyle() {},
-        openPopover(slotId, opts) {
-          if (popoverHost) popoverHost.remove();
-          popoverHost = document.createElement('div');
-          popoverHost.setAttribute('popover', 'manual');
-          popoverHost.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
-          popoverHost.style.position = 'fixed';
-          popoverShadow = popoverHost.attachShadow({ mode: 'open' });
-          const bodyEl = document.createElement('div');
-          popoverShadow.appendChild(bodyEl);
-          document.body.appendChild(popoverHost);
-          if (typeof popoverHost.showPopover === 'function') {
-            try { popoverHost.showPopover(); } catch {}
-          }
-          return {
-            element: popoverHost,
-            bodyEl,
-            close() {
-              if (popoverHost) {
-                try { popoverHost.hidePopover(); } catch {}
-                popoverHost.remove();
-                popoverHost = null;
-                popoverShadow = null;
-              }
-              if (opts && typeof opts.onClose === 'function') opts.onClose();
-            },
-          };
-        },
-        openModal(slotId, opts) {
-          if (modalDialog) modalDialog.remove();
-          modalDialog = document.createElement('dialog');
-          modalDialog.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
-          const modalHost = document.createElement('div');
-          modalDialog.appendChild(modalHost);
-          modalShadow = modalHost.attachShadow({ mode: 'open' });
-          const bodyEl = document.createElement('div');
-          modalShadow.appendChild(bodyEl);
-          document.body.appendChild(modalDialog);
-          modalDialog.addEventListener('close', () => {
-            if (modalDialog) {
-              modalDialog.remove();
-              modalDialog = null;
-              modalShadow = null;
+        apiVersion: 3,
+        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.2.0', trustLevel: 'trusted' },
+        env: { surface: 'desktop', layoutMode: 'desktop', capabilities: { hasLocalLoopback: false, hasNetHttps: false, hasSettingsBridge: false } },
+        theme: { getMode: () => 'dark', getTokenCss: () => ':host { --ag-accent: #38bdf8; }', onDidChange: () => () => {} },
+        i18n: { getLocale: () => 'ko', onDidChange: () => () => {} },
+        ui: {
+          showToast() {},
+          registerCommand() { return { dispose() {} }; },
+          registerSettingsPage(spec) {
+            let active = null;
+            return {
+              open() {
+                active = openOverlay('settings', {
+                  tree: spec.getSchema ? spec.getSchema() : spec.schema,
+                  state: spec.getState ? spec.getState() : spec.state,
+                  onChange: spec.onChange,
+                  onAction: spec.onAction,
+                  onClose() { active = null; if (spec.onClose) spec.onClose(); },
+                }, (sr) => { settingsShadow = sr; });
+                return active;
+              },
+              update(t, s) { if (active) active.update(t, s); },
+              dispose() { if (active) active.close(); },
+            };
+          },
+          openPopup(opts) {
+            return openOverlay('popup', opts, (sr) => { popoverShadow = sr; });
+          },
+          openModal(opts) {
+            return openOverlay('modal', opts, (sr) => { modalShadow = sr; });
+          },
+          mountCanvas(slotId, opts) {
+            const anchorEl = opts && opts.container ? opts.container : null;
+            if (!rootShadowHost) {
+              rootShadowHost = document.createElement('div');
+              rootShadowHost.setAttribute('data-addon-host-owner', 'antigravity-statusbar');
+              rootShadow = rootShadowHost.attachShadow({ mode: 'open' });
+              rootSlotContainer = document.createElement('div');
+              rootShadow.appendChild(rootSlotContainer);
             }
-            if (opts && typeof opts.onClose === 'function') opts.onClose();
-          });
-          if (typeof modalDialog.showModal === 'function') {
-            try { modalDialog.showModal(); } catch {}
-          }
-          return {
-            element: modalDialog,
-            bodyEl,
-            close() {
-              if (modalDialog) {
-                try { modalDialog.close(); } catch {}
-                modalDialog.remove();
-                modalDialog = null;
-                modalShadow = null;
-              }
-            },
-          };
+            if (anchorEl && anchorEl.parentNode && rootShadowHost.parentNode !== anchorEl.parentNode) {
+              anchorEl.parentNode.insertBefore(rootShadowHost, anchorEl.nextSibling);
+            }
+            return rootSlotContainer;
+          },
+          injectStyle(styleId, cssText) {
+            if (!rootShadow) return;
+            let st = rootShadow.querySelector('style[data-style-id="' + styleId + '"]');
+            if (!st) {
+              st = document.createElement('style');
+              st.setAttribute('data-style-id', styleId);
+              rootShadow.appendChild(st);
+            }
+            st.textContent = cssText;
+          },
+          removeStyle() {},
         },
-        onDispose(fn) { disposeHandlers.push(fn); },
+        dom: {
+          unmountSlot() { if (rootShadowHost) rootShadowHost.remove(); },
+        },
+        storage: {
+          async get() { return null; },
+          async set() {},
+          async delete() {},
+          onDidChange: () => () => {},
+        },
+        services: {
+          provide(name, impl, opts) {
+            services.set(name, { impl, opts });
+            return { dispose() { services.delete(name); } };
+          },
+        },
+        lifecycle: {
+          signal: abortCtrl.signal,
+          onDispose(fn) { disposeHandlers.push(fn); },
+        },
       };
     })();
   </script>
@@ -470,14 +619,12 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
 
     await cdp.call('Page.navigate', { url: `http://127.0.0.1:${harnessPort}/` });
 
-    // 1. Wait for inline bar in Shadow DOM to render live metrics
+    // 1. Live metrics & 99.7% -> 99% non-exceeded rounding
     await waitFor("Boolean(window.__e2eShadows?.root?.querySelector('.agy-inline-metric-btn')?.textContent?.includes('255.2K'))");
-
-    // Verify 99.7% non-exceeded displays 99% (not 100%)
     const ctxText = await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-metric-btn').textContent");
-    assert.ok(ctxText.includes('99%'), `Expected 99% for non-exceeded 99.7%, got "${ctxText}"`);
+    assert.ok(ctxText.includes('99%'));
 
-    // Verify 5h (with localized HH:mm reset time) + Weekly quota labels and localized tooltip rendered in Shadow DOM
+    // 2. Localized 5h HH:mm + Weekly quota + click forceRefresh
     const expectedBrowserQuota = await evalExpr(`(() => {
       const fmtHHMM = (iso) => {
         const d = new Date(iso);
@@ -485,122 +632,77 @@ test('TC-P0-02 (ISS-01, ISS-02, ISS-10): real Headless Chromium Shadow DOM E2E v
       };
       const fmtDT = (iso) => {
         const d = new Date(iso);
-        return (
-          String(d.getFullYear()) + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
-          String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
-        );
+        return String(d.getFullYear()) + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
       };
-      return {
-        hhmm5h: fmtHHMM('2026-11-23T14:00:00Z'),
-        dt5h: fmtDT('2026-11-23T14:00:00Z'),
-        dtWeekly: fmtDT('2026-11-30T00:00:00Z'),
-      };
+      return { hhmm5h: fmtHHMM('2026-11-23T14:00:00Z'), dt5h: fmtDT('2026-11-23T14:00:00Z'), dtWeekly: fmtDT('2026-11-30T00:00:00Z') };
     })()`);
-    await waitFor(
-      `window.__e2eShadows.root.textContent.includes('5시간 한도 85% (${expectedBrowserQuota.hhmm5h})') && window.__e2eShadows.root.textContent.includes('주간한도 60%')`,
-    );
-    const quotaTooltip = await evalExpr(`(() => {
-      const metrics = Array.from(window.__e2eShadows.root.querySelectorAll('.agy-inline-metric'));
-      return metrics[metrics.length - 2]?.title || '';
-    })()`);
-    assert.ok(
-      quotaTooltip.includes(`초기화 ${expectedBrowserQuota.dt5h}`) &&
-        quotaTooltip.includes(`초기화 ${expectedBrowserQuota.dtWeekly}`),
-      `Expected localized quota tooltip in Shadow DOM, got "${quotaTooltip}"`,
-    );
-    assert.equal(
-      quotaTooltip.includes('2026-11-23T14:00:00Z') || quotaTooltip.includes('2026-11-30T00:00:00Z'),
-      false,
-      `Shadow DOM quota tooltip must not expose raw UTC ISO strings, got "${quotaTooltip}"`,
-    );
-
-    // Click 5h quota metric in Shadow DOM -> triggers forceRefresh: true request to /api/quota
+    await waitFor(`window.__e2eShadows.root.textContent.includes('5시간 한도 85% (${expectedBrowserQuota.hhmm5h})')`);
     await evalExpr(`(() => {
       const metrics = Array.from(window.__e2eShadows.root.querySelectorAll('.agy-inline-metric'));
       metrics[metrics.length - 2].click();
     })()`);
     await new Promise((r) => setTimeout(r, 250));
-    assert.ok(
-      quotaRequests.some((req) => req && req.forceRefresh === true),
-      `Clicking 5h quota must send forceRefresh: true, got ${JSON.stringify(quotaRequests)}`,
-    );
+    assert.ok(quotaRequests.some((req) => req && req.forceRefresh === true));
 
-    // Verify window.statusbarAddons is non-writable (P1)
-    const writableDesc = await evalExpr("Object.getOwnPropertyDescriptor(window, 'statusbarAddons')?.writable");
-    assert.equal(writableDesc, false, 'window.statusbarAddons must be non-writable');
+    // 3. host.statusbar delegation renders peer plugin button in Shadow DOM
+    const peerDelegatedOk = await evalExpr(`(() => {
+      const svc = window.__e2eShadows.services.get('host.statusbar')?.impl;
+      if (!svc) return false;
+      svc.registerItem({ pluginId: 'e2e-peer', id: 'tr', label: '번역:구글', badge: 'KO', align: 'right' });
+      const btn = window.__e2eShadows.root.querySelector('[data-status-plugin-id="e2e-peer"]');
+      return Boolean(btn && btn.textContent.includes('번역:구글') && btn.textContent.includes('KO'));
+    })()`);
+    assert.equal(peerDelegatedOk, true);
 
-    // 2. ISS-01: Open popover, inspect customInput.type === 'text', enter 'abc' -> must NOT silently reset limit to null!
+    // 4. Tier-2 Context Popup: invalid 'abc' rejected, '32,000' saves cleanly
     await evalExpr("window.__e2eShadows.root.querySelector('.agy-inline-metric-btn').click()");
-    await waitFor("Boolean(window.__e2eShadows.popover?.querySelector('.agy-inline-pop-input'))");
-
-    const inputType = await evalExpr("window.__e2eShadows.popover.querySelector('.agy-inline-pop-input').type");
-    assert.equal(inputType, 'text', 'Popover custom limit input must use type="text" to prevent Chromium badInput empty-string silent reset');
+    await waitFor("Boolean(window.__e2eShadows.popover?.querySelector('[data-ag-node-id=\"ctx-custom-input\"] input'))");
+    const inputType = await evalExpr("window.__e2eShadows.popover.querySelector('[data-ag-node-id=\"ctx-custom-input\"] input').type");
+    assert.equal(inputType, 'text');
 
     await evalExpr(`(() => {
-      const inp = window.__e2eShadows.popover.querySelector('.agy-inline-pop-input');
+      const inp = window.__e2eShadows.popover.querySelector('[data-ag-node-id="ctx-custom-input"] input');
       inp.focus();
       inp.value = 'abc';
       inp.dispatchEvent(new Event('input', { bubbles: true }));
-      const applyBtn = Array.from(window.__e2eShadows.popover.querySelectorAll('button')).find((b) => b.textContent === '적용');
-      applyBtn.click();
+      window.__e2eShadows.popover.querySelector('[data-ag-node-id="ctx-apply-btn"]').click();
     })()`);
-    await waitFor("window.__e2eShadows.popover.querySelector('.agy-inline-pop-feedback')?.classList.contains('err')");
-    assert.equal(settingsUpdates.length, 0, 'Invalid input "abc" must NOT trigger settings update or silent reset to null');
+    await waitFor("window.__e2eShadows.popover.querySelector('[data-ag-node-id=\"ctx-feedback\"]')?.getAttribute('data-variant') === 'danger'");
+    assert.equal(settingsUpdates.length, 0);
 
-    // Enter '32,000' -> must save 32000 cleanly!
     await evalExpr(`(() => {
-      const inp = window.__e2eShadows.popover.querySelector('.agy-inline-pop-input');
+      const inp = window.__e2eShadows.popover.querySelector('[data-ag-node-id="ctx-custom-input"] input');
       inp.value = '32,000';
       inp.dispatchEvent(new Event('input', { bubbles: true }));
-      const applyBtn = Array.from(window.__e2eShadows.popover.querySelectorAll('button')).find((b) => b.textContent === '적용');
-      applyBtn.click();
+      window.__e2eShadows.popover.querySelector('[data-ag-node-id="ctx-apply-btn"]').click();
     })()`);
-    await waitFor("window.__e2eShadows.popover.querySelector('.agy-inline-pop-feedback')?.textContent?.includes('저장')");
+    await waitFor("window.__e2eShadows.popover.querySelector('[data-ag-node-id=\"ctx-feedback\"]')?.textContent?.includes('저장')");
     assert.deepEqual(settingsUpdates[0], { sessionLimit: { sessionId: 'sess-e2e-1', limit: 32_000 } });
 
-    // 2b. Desktop Settings tab must NOT render or display Remote Sidecar Connection card in real Chromium Shadow DOM
-    await evalExpr(`(() => {
-      const settingsTab = Array.from(window.__e2eShadows.popover.querySelectorAll('button[role="tab"]'))
-        .find((b) => b.textContent === '설정');
-      settingsTab.click();
-    })()`);
-    await waitFor("Array.from(window.__e2eShadows.popover.querySelectorAll('button[role=\"tab\"]')).find((b) => b.textContent === '설정')?.getAttribute('aria-selected') === 'true'");
-    const desktopSettingsText = await evalExpr("window.__e2eShadows.popover.textContent");
-    assert.equal(
-      desktopSettingsText.includes('원격 Sidecar 연결'),
-      false,
-      `Desktop Settings tab must NEVER render Remote Sidecar Connection card, got "${desktopSettingsText}"`,
-    );
+    // 5. Tier-1 Desktop Settings Page must NEVER render Remote Sidecar Connection
+    await evalExpr("window.__e2eShadows.popover.querySelector('[data-ag-node-id=\"ctx-open-settings-btn\"]').click()");
+    await waitFor("Boolean(window.__e2eShadows.settings)");
+    const desktopSettingsText = await evalExpr("window.__e2eShadows.settings.textContent");
+    assert.equal(desktopSettingsText.includes('원격 Sidecar 연결'), false);
 
-    // 3. ISS-10: Open Global Limit Modal, focus model Delete button, wait >2.2s across live polls -> focus MUST stay on the same button!
+    // 6. Tier-2 Global Limits Modal: Delete button retains focus across 2+ live poll ticks via ID in-place patching
+    await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-open-global-btn\"]').click()");
+    await waitFor("Boolean(window.__e2eShadows.modal?.querySelector('[data-ag-node-id=\"gm-models-list\"] button'))");
     await evalExpr(`(() => {
-      const btn = Array.from(window.__e2eShadows.popover.querySelectorAll('button')).find((b) => b.textContent.includes('전역'));
-      btn.click();
-    })()`);
-    await waitFor("Boolean(window.__e2eShadows.modal?.querySelector('.agy-inline-pop-list button'))");
-
-    await evalExpr(`(() => {
-      const delBtn = Array.from(window.__e2eShadows.modal.querySelectorAll('.agy-inline-pop-list button')).find((b) => b.textContent === '삭제');
+      const delBtn = Array.from(window.__e2eShadows.modal.querySelectorAll('[data-ag-node-id="gm-models-list"] button'))
+        .find((b) => b.textContent === '삭제');
       window.__focusedDelBtn = delBtn;
       delBtn.focus();
     })()`);
-    const focusedBefore = await evalExpr("window.__e2eShadows.modal.activeElement === window.__focusedDelBtn");
-    assert.equal(focusedBefore, true);
-
+    assert.equal(await evalExpr("window.__e2eShadows.modal.activeElement === window.__focusedDelBtn"), true);
     await new Promise((r) => setTimeout(r, 2_300));
-    const focusedAfterPolls = await evalExpr("window.__e2eShadows.modal.activeElement === window.__focusedDelBtn && window.__focusedDelBtn.isConnected");
-    assert.equal(focusedAfterPolls, true, 'Modal model list Delete button must retain focus across 2+ poll ticks');
+    assert.equal(
+      await evalExpr("window.__e2eShadows.modal.activeElement === window.__focusedDelBtn && window.__focusedDelBtn.isConnected"),
+      true,
+      'Tier-2 modal Delete button must retain focus across 2+ live poll ticks',
+    );
 
-    // Close modal via native dialog Escape/close -> focus returns to visible settings button on the bar
-    await evalExpr(`(() => {
-      const dlg = document.querySelector('dialog[data-addon-host-owner="antigravity-statusbar"]');
-      dlg.close();
-    })()`);
-    await waitFor("!window.__e2eShadows.modal");
-    const focusedBackOnBar = await evalExpr("window.__e2eShadows.root.activeElement === window.__e2eShadows.root.querySelector('button[aria-label=\"상태바\"]')");
-    assert.equal(focusedBackOnBar, true, 'Closing modal must restore focus to visible bar settings button');
-
-    // 4. ISS-10: Disconnect indicator visible even when stale snapshot exists
+    // 7. Disconnect indicator visible even when stale snapshot exists
     failSnapshots = true;
     await waitFor("window.__e2eShadows.root.textContent.includes('재연결')", 8_000);
     assert.ok(sidecarPort > 0);

@@ -1,13 +1,16 @@
 /**
- * Deterministic renderer script assembler for AddonManifest.v2 (SRP).
+ * Deterministic renderer script assembler & direct ESM setup entrypoint for AddonManifest.v3 (SRP).
  *
- * Composes the SOLID DIP factory modules into a single self-contained script body
- * executed by `antigravity-addons` (formerly `antigravity-native-addon-host`) v2.3.0+ in Isolated World 998.
+ * Composes the SOLID DIP factory modules into:
+ * 1. `setupStatusbarV3(ctx, opts)` — direct ESM entrypoint for `@antigravity-addons/sdk` parity tests.
+ * 2. `renderAddonRendererBundle(opts)` — deterministic self-contained script body executed by
+ *    `antigravity-addons` v3.0.0+ in Isolated World 998 (`(function(addonHost){ ... })(ctx)`).
  *
  * Security Invariants:
- * - Validates loopback-only `baseUrl` and >= 16-char `token` before assembly.
+ * - Zero manual popover/modal slots (only `antigravity-statusbar.root` for the Tier-3 inline bar).
+ * - Branches strictly on `ctx.env.surface` (NEVER raw `hostProfileId`).
+ * - Validates loopback-only `baseUrl` and >= 16-char `token` when explicitly provided for tests.
  * - Seals both `addonHost` and `token` strictly inside closure scope (never on `window` or DOM).
- * - Standby stub contains zero credentials.
  */
 
 import {
@@ -21,26 +24,21 @@ import { createSidecarApiClient } from './api-client.mjs';
 import { createBarController } from './bar-controller.mjs';
 import { createBarView } from './bar-view.mjs';
 import { startAddonStatusbar, startStandbyStatusbar } from './bootstrap.mjs';
-import { createGlobalLimitModalView } from './global-limit-modal-view.mjs';
 import { createInlineI18n } from './i18n.mjs';
-import { createPopoverView } from './popover-view.mjs';
 import {
   assertAddonRegistryPort,
   assertRendererHostPort,
   assertStatusbarApiPort,
 } from './ports.mjs';
 import { STATUSBAR_STYLE_ID, STATUSBAR_STYLES } from './styles.mjs';
+import { createDeclarativeUiSchemas } from './ui-schemas.mjs';
 
 const LOOPBACK_URL_RE = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/;
 const MIN_TOKEN_LENGTH = 16;
 
 export const ADDON_SLOT_ID = 'antigravity-statusbar.root';
-export const ADDON_POPOVER_SLOT_ID = 'antigravity-statusbar.popover';
-export const ADDON_MODAL_SLOT_ID = 'antigravity-statusbar.global-limit-modal';
 export const ADDON_SLOT_IDS = Object.freeze({
   root: ADDON_SLOT_ID,
-  popover: ADDON_POPOVER_SLOT_ID,
-  modal: ADDON_MODAL_SLOT_ID,
 });
 
 function serializeSafeJson(val) {
@@ -53,17 +51,77 @@ function serializeSafeJson(val) {
 }
 
 /**
- * Builds the deterministic AddonManifest.v2 renderer script body.
+ * Direct ESM `AddonContextV3` setup function for SDK `createTestHost` parity testing and modular consumers.
  *
- * v3.2.0 (`trustLevel: "trusted"`):
- * - Default (`renderAddonRendererBundle()` with no arguments) emits a 100% static, immutable,
- *   credential-free bundle suitable for SHA-256 trust pinning and Remote Web static packing.
- *   At runtime, Desktop receives live Sidecar credentials via `addonHost.getSettings()` /
- *   `onSettingsChange()` (`settingsBridge`), while Remote Web persists user-supplied credentials
- *   locally in browser storage via `addonHost.saveSettings()`.
- * - Legacy test callers may optionally pass `{ baseUrl, token }` (strictly validated loopback +
- *   >= 16-char token); injected credentials are sealed in closure scope and NEVER applied when
- *   `hostProfileId === 'antigravity-remote-web'`.
+ * @param {object} ctx AddonContextV3 handle
+ * @param {object} [opts]
+ */
+export function setupStatusbarV3(
+  ctx,
+  {
+    doc = typeof document !== 'undefined' ? document : null,
+    win = typeof window !== 'undefined' ? window : null,
+    baseUrl = null,
+    token = null,
+    fetchImpl = undefined,
+    pollConfig = {},
+  } = {},
+) {
+  const hostPort = assertRendererHostPort(createAddonHostAdapter(ctx, ADDON_SLOT_IDS));
+  const isRemoteWeb = hostPort.surface === 'remote-web';
+  const hasStaticInitialConnection = Boolean(!isRemoteWeb && baseUrl && token);
+  const useNetBroker = Boolean(
+    typeof hostPort.netFetch === 'function' &&
+      (isRemoteWeb ? hostPort.capabilities?.hasNetHttps : hostPort.capabilities?.hasLocalLoopback),
+  );
+  const api = assertStatusbarApiPort(
+    createSidecarApiClient({
+      baseUrl: hasStaticInitialConnection ? baseUrl : null,
+      token: hasStaticInitialConnection ? token : null,
+      allowRemoteHttps: isRemoteWeb,
+      netFetchImpl: useNetBroker ? hostPort.netFetch : null,
+      fetchImpl,
+    }),
+  );
+  const i18n = createInlineI18n('ko');
+  let runtimeRef = null;
+  const addons = assertAddonRegistryPort(
+    createAddonRegistry({
+      api,
+      onChange() {
+        if (runtimeRef && typeof runtimeRef.render === 'function') runtimeRef.render();
+      },
+    }),
+  );
+  runtimeRef = startAddonStatusbar({
+    hostPort,
+    api,
+    i18n,
+    addons,
+    createBarViewFn: createBarView,
+    createDeclarativeUiSchemasFn: createDeclarativeUiSchemas,
+    createBarControllerFn: createBarController,
+    doc,
+    win,
+    cssText: STATUSBAR_STYLES,
+    styleId: STATUSBAR_STYLE_ID,
+    pollConfig,
+    hasStaticInitialConnection,
+  });
+  return Object.freeze({
+    hostPort,
+    api,
+    i18n,
+    addons,
+    runtime: runtimeRef,
+  });
+}
+
+/**
+ * Builds the deterministic AddonManifest.v3 renderer script body.
+ *
+ * Default (`renderAddonRendererBundle()` with no arguments) emits a 100% static, immutable,
+ * credential-free bundle suitable for SHA-256 trust pinning and Remote Web static packing.
  *
  * @param {{ baseUrl?: string, token?: string }} [opts]
  * @returns {string}
@@ -78,10 +136,10 @@ export function renderAddonRendererBundle(opts = {}) {
   if (hasExplicitCreds) {
     const { baseUrl, token } = opts;
     if (typeof baseUrl !== 'string' || !LOOPBACK_URL_RE.test(baseUrl)) {
-      throw new Error('Invalid loopback baseUrl for AddonManifest.v2 renderer bundle.');
+      throw new Error('Invalid loopback baseUrl for AddonManifest.v3 renderer bundle.');
     }
     if (typeof token !== 'string' || token.length < MIN_TOKEN_LENGTH) {
-      throw new Error('Invalid token for AddonManifest.v2 renderer bundle.');
+      throw new Error('Invalid token for AddonManifest.v3 renderer bundle.');
     }
     initialConnection = { baseUrl, token };
   }
@@ -99,7 +157,7 @@ export function renderAddonRendererBundle(opts = {}) {
   });
 
   return [
-    '// Auto-generated by antigravity-statusbar v3.2 (AddonManifest.v2 static trusted renderer bundle)',
+    '// Auto-generated by antigravity-statusbar (AddonManifest.v3 API-First static trusted renderer bundle)',
     "'use strict';",
     '(function(hostHandle, cfg) {',
     "  if (typeof window === 'undefined' || typeof document === 'undefined') return;",
@@ -111,17 +169,21 @@ export function renderAddonRendererBundle(opts = {}) {
     `  ${createSidecarApiClient.toString()}`,
     `  ${createAddonRegistry.toString()}`,
     `  ${createBarView.toString()}`,
-    `  ${createPopoverView.toString()}`,
-    `  ${createGlobalLimitModalView.toString()}`,
+    `  ${createDeclarativeUiSchemas.toString()}`,
     `  ${createBarController.toString()}`,
     `  ${startAddonStatusbar.toString()}`,
     '  const hostPort = assertRendererHostPort(createAddonHostAdapter(hostHandle, cfg.slotIds));',
-    "  const isRemoteWeb = hostPort.hostProfileId === 'antigravity-remote-web';",
+    "  const isRemoteWeb = hostPort.surface === 'remote-web';",
     '  const hasStaticInitialConnection = Boolean(!isRemoteWeb && cfg.baseUrl && cfg.token);',
+    '  const useNetBroker = Boolean(',
+    "    typeof hostPort.netFetch === 'function' &&",
+    '      (isRemoteWeb ? hostPort.capabilities && hostPort.capabilities.hasNetHttps : hostPort.capabilities && hostPort.capabilities.hasLocalLoopback),',
+    '  );',
     '  const api = assertStatusbarApiPort(createSidecarApiClient({',
     '    baseUrl: hasStaticInitialConnection ? cfg.baseUrl : null,',
     '    token: hasStaticInitialConnection ? cfg.token : null,',
     '    allowRemoteHttps: isRemoteWeb,',
+    '    netFetchImpl: useNetBroker ? hostPort.netFetch : null,',
     '  }));',
     "  const i18n = createInlineI18n('ko');",
     '  let runtimeRef = null;',
@@ -137,8 +199,7 @@ export function renderAddonRendererBundle(opts = {}) {
     '    i18n,',
     '    addons,',
     '    createBarViewFn: createBarView,',
-    '    createPopoverViewFn: createPopoverView,',
-    '    createGlobalLimitModalViewFn: createGlobalLimitModalView,',
+    '    createDeclarativeUiSchemasFn: createDeclarativeUiSchemas,',
     '    createBarControllerFn: createBarController,',
     '    doc: document,',
     '    win: window,',
@@ -152,7 +213,7 @@ export function renderAddonRendererBundle(opts = {}) {
 }
 
 /**
- * Explicit alias emitting the deterministic, immutable, credential-free v3.2.0 static renderer bundle.
+ * Explicit alias emitting the deterministic, immutable, credential-free v3 static renderer bundle.
  *
  * @returns {string}
  */
@@ -161,7 +222,7 @@ export function renderAddonStaticBundle() {
 }
 
 /**
- * Builds the credential-free AddonManifest.v2 standby renderer stub installed prior to
+ * Builds the credential-free AddonManifest.v3 standby renderer stub installed prior to
  * Sidecar startup and written back on Sidecar shutdown.
  *
  * @returns {string}
@@ -174,7 +235,7 @@ export function renderAddonStandbyStub() {
   });
 
   return [
-    '// antigravity-statusbar v3.1 (AddonManifest.v2 standby renderer stub — zero credentials)',
+    '// antigravity-statusbar (AddonManifest.v3 standby renderer stub — zero credentials)',
     "'use strict';",
     '(function(hostHandle, cfg) {',
     "  if (typeof window === 'undefined' || typeof document === 'undefined') return;",

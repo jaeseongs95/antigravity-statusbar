@@ -1,129 +1,160 @@
 /**
- * Adapter translating the Antigravity native-addon-host scoped capability handle (`addonHost`)
+ * Adapter translating the Antigravity `AddonContextV3` capability handle (`addonHost`)
  * into the segregated `RendererHostPort` abstraction (DIP / LSP).
  *
- * Supports AddonManifest.v2 (v2.3.0+ Shadow DOM slots, `{ container }` mount options,
- * ShadowRoot-routed `injectStyle(..., { slotId })`, `hostProfileId` forwarding, and host
- * `openModal`/`openPopover` portals) while retaining backward-compatible behavior for v1 test doubles / hosts.
- *
- * Security & Isolation Invariants:
- * - Never exposes `addonHost` on `window` or DOM.
- * - Never creates style tags or appends directly to host containers;
- *   all DOM slots, styles, portals, and lifecycle cleanup delegate exclusively to `addonHost`.
+ * AddonManifest.v3 / AddonContextV3 API-First Contract:
+ * - Branches strictly on `ctx.env.surface`, `ctx.env.layoutMode`, and `ctx.env.capabilities`
+ *   (NEVER inspects raw `hostProfileId`).
+ * - Mounts the Tier-3 inline statusbar canvas via `ctx.ui.mountCanvas(slotId, opts)` and
+ *   unmounts via `ctx.dom.unmountSlot(slotId)`.
+ * - Delegates all popups, modals, settings pages, commands, toasts, storage, services,
+ *   networking (`ctx.net.fetch`), theme tokens, and AbortSignal lifecycle directly to `ctx`.
+ * - Never exposes `addonHost` on `window` or DOM and never creates raw `<style>` tags.
  */
 
 export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-statusbar.root') {
-  if (
-    !addonHost ||
-    typeof addonHost !== 'object' ||
-    typeof addonHost.mountSlot !== 'function' ||
-    typeof addonHost.unmountSlot !== 'function' ||
-    typeof addonHost.injectStyle !== 'function' ||
-    typeof addonHost.removeStyle !== 'function' ||
-    typeof addonHost.onDispose !== 'function'
-  ) {
+  if (!addonHost || typeof addonHost !== 'object') {
     throw new Error('ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE');
   }
 
   let rootSlotId = '';
-  let popoverSlotId = 'antigravity-statusbar.popover';
-  let modalSlotId = 'antigravity-statusbar.global-limit-modal';
-
   if (typeof slotSpec === 'string') {
     rootSlotId = slotSpec.trim();
   } else if (slotSpec && typeof slotSpec === 'object') {
     rootSlotId = typeof slotSpec.root === 'string' ? slotSpec.root.trim() : '';
-    if (typeof slotSpec.popover === 'string' && slotSpec.popover.trim()) {
-      popoverSlotId = slotSpec.popover.trim();
-    }
-    if (typeof slotSpec.modal === 'string' && slotSpec.modal.trim()) {
-      modalSlotId = slotSpec.modal.trim();
-    }
   }
 
   if (!rootSlotId) {
     throw new Error('ERR_INVALID_SLOT_ID');
   }
 
-  const isV2Host =
-    addonHost.schemaVersion === 2 ||
-    typeof addonHost.openModal === 'function' ||
-    typeof addonHost.openPopover === 'function';
+  const isV3Context =
+    addonHost.apiVersion === 3 &&
+    Boolean(addonHost.ui && typeof addonHost.ui === 'object') &&
+    Boolean(addonHost.lifecycle && typeof addonHost.lifecycle === 'object');
 
-  const hostProfileId =
-    typeof addonHost.hostProfileId === 'string' && addonHost.hostProfileId.trim()
-      ? addonHost.hostProfileId.trim()
-      : null;
+  if (!isV3Context) {
+    throw new Error('ERR_UNSUPPORTED_ADDON_HOST_VERSION:expected_v3');
+  }
+
+  if (
+    typeof addonHost.ui.mountCanvas !== 'function' ||
+    typeof addonHost.ui.injectStyle !== 'function' ||
+    typeof addonHost.ui.removeStyle !== 'function' ||
+    typeof addonHost.lifecycle.onDispose !== 'function'
+  ) {
+    throw new Error('ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE');
+  }
+
+  const envObj = addonHost.env && typeof addonHost.env === 'object' ? addonHost.env : {};
+  const surface = envObj.surface === 'remote-web' ? 'remote-web' : 'desktop';
+  const capabilities = Object.freeze({
+    hasLocalLoopback: Boolean(envObj.capabilities?.hasLocalLoopback),
+    hasNetHttps: Boolean(envObj.capabilities?.hasNetHttps),
+    hasConfigBridge: Boolean(envObj.capabilities?.hasConfigBridge),
+    hasSettingsBridge: Boolean(envObj.capabilities?.hasSettingsBridge),
+    hasDocumentTransform: Boolean(envObj.capabilities?.hasDocumentTransform),
+  });
 
   let lastMountTarget = undefined;
 
+  const unmountRoot = () => {
+    lastMountTarget = undefined;
+    if (addonHost.dom && typeof addonHost.dom.unmountSlot === 'function') {
+      return addonHost.dom.unmountSlot(rootSlotId);
+    }
+    return false;
+  };
+
   const adapter = {
-    pluginId: typeof addonHost.pluginId === 'string' ? addonHost.pluginId : 'antigravity-statusbar',
-    schemaVersion: isV2Host ? 2 : 1,
-    hostProfileId,
+    pluginId:
+      typeof addonHost.meta?.pluginId === 'string' && addonHost.meta.pluginId.trim()
+        ? addonHost.meta.pluginId.trim()
+        : 'antigravity-statusbar',
+    apiVersion: 3,
+    schemaVersion: 3,
+    surface,
+    get layoutMode() {
+      return addonHost.env?.layoutMode || 'desktop';
+    },
+    capabilities,
     slotId: rootSlotId,
-    popoverSlotId,
-    modalSlotId,
+    theme: addonHost.theme && typeof addonHost.theme === 'object' ? addonHost.theme : null,
+    hostI18n: addonHost.i18n && typeof addonHost.i18n === 'object' ? addonHost.i18n : null,
+    storage: addonHost.storage && typeof addonHost.storage === 'object' ? addonHost.storage : null,
+    services: addonHost.services && typeof addonHost.services === 'object' ? addonHost.services : null,
+    events: addonHost.events && typeof addonHost.events === 'object' ? addonHost.events : null,
+    lifecycleSignal: addonHost.lifecycle.signal || null,
     mountSlot(parentEl) {
-      if (isV2Host) {
-        const nextTarget = parentEl || null;
-        if (lastMountTarget !== undefined && lastMountTarget !== nextTarget) {
-          try {
-            addonHost.unmountSlot(rootSlotId);
-          } catch {}
-          lastMountTarget = undefined;
-        }
-        const mounted = addonHost.mountSlot(
-          rootSlotId,
-          nextTarget ? { container: nextTarget } : {},
-        );
-        lastMountTarget = mounted ? nextTarget : undefined;
-        return mounted;
+      const nextTarget = parentEl || null;
+      if (lastMountTarget !== undefined && lastMountTarget !== nextTarget) {
+        try {
+          unmountRoot();
+        } catch {}
       }
-      const mounted = addonHost.mountSlot(rootSlotId, parentEl);
-      lastMountTarget = mounted ? parentEl || null : undefined;
+      const mounted = addonHost.ui.mountCanvas(
+        rootSlotId,
+        nextTarget
+          ? { container: nextTarget }
+          : surface === 'remote-web'
+            ? { fallbackToBody: true }
+            : {},
+      );
+      lastMountTarget = mounted ? nextTarget : undefined;
       return mounted;
     },
-    unmountSlot() {
-      lastMountTarget = undefined;
-      return addonHost.unmountSlot(rootSlotId);
-    },
+    unmountSlot: unmountRoot,
     injectStyle(styleId, cssText, opts) {
       if (opts !== undefined) {
-        return addonHost.injectStyle(styleId, cssText, opts);
+        return addonHost.ui.injectStyle(styleId, cssText, opts);
       }
-      return addonHost.injectStyle(styleId, cssText);
+      return addonHost.ui.injectStyle(styleId, cssText);
     },
     removeStyle(styleId) {
-      return addonHost.removeStyle(styleId);
+      return addonHost.ui.removeStyle(styleId);
     },
     onDispose(fn) {
       if (typeof fn === 'function') {
-        addonHost.onDispose(fn);
+        addonHost.lifecycle.onDispose(fn);
       }
     },
   };
 
-  if (typeof addonHost.openPopover === 'function') {
-    adapter.openPopover = (opts = {}) => addonHost.openPopover(popoverSlotId, opts);
+  if (typeof addonHost.lifecycle.addManagedListener === 'function') {
+    adapter.addManagedListener = (target, type, listener, opts) =>
+      addonHost.lifecycle.addManagedListener(target, type, listener, opts);
   }
-  if (typeof addonHost.openModal === 'function') {
-    adapter.openModal = (opts = {}) => addonHost.openModal(modalSlotId, opts);
+  if (typeof addonHost.ui.showToast === 'function') {
+    adapter.showToast = (opts) => addonHost.ui.showToast(opts);
   }
-  if (typeof addonHost.getSettings === 'function') {
-    adapter.getSettings = () => addonHost.getSettings();
+  if (typeof addonHost.ui.openPopup === 'function') {
+    adapter.openPopup = (opts) => addonHost.ui.openPopup(opts);
   }
-  if (typeof addonHost.onSettingsChange === 'function') {
-    adapter.onSettingsChange = (cb) => addonHost.onSettingsChange(cb);
+  if (typeof addonHost.ui.openModal === 'function') {
+    adapter.openModal = (opts) => addonHost.ui.openModal(opts);
   }
-  if (typeof addonHost.saveSettings === 'function') {
-    adapter.saveSettings = (nextData) => addonHost.saveSettings(nextData);
+  if (typeof addonHost.ui.openPanel === 'function') {
+    adapter.openPanel = (opts) => addonHost.ui.openPanel(opts);
   }
-  if (typeof addonHost.registerSettingsTab === 'function') {
-    adapter.registerSettingsTab = (tabId, opts) => addonHost.registerSettingsTab(tabId, opts);
+  if (typeof addonHost.ui.registerCommand === 'function') {
+    adapter.registerCommand = (commandId, spec) => addonHost.ui.registerCommand(commandId, spec);
   }
-  if (typeof addonHost.registerAction === 'function') {
-    adapter.registerAction = (actionId, spec) => addonHost.registerAction(actionId, spec);
+  if (typeof addonHost.ui.registerSettingsPage === 'function') {
+    adapter.registerSettingsPage = (spec) => addonHost.ui.registerSettingsPage(spec);
+  }
+  if (addonHost.net && typeof addonHost.net.fetch === 'function') {
+    adapter.netFetch = (url, init) => addonHost.net.fetch(url, init);
+  }
+
+  // Forward optional v3 settingsBridge namespace once exposed by antigravity-addons (Host Gap #1)
+  const sb = addonHost.settingsBridge;
+  if (sb && typeof sb === 'object') {
+    const getFn = typeof sb.getSnapshot === 'function' ? sb.getSnapshot : sb.getSettings;
+    const subFn = typeof sb.onDidChange === 'function' ? sb.onDidChange : sb.onSettingsChange;
+    const saveFn = typeof sb.save === 'function' ? sb.save : sb.saveSettings;
+    if (typeof getFn === 'function') adapter.getSettings = () => getFn.call(sb);
+    if (typeof subFn === 'function') adapter.onSettingsChange = (cb) => subFn.call(sb, cb);
+    if (typeof saveFn === 'function') adapter.saveSettings = (data) => saveFn.call(sb, data);
   }
 
   return Object.freeze(adapter);

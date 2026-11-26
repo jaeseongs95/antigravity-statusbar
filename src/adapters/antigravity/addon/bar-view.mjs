@@ -1,6 +1,12 @@
 /**
- * Main inline statusbar DOM view (SRP).
+ * Main Tier-3 inline statusbar DOM view (SRP).
  * Safe DOM construction via createElement + textContent only (no HTML string injection).
+ *
+ * Renders:
+ * - Core metrics (subagent model pill, context progress bar, cache %, 5h limit + HH:mm reset, weekly limit)
+ * - Well-known `host.statusbar` delegated status items (`left` & `right` alignments with icon/label/badge/tooltip)
+ * - Persisted custom command buttons & legacy runtime buttons
+ * - Compact & Settings trigger buttons
  */
 
 export function createBarView({ doc, i18n }) {
@@ -23,6 +29,10 @@ export function createBarView({ doc, i18n }) {
 
   const leftEl = doc.createElement('div');
   leftEl.className = 'agy-inline-left';
+
+  const leftDelegatedContainer = doc.createElement('div');
+  leftDelegatedContainer.className = 'agy-inline-delegated-btns';
+  leftDelegatedContainer.setAttribute('data-statusbar-align', 'left');
 
   const modelEl = doc.createElement('span');
   modelEl.className = 'agy-inline-model-pill';
@@ -73,6 +83,7 @@ export function createBarView({ doc, i18n }) {
   quotaEl.className = 'agy-inline-metric agy-inline-quota-refreshable';
   quotaEl.textContent = `${i18n.t().quotaWeekly} --`;
 
+  leftEl.appendChild(leftDelegatedContainer);
   leftEl.appendChild(modelEl);
   leftEl.appendChild(ctxBtn);
   leftEl.appendChild(softBadgeEl);
@@ -88,6 +99,10 @@ export function createBarView({ doc, i18n }) {
 
   const noteEl = doc.createElement('span');
   noteEl.className = 'agy-inline-status-note';
+
+  const rightDelegatedContainer = doc.createElement('div');
+  rightDelegatedContainer.className = 'agy-inline-delegated-btns';
+  rightDelegatedContainer.setAttribute('data-statusbar-align', 'right');
 
   const customBtnsContainer = doc.createElement('div');
   customBtnsContainer.className = 'agy-inline-custom-btns';
@@ -105,6 +120,7 @@ export function createBarView({ doc, i18n }) {
   settingsBtn.setAttribute('aria-expanded', 'false');
 
   rightEl.appendChild(noteEl);
+  rightEl.appendChild(rightDelegatedContainer);
   rightEl.appendChild(customBtnsContainer);
   rightEl.appendChild(compactBtn);
   rightEl.appendChild(settingsBtn);
@@ -167,7 +183,6 @@ export function createBarView({ doc, i18n }) {
         ? Math.max(0, snap.usagePercent)
         : 0;
     const isSoftExceeded = Boolean(snap.exceededSoftLimit || snap.softLimitExceeded);
-    // ISS-10: Avoid displaying "100%" without "Limit Reached" when usage is 99.5%..99.99%
     const displayPct =
       !isSoftExceeded && rawPct >= 99.5 && rawPct < 100
         ? Math.floor(rawPct)
@@ -364,6 +379,51 @@ export function createBarView({ doc, i18n }) {
     quotaEl.title = '';
   }
 
+  function buildDelegatedButton(item) {
+    const b = doc.createElement('button');
+    b.type = 'button';
+    b.className = 'agy-inline-btn agy-delegated-status-item';
+    b.setAttribute('data-status-plugin-id', item.pluginId);
+    b.setAttribute('data-status-item-id', item.id);
+    if (item.tooltip) b.title = item.tooltip;
+    const textLabel = item.icon ? `${item.icon} ${item.label}` : item.label;
+    const labelSpan = doc.createElement('span');
+    labelSpan.textContent = textLabel;
+    b.appendChild(labelSpan);
+    if (item.badge) {
+      const badgeSpan = doc.createElement('span');
+      badgeSpan.className = 'agy-inline-item-badge';
+      badgeSpan.textContent = item.badge;
+      b.appendChild(badgeSpan);
+    }
+    b.addEventListener('click', (ev) => {
+      if (ev && ev.isTrusted === false) return;
+      if (typeof item.onClick === 'function') {
+        try {
+          item.onClick({
+            shiftKey: Boolean(ev?.shiftKey),
+            ctrlKey: Boolean(ev?.ctrlKey),
+            metaKey: Boolean(ev?.metaKey),
+            altKey: Boolean(ev?.altKey),
+            anchorEl: b,
+          });
+        } catch {}
+      }
+    });
+    return b;
+  }
+
+  function renderDelegatedItems({ leftItems = [], rightItems = [] } = {}) {
+    clearChildren(leftDelegatedContainer);
+    clearChildren(rightDelegatedContainer);
+    for (let i = 0; i < leftItems.length; i += 1) {
+      leftDelegatedContainer.appendChild(buildDelegatedButton(leftItems[i]));
+    }
+    for (let i = 0; i < rightItems.length; i += 1) {
+      rightDelegatedContainer.appendChild(buildDelegatedButton(rightItems[i]));
+    }
+  }
+
   function renderAddonButtons({ persistedButtons, runtimeButtons, onPersistedClick, onRuntimeClick }) {
     clearChildren(customBtnsContainer);
     for (const btnDef of persistedButtons) {
@@ -372,7 +432,6 @@ export function createBarView({ doc, i18n }) {
       b.type = 'button';
       b.className = 'agy-inline-btn';
       b.textContent = btnDef.label;
-      // ISS-13: Always surface the executed command in tooltip so users know what clicking sends
       b.title = btnDef.description
         ? `${btnDef.description} (${btnDef.command})`
         : btnDef.command;
@@ -404,7 +463,18 @@ export function createBarView({ doc, i18n }) {
   }
 
   function setRemoteDockMode(active) {
-    barEl.classList.toggle('agy-remote-dock', Boolean(active));
+    if (barEl.classList && typeof barEl.classList.toggle === 'function') {
+      barEl.classList.toggle('agy-remote-dock', Boolean(active));
+    } else if (active) {
+      if (!String(barEl.className || '').includes('agy-remote-dock')) {
+        barEl.className = `${barEl.className || ''} agy-remote-dock`.trim();
+      }
+    } else {
+      barEl.className = String(barEl.className || '')
+        .replace(/\bagy-remote-dock\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
   }
 
   return Object.freeze({
@@ -414,11 +484,14 @@ export function createBarView({ doc, i18n }) {
     ctxTextEl,
     quota5hEl,
     quotaEl,
+    leftDelegatedContainer,
+    rightDelegatedContainer,
     customBtnsContainer,
     compactBtn,
     settingsBtn,
     renderSnapshot,
     renderQuota,
+    renderDelegatedItems,
     renderAddonButtons,
     setNote,
     setReconnecting,

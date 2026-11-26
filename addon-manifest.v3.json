@@ -1,17 +1,22 @@
 {
-  "$schema": "https://github.com/jaeseongs95/antigravity-native-addon-host/schemas/addon-manifest.v2.schema.json",
-  "schemaVersion": 2,
+  "$schema": "https://github.com/jaeseongs95/antigravity-addons/schemas/addon-manifest.v3.schema.json",
+  "schemaVersion": 3,
+  "apiVersion": 3,
   "pluginId": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
   "version": "3.2.0",
   "trustLevel": "trusted",
   "compatibility": {
+    "surfaces": [
+      "desktop",
+      "remote-web"
+    ],
     "hostProfile": "antigravity-desktop",
     "hostProfiles": [
       "antigravity-desktop",
       "antigravity-remote-web"
     ],
-    "minHostVersion": "2.3.0"
+    "minHostVersion": "3.0.0"
   },
   "capabilities": [
     "renderer"
@@ -20,26 +25,48 @@
     "rendererScript": "runtime/statusbar-renderer.js",
     "mainHookScript": null
   },
+  "permissions": {
+    "ui": {
+      "toasts": true,
+      "dialogs": false,
+      "overlays": true,
+      "commands": true,
+      "statusItems": false,
+      "settingsPages": true,
+      "canvas": true
+    },
+    "storage": {
+      "maxBytes": 16384,
+      "namespace": "antigravity-statusbar"
+    },
+    "services": {
+      "provide": [
+        {
+          "name": "host.statusbar",
+          "allowedCallers": [
+            "*"
+          ]
+        }
+      ]
+    },
+    "net": {
+      "localLoopback": [
+        "antigravity-sidecar"
+      ]
+    },
+    "dom": {
+      "documentTransform": false,
+      "anchors": [
+        "status-bar"
+      ]
+    }
+  },
   "uiSlots": [
     {
       "slot": "status-bar",
       "slotId": "antigravity-statusbar.root",
       "anchor": "status-bar",
       "exclusive": true,
-      "scope": "addon-owned-slot",
-      "shadow": true
-    },
-    {
-      "slot": "overlay",
-      "slotId": "antigravity-statusbar.popover",
-      "exclusive": false,
-      "scope": "addon-owned-slot",
-      "shadow": true
-    },
-    {
-      "slot": "modal",
-      "slotId": "antigravity-statusbar.global-limit-modal",
-      "exclusive": false,
       "scope": "addon-owned-slot",
       "shadow": true
     }

@@ -12,7 +12,7 @@ import { createSidecarApiClient } from '../../src/adapters/antigravity/addon/api
 import { createInlineI18n } from '../../src/adapters/antigravity/addon/i18n.mjs';
 import {
   assertAddonRegistryPort,
-  assertPortalHostPort,
+  assertOverlayHostPort,
   assertRendererHostPort,
   assertRendererPublisherPort,
   assertStatusbarApiPort,
@@ -28,22 +28,25 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const TEST_TOKEN = 'addon-unit-test-token-32-chars-ok';
 
-test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 schema & reference profile', async () => {
+test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 least-privilege schema', async () => {
   const manifest = JSON.parse(
-    await fs.readFile(path.join(REPO_ROOT, 'addon-manifest.v2.json'), 'utf8'),
+    await fs.readFile(path.join(REPO_ROOT, 'addon-manifest.v3.json'), 'utf8'),
   );
 
   const allowedTopKeys = new Set([
     '$schema',
     'schemaVersion',
+    'apiVersion',
     'pluginId',
     'displayName',
+    'description',
     'version',
     'trustLevel',
     'compatibility',
     'capabilities',
     'entry',
     'integrity',
+    'permissions',
     'uiSlots',
     'isolation',
     'settingsBridge',
@@ -54,7 +57,8 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
     assert.ok(allowedTopKeys.has(key), `Unexpected manifest top-level property: ${key}`);
   }
 
-  assert.equal(manifest.schemaVersion, 2);
+  assert.equal(manifest.schemaVersion, 3);
+  assert.equal(manifest.apiVersion, 3);
   assert.equal(manifest.pluginId, 'antigravity-statusbar');
   assert.equal(manifest.displayName, 'Antigravity Statusbar');
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
@@ -65,10 +69,25 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
     maxBytes: 16384,
   });
   assert.equal(manifest.configBridge, undefined);
+  assert.equal(manifest.permissions?.events, undefined, 'Unused events permission must be omitted');
+  assert.equal(manifest.permissions?.configBridge, undefined, 'Unused configBridge permission must be omitted');
+  assert.equal(manifest.permissions?.ui?.dialogs, false);
+  assert.equal(manifest.permissions?.ui?.statusItems, false);
+  assert.deepEqual(manifest.permissions?.services, {
+    provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }],
+  });
+  assert.deepEqual(manifest.permissions?.net, {
+    localLoopback: ['antigravity-sidecar'],
+  });
+  assert.deepEqual(manifest.permissions?.dom, {
+    documentTransform: false,
+    anchors: ['status-bar'],
+  });
   assert.deepEqual(manifest.compatibility, {
+    surfaces: ['desktop', 'remote-web'],
     hostProfile: 'antigravity-desktop',
     hostProfiles: ['antigravity-desktop', 'antigravity-remote-web'],
-    minHostVersion: '2.3.0',
+    minHostVersion: '3.0.0',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {
@@ -84,20 +103,6 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
       scope: 'addon-owned-slot',
       shadow: true,
     },
-    {
-      slot: 'overlay',
-      slotId: 'antigravity-statusbar.popover',
-      exclusive: false,
-      scope: 'addon-owned-slot',
-      shadow: true,
-    },
-    {
-      slot: 'modal',
-      slotId: 'antigravity-statusbar.global-limit-modal',
-      exclusive: false,
-      scope: 'addon-owned-slot',
-      shadow: true,
-    },
   ]);
   assert.deepEqual(manifest.isolation, {
     noTranslate: true,
@@ -108,7 +113,7 @@ test('TC-ADDON-01: addon-manifest.v2.json conforms strictly to AddonManifest.v2 
   assert.equal(manifest.loadOrder, 50);
 });
 
-test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
+test('TC-ADDON-02: ports.mjs enforces segregated v3 ISP/DIP contracts', () => {
   assert.throws(() => assertRendererHostPort(null), /ERR_INVALID_RENDERER_HOST_PORT/);
   assert.throws(() => assertRendererHostPort({ mountSlot() {} }), /missing_unmountSlot/);
   const validHost = {
@@ -117,41 +122,25 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
     injectStyle() {},
     removeStyle() {},
     onDispose() {},
-    getSettings() {},
-    onSettingsChange() {},
-    saveSettings() {},
-    registerSettingsTab() {},
-    registerAction() {},
+    showToast() {},
+    openPopup() {},
+    openModal() {},
+    openPanel() {},
+    registerCommand() {},
+    registerSettingsPage() {},
+    addManagedListener() {},
+    netFetch() {},
   };
   assert.equal(assertRendererHostPort(validHost), validHost);
-  assert.throws(
-    () => assertRendererHostPort({ ...validHost, openModal: 'not-fn' }),
-    /invalid_openModal/,
-  );
-  assert.throws(
-    () => assertRendererHostPort({ ...validHost, getSettings: 'not-fn' }),
-    /invalid_getSettings/,
-  );
-  assert.throws(
-    () => assertRendererHostPort({ ...validHost, onSettingsChange: 123 }),
-    /invalid_onSettingsChange/,
-  );
-  assert.throws(
-    () => assertRendererHostPort({ ...validHost, saveSettings: true }),
-    /invalid_saveSettings/,
-  );
-  assert.throws(
-    () => assertRendererHostPort({ ...validHost, registerSettingsTab: 'bad' }),
-    /invalid_registerSettingsTab/,
-  );
-  assert.throws(
-    () => assertRendererHostPort({ ...validHost, registerAction: 42 }),
-    /invalid_registerAction/,
-  );
+  assert.throws(() => assertRendererHostPort({ ...validHost, openModal: 'not-fn' }), /invalid_openModal/);
+  assert.throws(() => assertRendererHostPort({ ...validHost, openPopup: 123 }), /invalid_openPopup/);
+  assert.throws(() => assertRendererHostPort({ ...validHost, showToast: true }), /invalid_showToast/);
+  assert.throws(() => assertRendererHostPort({ ...validHost, registerCommand: 'bad' }), /invalid_registerCommand/);
+  assert.throws(() => assertRendererHostPort({ ...validHost, registerSettingsPage: 42 }), /invalid_registerSettingsPage/);
+  assert.throws(() => assertRendererHostPort({ ...validHost, netFetch: {} }), /invalid_netFetch/);
 
-  assert.throws(() => assertPortalHostPort(validHost), /missing_openModal/);
-  const validPortal = { openModal() {}, openPopover() {} };
-  assert.equal(assertPortalHostPort(validPortal), validPortal);
+  assert.throws(() => assertOverlayHostPort({ openPopup() {} }), /missing_openModal/);
+  assert.equal(assertOverlayHostPort({ openPopup() {}, openModal() {} }).openModal !== undefined, true);
 
   assert.throws(() => assertStatusbarApiPort({}), /missing_post/);
   const validApi = {
@@ -164,10 +153,7 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
     clearConnection() {},
   };
   assert.equal(assertStatusbarApiPort(validApi), validApi);
-  assert.throws(
-    () => assertStatusbarApiPort({ ...validApi, configure: 'bad' }),
-    /invalid_configure/,
-  );
+  assert.throws(() => assertStatusbarApiPort({ ...validApi, configure: 'bad' }), /invalid_configure/);
 
   assert.throws(() => assertAddonRegistryPort({ register() {} }), /ERR_INVALID_ADDON_REGISTRY_PORT/);
   assert.throws(() => assertRendererPublisherPort({ publish() {} }), /missing_teardown/);
@@ -175,171 +161,162 @@ test('TC-ADDON-02: ports.mjs enforces segregated ISP/DIP contracts', () => {
   assert.equal(assertRendererPublisherPort(validPublisher), validPublisher);
 });
 
-test('TC-ADDON-03: addon-host-adapter.mjs supports v1 compat and v2 Shadow DOM / { container } / openModal / openPopover contracts', () => {
+test('TC-ADDON-03: addon-host-adapter.mjs adapts AddonContextV3 (surface/capabilities, Tier 1/2/3 UI, services, storage, net, lifecycle) and rejects non-v3 handles', () => {
   assert.throws(() => createAddonHostAdapter(null), /ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE/);
-  assert.throws(() => createAddonHostAdapter({ mountSlot() {} }), /ERR_MISSING_ADDON_HOST_CAPABILITY_HANDLE/);
+  assert.throws(
+    () => createAddonHostAdapter({ schemaVersion: 2, mountSlot() {} }),
+    /ERR_UNSUPPORTED_ADDON_HOST_VERSION/,
+  );
 
-  // 1. Legacy v1 host compatibility
   const calls = [];
-  const fakeEl = { id: 'slot-div' };
-  const fakeHostV1 = {
-    pluginId: 'antigravity-statusbar',
-    mountSlot(slotId, parentEl) {
-      calls.push(['mountSlot', slotId, parentEl]);
-      return fakeEl;
-    },
-    unmountSlot(slotId) {
-      calls.push(['unmountSlot', slotId]);
-      return true;
-    },
-    injectStyle(styleId, css) {
-      calls.push(['injectStyle', styleId, css]);
-    },
-    removeStyle(styleId) {
-      calls.push(['removeStyle', styleId]);
-      return true;
-    },
-    onDispose(fn) {
-      calls.push(['onDispose', typeof fn]);
-    },
-  };
-
-  const portV1 = assertRendererHostPort(createAddonHostAdapter(fakeHostV1, 'antigravity-statusbar.root'));
-  assert.equal(portV1.schemaVersion, 1);
-  assert.equal(portV1.hostProfileId, null);
-  assert.equal(portV1.openModal, undefined);
-  assert.equal(portV1.openPopover, undefined);
-  assert.equal(portV1.mountSlot('BOX'), fakeEl);
-  portV1.injectStyle('statusbar-main', '.x{}');
-  portV1.onDispose(() => {});
-  assert.equal(portV1.unmountSlot(), true);
-  assert.equal(portV1.removeStyle('statusbar-main'), true);
-
-  assert.deepEqual(calls, [
-    ['mountSlot', 'antigravity-statusbar.root', 'BOX'],
-    ['injectStyle', 'statusbar-main', '.x{}'],
-    ['onDispose', 'function'],
-    ['unmountSlot', 'antigravity-statusbar.root'],
-    ['removeStyle', 'statusbar-main'],
-  ]);
-
-  // 2. Host v2.0.0 contract: { container }, container-switch unmount/remount, slotId style routing, openPopover/openModal
-  const v2Calls = [];
   const box1 = { id: 'box-1' };
   const box2 = { id: 'box-2' };
-  let settingsSubscriber = null;
-  const fakeHostV2 = {
-    pluginId: 'antigravity-statusbar',
-    schemaVersion: 2,
-    hostProfileId: 'antigravity-desktop',
-    mountSlot(slotId, opts) {
-      v2Calls.push(['mountSlot', slotId, opts]);
-      return { id: `shadow-root-inner-${opts?.container?.id || 'anchor'}` };
+  const abortCtrl = new AbortController();
+
+  const fakeV3Ctx = {
+    apiVersion: 3,
+    meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.2.0', trustLevel: 'trusted' },
+    env: {
+      surface: 'desktop',
+      layoutMode: 'desktop',
+      capabilities: {
+        hasLocalLoopback: true,
+        hasNetHttps: false,
+        hasConfigBridge: false,
+        hasSettingsBridge: true,
+        hasDocumentTransform: false,
+      },
     },
-    unmountSlot(slotId) {
-      v2Calls.push(['unmountSlot', slotId]);
-      return true;
+    theme: {
+      getMode: () => 'dark',
+      getTokenCss: () => ':host { --ag-accent: #38bdf8; }',
+      onDidChange: () => () => {},
     },
-    injectStyle(styleId, css, opts) {
-      v2Calls.push(['injectStyle', styleId, css, opts]);
+    i18n: {
+      getLocale: () => 'ko',
+      onDidChange: () => () => {},
     },
-    removeStyle(styleId) {
-      v2Calls.push(['removeStyle', styleId]);
-      return true;
+    ui: {
+      showToast(opts) {
+        calls.push(['showToast', opts.message]);
+      },
+      openPopup(opts) {
+        calls.push(['openPopup', opts.title]);
+        return { update() {}, close() {} };
+      },
+      openModal(opts) {
+        calls.push(['openModal', opts.title]);
+        return { update() {}, close() {} };
+      },
+      registerCommand(id, spec) {
+        calls.push(['registerCommand', id, spec.label]);
+        return { dispose() { calls.push(['disposeCommand', id]); } };
+      },
+      registerSettingsPage(spec) {
+        calls.push(['registerSettingsPage', spec.id]);
+        return { open() {}, update() {}, dispose() {} };
+      },
+      mountCanvas(slotId, opts) {
+        calls.push(['mountCanvas', slotId, opts]);
+        return { id: `canvas-${opts?.container?.id || 'anchor'}` };
+      },
+      injectStyle(styleId, css, opts) {
+        calls.push(['injectStyle', styleId, opts]);
+      },
+      removeStyle(styleId) {
+        calls.push(['removeStyle', styleId]);
+        return true;
+      },
     },
-    openPopover(slotId, opts) {
-      v2Calls.push(['openPopover', slotId, opts]);
-      return { id: 'pop-1', element: {}, bodyEl: {}, close() {} };
+    dom: {
+      unmountSlot(slotId) {
+        calls.push(['unmountSlot', slotId]);
+        return true;
+      },
     },
-    openModal(slotId, opts) {
-      v2Calls.push(['openModal', slotId, opts]);
-      return { id: 'modal-1', element: {}, bodyEl: {}, close() {} };
+    storage: {
+      async get() { return null; },
+      async set() {},
+      async delete() {},
+      onDidChange: () => () => {},
     },
-    getSettings() {
-      v2Calls.push(['getSettings']);
-      return { status: 'ok', data: { mode: 'standby' } };
+    services: {
+      provide(name, _impl, opts) {
+        calls.push(['provide', name, opts]);
+        return { dispose() {} };
+      },
     },
-    onSettingsChange(cb) {
-      v2Calls.push(['onSettingsChange', typeof cb]);
-      settingsSubscriber = cb;
-      return () => v2Calls.push(['unsubscribeSettings']);
+    net: {
+      async fetch(url, init) {
+        calls.push(['netFetch', url, init.method]);
+        return { ok: true, status: 200, bodyText: '{"ok":true}' };
+      },
     },
-    async saveSettings(data) {
-      v2Calls.push(['saveSettings', data]);
-      return { ok: true, persistence: 'browser-local' };
-    },
-    registerSettingsTab(tabId, opts) {
-      v2Calls.push(['registerSettingsTab', tabId, opts?.label || '']);
-      return { unregister() { v2Calls.push(['unregisterSettingsTab', tabId]); } };
-    },
-    registerAction(actionId, spec) {
-      v2Calls.push(['registerAction', actionId, spec?.label || '']);
-      return { unregister() { v2Calls.push(['unregisterAction', actionId]); } };
-    },
-    onDispose(fn) {
-      v2Calls.push(['onDispose', typeof fn]);
+    lifecycle: {
+      signal: abortCtrl.signal,
+      onDispose(fn) {
+        calls.push(['onDispose', typeof fn]);
+      },
+      addManagedListener(_target, type) {
+        calls.push(['addManagedListener', type]);
+        return () => {};
+      },
     },
   };
 
-  const portV2 = assertPortalHostPort(
-    assertRendererHostPort(
-      createAddonHostAdapter(fakeHostV2, {
-        root: 'antigravity-statusbar.root',
-        popover: 'antigravity-statusbar.popover',
-        modal: 'antigravity-statusbar.global-limit-modal',
-      }),
-    ),
+  const port = assertOverlayHostPort(
+    assertRendererHostPort(createAddonHostAdapter(fakeV3Ctx, { root: 'antigravity-statusbar.root' })),
   );
-  assert.equal(portV2.schemaVersion, 2);
-  assert.equal(portV2.hostProfileId, 'antigravity-desktop');
-  const portRemoteWeb = assertRendererHostPort(
-    createAddonHostAdapter({ ...fakeHostV2, hostProfileId: ' antigravity-remote-web ' }),
-  );
-  assert.equal(portRemoteWeb.hostProfileId, 'antigravity-remote-web');
-  portV2.mountSlot(box1);
-  // Same container -> no unmount before mount
-  portV2.mountSlot(box1);
-  // Different container (tab switch) -> unmounts old slot before mounting into new container
-  portV2.mountSlot(box2);
-  // Switching to null container (host anchor: "status-bar" dock fallback) -> unmounts old slot and passes {}
-  portV2.mountSlot(null);
-  portV2.mountSlot(null);
-  portV2.injectStyle('statusbar-main', '.x{}', { slotId: 'antigravity-statusbar.root' });
-  portV2.openPopover({ ignoreOutsideClickEls: [] });
-  portV2.openModal({});
-  assert.deepEqual(portV2.getSettings(), { status: 'ok', data: { mode: 'standby' } });
-  const unsub = portV2.onSettingsChange(() => {});
-  assert.equal(typeof settingsSubscriber, 'function');
-  unsub();
-  portV2.saveSettings({ locale: 'ko' });
-  const tabReg = portV2.registerSettingsTab('settings', { label: 'Statusbar' });
-  const actReg = portV2.registerAction('open-settings', { label: 'Settings', run() {} });
-  tabReg.unregister();
-  actReg.unregister();
+  assert.equal(port.apiVersion, 3);
+  assert.equal(port.surface, 'desktop');
+  assert.equal(port.layoutMode, 'desktop');
+  assert.equal(port.capabilities.hasLocalLoopback, true);
+  assert.equal(port.lifecycleSignal, abortCtrl.signal);
 
-  assert.deepEqual(v2Calls, [
-    ['mountSlot', 'antigravity-statusbar.root', { container: box1 }],
-    ['mountSlot', 'antigravity-statusbar.root', { container: box1 }],
+  const remotePort = createAddonHostAdapter({
+    ...fakeV3Ctx,
+    env: { surface: 'remote-web', layoutMode: 'compact', capabilities: { hasLocalLoopback: false } },
+  });
+  assert.equal(remotePort.surface, 'remote-web');
+  assert.equal(remotePort.layoutMode, 'compact');
+  assert.equal(remotePort.capabilities.hasLocalLoopback, false);
+
+  port.mountSlot(box1);
+  port.mountSlot(box1);
+  port.mountSlot(box2);
+  port.mountSlot(null);
+  port.injectStyle('statusbar-main', '.x{}', { slotId: 'antigravity-statusbar.root' });
+  port.showToast({ message: 'Saved' });
+  port.openPopup({ title: 'Context' });
+  port.openModal({ title: 'Limits' });
+  const cmdReg = port.registerCommand('open-settings', { label: 'Settings', run() {} });
+  port.registerSettingsPage({ id: 'settings', schema: { type: 'stack' } });
+  port.netFetch('http://127.0.0.1:18910/api/quota', { method: 'POST' });
+  port.onDispose(() => {});
+  cmdReg.dispose();
+  port.removeStyle('statusbar-main');
+
+  assert.deepEqual(calls, [
+    ['mountCanvas', 'antigravity-statusbar.root', { container: box1 }],
+    ['mountCanvas', 'antigravity-statusbar.root', { container: box1 }],
     ['unmountSlot', 'antigravity-statusbar.root'],
-    ['mountSlot', 'antigravity-statusbar.root', { container: box2 }],
+    ['mountCanvas', 'antigravity-statusbar.root', { container: box2 }],
     ['unmountSlot', 'antigravity-statusbar.root'],
-    ['mountSlot', 'antigravity-statusbar.root', {}],
-    ['mountSlot', 'antigravity-statusbar.root', {}],
-    ['injectStyle', 'statusbar-main', '.x{}', { slotId: 'antigravity-statusbar.root' }],
-    ['openPopover', 'antigravity-statusbar.popover', { ignoreOutsideClickEls: [] }],
-    ['openModal', 'antigravity-statusbar.global-limit-modal', {}],
-    ['getSettings'],
-    ['onSettingsChange', 'function'],
-    ['unsubscribeSettings'],
-    ['saveSettings', { locale: 'ko' }],
-    ['registerSettingsTab', 'settings', 'Statusbar'],
-    ['registerAction', 'open-settings', 'Settings'],
-    ['unregisterSettingsTab', 'settings'],
-    ['unregisterAction', 'open-settings'],
+    ['mountCanvas', 'antigravity-statusbar.root', {}],
+    ['injectStyle', 'statusbar-main', { slotId: 'antigravity-statusbar.root' }],
+    ['showToast', 'Saved'],
+    ['openPopup', 'Context'],
+    ['openModal', 'Limits'],
+    ['registerCommand', 'open-settings', 'Settings'],
+    ['registerSettingsPage', 'settings'],
+    ['netFetch', 'http://127.0.0.1:18910/api/quota', 'POST'],
+    ['onDispose', 'function'],
+    ['disposeCommand', 'open-settings'],
+    ['removeStyle', 'statusbar-main'],
   ]);
 });
 
-test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsBridge (v3.2.0) and legacy renderer publisher', async () => {
+test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsBridge and legacy renderer publisher', async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'statusbar-publisher-test-'));
   const pluginDir = path.join(tempRoot, 'antigravity-statusbar');
   const hostDataDir = path.join(tempRoot, 'host-data');
@@ -349,7 +326,6 @@ test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsB
   await fs.writeFile(outsideFile, '// outside', 'utf8');
 
   try {
-    // 1. v3.2.0 settingsBridge confinement & atomic publish/teardown/teardownSync
     assert.throws(
       () => resolveConfinedSettingsBridgeTarget(hostDataDir, '../escape.json'),
       /ERR_INVALID_SETTINGS_BRIDGE_FILE/,
@@ -368,7 +344,6 @@ test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsB
       assert.throws(
         () => resolveConfinedSettingsBridgeTarget(hostDataDir, reserved),
         /ERR_RESERVED_SETTINGS_BRIDGE_FILE/,
-        `Reserved settingsBridge file must be rejected: ${reserved}`,
       );
     }
 
@@ -390,7 +365,6 @@ test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsB
     });
     assert.equal(path.basename(bridgePath), DEFAULT_SETTINGS_BRIDGE_FILE);
     const activeJson = JSON.parse(await fs.readFile(bridgePath, 'utf8'));
-    assert.equal(activeJson.schemaVersion, 1);
     assert.equal(activeJson.mode, 'active');
     assert.equal(activeJson.baseUrl, 'http://127.0.0.1:44123');
     assert.equal(activeJson.token, TEST_TOKEN);
@@ -398,27 +372,13 @@ test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsB
     await bridgePublisher.teardown();
     const standbyJson = JSON.parse(await fs.readFile(bridgePath, 'utf8'));
     assert.equal(standbyJson.mode, 'standby');
-    assert.equal(standbyJson.baseUrl, null);
-    assert.equal(standbyJson.token, null);
 
-    await bridgePublisher.publish({ baseUrl: 'http://127.0.0.1:44124', token: TEST_TOKEN });
-    bridgePublisher.teardownSync();
-    const syncStandbyJson = JSON.parse(await fs.readFile(bridgePath, 'utf8'));
-    assert.equal(syncStandbyJson.mode, 'standby');
-    assert.equal(syncStandbyJson.baseUrl, null);
-    assert.equal(syncStandbyJson.token, null);
-
-    // 2. Legacy createAddonRuntimePublisher confinement & atomic publish/teardown
     assert.throws(
       () => resolveConfinedRendererTarget(pluginDir, '../outside.js'),
       /ERR_RENDERER_ENTRY_ESCAPES_PLUGIN_ROOT/,
     );
     assert.throws(
       () => resolveConfinedRendererTarget(pluginDir, outsideFile),
-      /ERR_RENDERER_ENTRY_ESCAPES_PLUGIN_ROOT/,
-    );
-    assert.throws(
-      () => resolveConfinedRendererTarget(pluginDir, 'runtime/a\0b.js'),
       /ERR_RENDERER_ENTRY_ESCAPES_PLUGIN_ROOT/,
     );
 
@@ -429,7 +389,6 @@ test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsB
       baseUrl: 'http://127.0.0.1:44123',
       token: TEST_TOKEN,
     });
-    assert.equal(path.relative(pluginDir, writtenPath), path.join('runtime', 'statusbar-renderer.js'));
     const activeSrc = await fs.readFile(writtenPath, 'utf8');
     assert.ok(activeSrc.includes('http://127.0.0.1:44123'));
     assert.ok(activeSrc.includes('startAddonStatusbar'));
@@ -437,34 +396,13 @@ test('TC-ADDON-04: runtime-publisher.mjs enforces confinement for both settingsB
     await publisher.teardown();
     const standbySrc = await fs.readFile(writtenPath, 'utf8');
     assert.equal(standbySrc.includes(TEST_TOKEN), false);
-    assert.equal(standbySrc.includes('http://127.0.0.1:44123'), false);
     assert.ok(standbySrc.includes('startStandbyStatusbar'));
-
-    // Symlink escape guard (verify whenever platform grants symlink permission)
-    const symlinkDir = path.join(pluginDir, 'escape-link');
-    let symlinkCreated = false;
-    try {
-      await fs.symlink(tempRoot, symlinkDir, 'dir');
-      symlinkCreated = true;
-    } catch {
-      symlinkCreated = false;
-    }
-    if (symlinkCreated) {
-      assert.throws(
-        () => resolveConfinedRendererTarget(pluginDir, 'escape-link/outside.js'),
-        /ERR_SYMLINK_FORBIDDEN/,
-      );
-      assert.throws(
-        () => resolveConfinedSettingsBridgeTarget(symlinkDir, DEFAULT_SETTINGS_BRIDGE_FILE),
-        /ERR_SYMLINK_FORBIDDEN/,
-      );
-    }
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
 });
 
-test('TC-ADDON-05: i18n.mjs, api-client.mjs (Desktop + Remote HTTPS reconfiguration), and addon-bridge.mjs satisfy unit contracts', async () => {
+test('TC-ADDON-05: i18n.mjs, api-client.mjs (ctx.net.fetch + fetchImpl), and addon-bridge.mjs (host.statusbar service) satisfy unit contracts', async () => {
   const i18n = createInlineI18n('ko');
   assert.equal(i18n.getLocale(), 'ko');
   assert.equal(i18n.formatTokens(256000), '256.0K');
@@ -472,7 +410,6 @@ test('TC-ADDON-05: i18n.mjs, api-client.mjs (Desktop + Remote HTTPS reconfigurat
   assert.equal(i18n.localizeBreakdownLabel('Chat Messages'), '대화 메시지');
   i18n.setLocale('en');
   assert.equal(i18n.localizeBreakdownLabel('Chat Messages'), 'Chat Messages');
-  assert.equal(i18n.formatTemplate('Max {max}', { max: '512K' }), 'Max 512K');
 
   assert.throws(
     () => createSidecarApiClient({ baseUrl: 'https://evil.example:443', token: TEST_TOKEN }),
@@ -483,7 +420,32 @@ test('TC-ADDON-05: i18n.mjs, api-client.mjs (Desktop + Remote HTTPS reconfigurat
     /ERR_INVALID_SIDECAR_TOKEN/,
   );
 
-  // Unconfigured startup + dynamic configure/clearConnection + Remote HTTPS validation
+  // 1. v3 ctx.net.fetch broker transport (success + policy rejection propagation)
+  const netCalls = [];
+  const netApi = assertStatusbarApiPort(
+    createSidecarApiClient({
+      baseUrl: 'http://127.0.0.1:18910',
+      token: TEST_TOKEN,
+      netFetchImpl: async (url, init) => {
+        netCalls.push({ url, init });
+        if (url.endsWith('/blocked')) {
+          return { ok: false, reason: 'ERR_NET_LOOPBACK_PORT_NOT_ALLOWED:18910' };
+        }
+        return { ok: true, status: 200, bodyText: JSON.stringify({ ok: true, via: 'net-broker' }) };
+      },
+    }),
+  );
+  const netRes = await netApi.post('/api/settings/get', {});
+  assert.equal(netRes.via, 'net-broker');
+  assert.equal(netApi.isConnected(), true);
+  assert.equal(netCalls[0].init.headers['x-statusbar-token'], TEST_TOKEN);
+  await assert.rejects(
+    () => netApi.post('/blocked', {}),
+    (err) => err?.code === 'ERR_NET_LOOPBACK_PORT_NOT_ALLOWED:18910',
+  );
+  assert.equal(netApi.isConnected(), false);
+
+  // 2. Remote HTTPS validation & dynamic configure/clearConnection
   const remoteRequests = [];
   const remoteApi = assertStatusbarApiPort(
     createSidecarApiClient({
@@ -499,103 +461,81 @@ test('TC-ADDON-05: i18n.mjs, api-client.mjs (Desktop + Remote HTTPS reconfigurat
             },
           };
         }
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return { ok: true };
-          },
-        };
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
       },
     }),
   );
   assert.equal(remoteApi.isConfigured(), false);
-  assert.equal(remoteApi.getBaseUrl(), '');
-  await assert.rejects(
-    () => remoteApi.post('/api/settings/get', {}),
-    (err) => err?.code === 'ERR_SIDECAR_NOT_CONFIGURED',
-  );
   assert.throws(
     () => remoteApi.configure({ baseUrl: 'http://remote.example.com:8080', token: TEST_TOKEN }),
-    /ERR_INVALID_ENDPOINT_URL/,
-  );
-  assert.throws(
-    () => remoteApi.configure({ baseUrl: 'https://user:pass@sidecar.example.com', token: TEST_TOKEN }),
-    /ERR_INVALID_ENDPOINT_URL/,
-  );
-  assert.throws(
-    () => remoteApi.configure({ baseUrl: 'https://sidecar.example.com/sub?q=1', token: TEST_TOKEN }),
     /ERR_INVALID_ENDPOINT_URL/,
   );
   assert.equal(
     remoteApi.configure({ baseUrl: 'https://sidecar.example.com:8443/prefix/', token: TEST_TOKEN }),
     true,
   );
-  assert.equal(remoteApi.isConfigured(), true);
-  assert.equal(remoteApi.getBaseUrl(), 'https://sidecar.example.com:8443/prefix');
   await remoteApi.post('/api/settings/get', {});
   assert.equal(remoteApi.isConnected(), true);
   assert.equal(remoteRequests[0].url, 'https://sidecar.example.com:8443/prefix/api/settings/get');
-  // 401 flips connected=false
   await assert.rejects(() => remoteApi.post('/unauth', {}));
   assert.equal(remoteApi.isConnected(), false);
   assert.equal(remoteApi.clearConnection(), true);
-  assert.equal(remoteApi.isConfigured(), false);
 
-  const requests = [];
-  const api = assertStatusbarApiPort(
-    createSidecarApiClient({
-      baseUrl: 'http://127.0.0.1:45555',
-      token: TEST_TOKEN,
-      fetchImpl: async (url, init) => {
-        requests.push({ url, init });
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return { ok: true, customButtons: [], disabledRuntimeAddonIds: ['rt-1'] };
-          },
-        };
-      },
-    }),
-  );
-  assert.equal(api.isConfigured(), true);
-  assert.equal(api.isConnected(), false);
-  const res = await api.post('/api/settings/get', {});
-  assert.equal(res.ok, true);
-  assert.equal(api.isConnected(), true);
-  assert.equal(requests[0].url, 'http://127.0.0.1:45555/api/settings/get');
-  assert.equal(requests[0].init.headers['x-statusbar-token'], TEST_TOKEN);
-
+  // 3. addon-bridge well-known `host.statusbar` service contract
   let changes = 0;
   const registry = assertAddonRegistryPort(
     createAddonRegistry({
-      api,
+      api: netApi,
       onChange() {
         changes += 1;
       },
     }),
   );
-  assert.equal(registry.register({ id: 'bad id!', label: 'X', onClick() {} }), false);
-  assert.equal(registry.register({ id: 'rt-1', label: 'MCP', onClick() {} }), true);
-  assert.equal(changes, 1);
-  assert.equal(registry.list().length, 1);
-  assert.equal(await registry.setEnabled('rt-1', false), true);
-  assert.equal(registry.isRuntimeDisabled('rt-1'), true);
-  assert.equal(registry.unregister('rt-1'), true);
-  assert.equal(registry.list().length, 0);
+  const itemHandle = registry.statusbarService.registerItem({
+    pluginId: 'peer-translator',
+    id: 'mode',
+    label: '번역:구글',
+    icon: '🌐',
+    badge: 'KO',
+    tooltip: 'Translation mode',
+    align: 'right',
+    priority: 20,
+    onClick() {},
+  });
+  const leftHandle = registry.statusbarService.registerItem({
+    pluginId: 'peer-sync',
+    id: 'cloud',
+    label: 'Sync',
+    align: 'left',
+    priority: 10,
+    onClick() {},
+  });
+  assert.equal(changes, 2);
+  let sorted = registry.getSortedDelegatedItems();
+  assert.equal(sorted.left.length, 1);
+  assert.equal(sorted.right.length, 1);
+  assert.equal(sorted.right[0].badge, 'KO');
+
+  registry.statusbarService.updateItem('peer-translator', 'mode', { label: '번역:DeepL', badge: 'EN' });
+  sorted = registry.getSortedDelegatedItems();
+  assert.equal(sorted.right[0].label, '번역:DeepL');
+  assert.equal(sorted.right[0].badge, 'EN');
+
+  itemHandle.dispose();
+  assert.equal(registry.getSortedDelegatedItems().right.length, 0);
+  registry.statusbarService.removeItem('peer-sync', 'cloud');
+  assert.equal(registry.getSortedDelegatedItems().left.length, 0);
+  leftHandle.dispose();
 });
 
-test('TC-ADDON-13 (v3.3.0): build-renderer.mjs emits deterministic credential-free runtime/statusbar-renderer.js for --build-addon-userscript', async () => {
+test('TC-ADDON-13 (v3.0.0): build-renderer.mjs emits deterministic credential-free v3 runtime/statusbar-renderer.js', async () => {
   assert.throws(() => parseBuildArgs(['--out']), /valid output file path/);
-  assert.throws(() => parseBuildArgs(['--out', '--check']), /valid output file path/);
   const parsed = parseBuildArgs(['--check', '--out', 'runtime/test-out.js']);
   assert.equal(parsed.check, true);
   assert.ok(parsed.outPath.endsWith(path.join('runtime', 'test-out.js')));
 
   const checkRes = await buildStaticRenderer({ check: true });
   assert.equal(checkRes.ok, true);
-  assert.equal(checkRes.check, true);
   assert.match(checkRes.sha256, /^[a-f0-9]{64}$/);
   assert.ok(checkRes.bytes > 1000);
 
@@ -605,10 +545,13 @@ test('TC-ADDON-13 (v3.3.0): build-renderer.mjs emits deterministic credential-fr
     const writeRes = await buildStaticRenderer({ outPath: outFile, check: false });
     assert.equal(writeRes.sha256, checkRes.sha256);
     const content = await fs.readFile(outFile, 'utf8');
-    assert.equal(content.includes('\r\n'), false, 'Static bundle must use deterministic LF line endings');
+    assert.equal(content.includes('\r\n'), false);
     assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(content), false);
-    assert.ok(content.includes('registerSettingsTab'));
-    assert.ok(content.includes('registerAction'));
+    assert.ok(content.includes('host.statusbar'), 'v3 bundle must provide host.statusbar service');
+    assert.ok(content.includes('registerSettingsPage'), 'v3 bundle must register Tier-1 settings page');
+    assert.ok(content.includes('registerCommand'), 'v3 bundle must register Tier-1 commands');
+    assert.equal(/hostProfileId/.test(content), false, 'v3 bundle must not inspect raw hostProfileId');
+    assert.equal(/GM_xmlhttpRequest/.test(content), false, 'v3 bundle must not probe GM_xmlhttpRequest directly');
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }

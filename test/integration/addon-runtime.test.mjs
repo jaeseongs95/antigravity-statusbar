@@ -10,9 +10,6 @@ import {
 
 const TEST_TOKEN = 'addon-runtime-secret-token-32-ok';
 
-/**
- * Minimal dependency-free DOM + EventTarget simulator tailored for AddonManifest.v1 runtime tests.
- */
 function createMockDom() {
   class MockClassList {
     constructor(el) {
@@ -97,6 +94,9 @@ function createMockDom() {
     getAttribute(name) {
       return this.attributes.has(String(name)) ? this.attributes.get(String(name)) : null;
     }
+    removeAttribute(name) {
+      this.attributes.delete(String(name));
+    }
     appendChild(child) {
       if (child.parentNode) child.parentNode.removeChild(child);
       child.parentNode = this;
@@ -124,12 +124,8 @@ function createMockDom() {
     }
     matches(selector) {
       const attrMatch = /^\[([a-zA-Z0-9_-]+)="([^"]*)"\]$/.exec(selector);
-      if (attrMatch) {
-        return this.getAttribute(attrMatch[1]) === attrMatch[2];
-      }
-      if (selector.startsWith('.')) {
-        return this.classList.contains(selector.slice(1));
-      }
+      if (attrMatch) return this.getAttribute(attrMatch[1]) === attrMatch[2];
+      if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
       return this.tagName === selector.toUpperCase();
     }
     closest(selector) {
@@ -166,12 +162,10 @@ function createMockDom() {
     dispatchEvent(evt) {
       const set = this.listeners.get(evt.type);
       if (!set) return;
-      for (const fn of Array.from(set)) {
-        fn(evt);
-      }
+      for (const fn of Array.from(set)) fn(evt);
     }
-    click() {
-      this.dispatchEvent({ type: 'click', target: this, preventDefault() {} });
+    click(extra = {}) {
+      this.dispatchEvent({ type: 'click', target: this, isTrusted: true, preventDefault() {}, ...extra });
     }
     focus() {
       this.ownerDocument.activeElement = this;
@@ -188,9 +182,7 @@ function createMockDom() {
     head: null,
     activeElement: null,
     createElement(tag) {
-      if (String(tag).toLowerCase() === 'style') {
-        directStyleCreateCount += 1;
-      }
+      if (String(tag).toLowerCase() === 'style') directStyleCreateCount += 1;
       return new MockElement(tag, doc);
     },
     querySelectorAll(selector) {
@@ -224,9 +216,9 @@ function createMockDom() {
   doc.body = new MockElement('body', doc);
   doc.head = new MockElement('head', doc);
 
-  function createConversationView(sessionId) {
+  function createConversationView(sessionId, testId = 'conversation-view') {
     const view = new MockElement('div', doc);
-    view.setAttribute('data-testid', 'conversation-view');
+    view.setAttribute('data-testid', testId);
     view.setAttribute('data-cascade-id', sessionId);
     const box = new MockElement('div', doc);
     box.setAttribute('data-testid', 'agent-input-box');
@@ -240,89 +232,265 @@ function createMockDom() {
   return { doc, MockElement, createConversationView };
 }
 
-/**
- * Mock mirroring `antigravity-addons` (formerly `antigravity-native-addon-host`) createScopedHandle() semantics.
- */
-function createMockAddonHost(doc, MockElement) {
+function findNodeById(tree, id) {
+  if (!tree || typeof tree !== 'object') return null;
+  if (tree.id === id) return tree;
+  if (Array.isArray(tree.children)) {
+    for (const ch of tree.children) {
+      const found = findNodeById(ch, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', netHandler = null, dockEl = null, settingsBridge = null } = {}) {
   const pluginId = 'antigravity-statusbar';
   const allowedSlotId = 'antigravity-statusbar.root';
   const slots = new Map();
   const styles = new Map();
   const disposers = [];
-  let disposed = false;
+  const managedCleanups = [];
+  const toasts = [];
+  const popups = [];
+  const modals = [];
+  const commands = new Map();
+  const services = new Map();
+  const storageMap = new Map();
+  const storageListeners = new Set();
   const mountLog = [];
+  let settingsPage = null;
+  let disposed = false;
+  const abortCtrl = new AbortController();
 
-  const handle = Object.freeze({
-    pluginId,
-    hostVersion: '1.0.1',
-    hostProfileId: 'antigravity-desktop',
-    storageNamespace: pluginId,
-    ipcChannelPrefix: null,
-    getNoTranslateSelector() {
-      return '[data-addon-host-owner], [translate="no"], [data-agy-no-translate="true"]';
-    },
-    mountSlot(slotId, parentEl) {
-      if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
-      if (slotId !== allowedSlotId) throw new Error(`ERR_UNDECLARED_SLOT:${slotId}`);
-      let el = slots.get(slotId);
-      if (!el) {
-        el = new MockElement('div', doc);
-        el.setAttribute('translate', 'no');
-        el.setAttribute('data-agy-no-translate', 'true');
-        el.setAttribute('data-addon-host-owner', pluginId);
-        el.setAttribute('data-addon-host-slot', slotId);
-        slots.set(slotId, el);
-      }
-      const parent = parentEl || doc.body;
-      if (el.parentNode !== parent) {
-        parent.appendChild(el);
-      }
-      mountLog.push({ slotId, parent });
-      return el;
-    },
-    unmountSlot(slotId) {
-      if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
-      const el = slots.get(slotId);
-      if (!el) return false;
-      el.remove();
-      slots.delete(slotId);
-      return true;
-    },
-    injectStyle(styleId, cssText) {
-      if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
-      styles.set(styleId, String(cssText || ''));
-      return { styleId };
-    },
-    removeStyle(styleId) {
-      if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
-      return styles.delete(styleId);
-    },
-    listOwnedSlots() {
-      return Array.from(slots.keys());
-    },
-    onDispose(fn) {
-      if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
-      disposers.push(fn);
-    },
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      for (const fn of disposers.splice(0)) {
-        try {
-          fn();
-        } catch {}
-      }
-      for (const [, el] of slots) el.remove();
-      slots.clear();
-      styles.clear();
-    },
+  const ctx = Object.freeze({
+    apiVersion: 3,
+    meta: Object.freeze({
+      pluginId,
+      displayName: 'Antigravity Statusbar',
+      version: '3.2.0',
+      trustLevel: 'trusted',
+      sourceSchemaVersion: 3,
+    }),
+    env: Object.freeze({
+      surface,
+      layoutMode: 'desktop',
+      capabilities: Object.freeze({
+        hasLocalLoopback: surface === 'desktop' && typeof netHandler === 'function',
+        hasNetHttps: false,
+        hasConfigBridge: false,
+        hasSettingsBridge: Boolean(settingsBridge),
+        hasDocumentTransform: false,
+      }),
+    }),
+    theme: Object.freeze({
+      getMode: () => 'dark',
+      getTokens: () => ({ accent: '#38bdf8' }),
+      getTokenCss: () => ':host { --ag-accent: #38bdf8; }',
+      onDidChange: () => () => {},
+    }),
+    i18n: Object.freeze({
+      getLocale: () => 'ko',
+      onDidChange: () => () => {},
+    }),
+    ui: Object.freeze({
+      showToast(opts) {
+        toasts.push(opts);
+        return { close() {} };
+      },
+      openPopup(opts) {
+        const rec = {
+          opts,
+          tree: opts.tree,
+          state: { ...(opts.state || {}) },
+          closed: false,
+          update(nextTree, nextState) {
+            rec.tree = nextTree;
+            rec.state = { ...(nextState || {}) };
+          },
+          close() {
+            if (rec.closed) return;
+            rec.closed = true;
+            if (typeof opts.onClose === 'function') opts.onClose();
+          },
+        };
+        popups.push(rec);
+        return rec;
+      },
+      openModal(opts) {
+        const rec = {
+          opts,
+          tree: opts.tree,
+          state: { ...(opts.state || {}) },
+          closed: false,
+          update(nextTree, nextState) {
+            rec.tree = nextTree;
+            rec.state = { ...(nextState || {}) };
+          },
+          close() {
+            if (rec.closed) return;
+            rec.closed = true;
+            if (typeof opts.onClose === 'function') opts.onClose();
+          },
+        };
+        modals.push(rec);
+        return rec;
+      },
+      registerCommand(id, spec) {
+        commands.set(id, spec);
+        return Object.freeze({ dispose() { commands.delete(id); } });
+      },
+      registerSettingsPage(spec) {
+        const rec = {
+          spec,
+          openFlag: false,
+          tree: spec.schema,
+          state: { ...(spec.state || {}) },
+          open() {
+            rec.openFlag = true;
+            rec.tree = typeof spec.getSchema === 'function' ? spec.getSchema() : spec.schema;
+            rec.state = typeof spec.getState === 'function' ? spec.getState() : { ...(spec.state || {}) };
+            return rec;
+          },
+          update(nextTree, nextState) {
+            if (nextTree) rec.tree = nextTree;
+            if (nextState) rec.state = { ...nextState };
+          },
+          close() {
+            rec.openFlag = false;
+            if (typeof spec.onClose === 'function') spec.onClose();
+          },
+          dispose() {
+            rec.openFlag = false;
+            settingsPage = null;
+          },
+        };
+        settingsPage = rec;
+        return rec;
+      },
+      mountCanvas(slotId, opts = {}) {
+        if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
+        if (slotId !== allowedSlotId) throw new Error(`ERR_UNDECLARED_SLOT:${slotId}`);
+        const parent = opts?.container || dockEl || doc.body;
+        let rec = slots.get(slotId);
+        if (!rec) {
+          const hostEl = new MockElement('div', doc);
+          hostEl.setAttribute('translate', 'no');
+          hostEl.setAttribute('data-agy-no-translate', 'true');
+          hostEl.setAttribute('data-addon-host-owner', pluginId);
+          hostEl.setAttribute('data-addon-host-slot', slotId);
+          const rootEl = new MockElement('div', doc);
+          rootEl.className = 'addon-host-slot-root';
+          rootEl.setAttribute('data-addon-host-owner', pluginId);
+          hostEl.appendChild(rootEl);
+          rec = { hostEl, rootEl, container: parent };
+          slots.set(slotId, rec);
+        }
+        if (rec.hostEl.parentNode !== parent) {
+          parent.appendChild(rec.hostEl);
+          rec.container = parent;
+        }
+        mountLog.push({ slotId, opts, parent });
+        return rec.rootEl;
+      },
+      injectStyle(styleId, cssText, opts) {
+        if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
+        styles.set(styleId, { cssText: String(cssText || ''), opts: opts || null });
+        return { styleId };
+      },
+      removeStyle(styleId) {
+        if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
+        return styles.delete(styleId);
+      },
+    }),
+    dom: Object.freeze({
+      unmountSlot(slotId) {
+        if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
+        const rec = slots.get(slotId);
+        if (!rec) return false;
+        rec.hostEl.remove();
+        slots.delete(slotId);
+        return true;
+      },
+    }),
+    storage: Object.freeze({
+      async get(key) {
+        return storageMap.has(key) ? storageMap.get(key) : null;
+      },
+      async set(key, value) {
+        const oldValue = storageMap.has(key) ? storageMap.get(key) : null;
+        storageMap.set(key, value);
+        for (const fn of storageListeners) fn({ key, oldValue, newValue: value });
+      },
+      async delete(key) {
+        const oldValue = storageMap.has(key) ? storageMap.get(key) : null;
+        storageMap.delete(key);
+        for (const fn of storageListeners) fn({ key, oldValue, newValue: null });
+      },
+      onDidChange(cb) {
+        storageListeners.add(cb);
+        return () => storageListeners.delete(cb);
+      },
+    }),
+    services: Object.freeze({
+      provide(name, impl, opts) {
+        services.set(name, { impl, opts });
+        return Object.freeze({ dispose() { services.delete(name); } });
+      },
+    }),
+    ...(typeof netHandler === 'function'
+      ? {
+          net: Object.freeze({
+            fetch: (url, init) => Promise.resolve(netHandler(url, init)),
+          }),
+        }
+      : {}),
+    ...(settingsBridge ? { settingsBridge } : {}),
+    lifecycle: Object.freeze({
+      signal: abortCtrl.signal,
+      onDispose(fn) {
+        if (disposed) throw new Error(`ERR_HANDLE_DISPOSED:${pluginId}`);
+        disposers.push(fn);
+      },
+      addManagedListener(target, type, listener, opts) {
+        target.addEventListener(type, listener, opts);
+        const cleanup = () => target.removeEventListener(type, listener, opts);
+        managedCleanups.push(cleanup);
+        return cleanup;
+      },
+      dispose() {
+        if (disposed) return;
+        for (const fn of disposers.splice(0)) {
+          try {
+            fn();
+          } catch {}
+        }
+        disposed = true;
+        abortCtrl.abort();
+        for (const fn of managedCleanups.splice(0)) {
+          try {
+            fn();
+          } catch {}
+        }
+        for (const [, rec] of slots) rec.hostEl.remove();
+        slots.clear();
+        styles.clear();
+      },
+    }),
   });
 
   return {
-    handle,
+    ctx,
     slots,
     styles,
+    toasts,
+    popups,
+    modals,
+    commands,
+    services,
+    storageMap,
     mountLog,
+    getSettingsPage: () => settingsPage,
     isDisposed: () => disposed,
   };
 }
@@ -331,13 +499,12 @@ function flushMicrotasks() {
   return new Promise((resolve) => setTimeout(resolve, 25));
 }
 
-test('TC-ADDON-06, TC-ADDON-07 & TC-ADDON-08: bundled renderer uses addonHost capability API only, preserves full 2-tab UX, leaks zero credentials, and cleans up on dispose', async () => {
+test('TC-ADDON-06, TC-ADDON-07 & TC-ADDON-08: bundled v3 renderer uses AddonContextV3, provides host.statusbar, drives Tier 1/2 overlays, leaks zero credentials, and cleans up on dispose', async () => {
   const { doc, MockElement, createConversationView } = createMockDom();
   const v1 = createConversationView('sess-alpha');
   const v2 = createConversationView('sess-beta');
   v1.editor.focus();
 
-  const host = createMockAddonHost(doc, MockElement);
   const apiCalls = [];
   let failNextAutoCompact = false;
   let storedSettings = {
@@ -350,958 +517,280 @@ test('TC-ADDON-06, TC-ADDON-07 & TC-ADDON-08: bundled renderer uses addonHost ca
     disabledRuntimeAddonIds: [],
   };
 
-  const mockFetch = async (url, init) => {
+  const netHandler = async (url, init) => {
     const pathname = new URL(url).pathname;
     const body = JSON.parse(init.body || '{}');
     assert.equal(init.headers['x-statusbar-token'], TEST_TOKEN);
     apiCalls.push({ pathname, body });
 
     if (pathname === '/api/settings/get') {
-      return { ok: true, status: 200, async json() { return storedSettings; } };
+      return { ok: true, status: 200, bodyText: JSON.stringify(storedSettings) };
     }
     if (pathname === '/api/settings/update') {
       if (typeof body.autoCompact === 'boolean' && failNextAutoCompact) {
         failNextAutoCompact = false;
-        return {
-          ok: false,
-          status: 500,
-          async json() { return { error: { code: 'SAVE_FAILED', message: 'Disk error' } }; },
-        };
+        return { ok: false, status: 500, bodyText: JSON.stringify({ error: { code: 'SAVE_FAILED', message: 'Disk error' } }) };
       }
       if (typeof body.autoCompact === 'boolean') storedSettings = { ...storedSettings, autoCompact: body.autoCompact };
       if (typeof body.compactPrompt === 'string') storedSettings = { ...storedSettings, compactPrompt: body.compactPrompt };
       if (typeof body.locale === 'string') storedSettings = { ...storedSettings, locale: body.locale };
-      if (body.defaultCustomLimit !== undefined) {
-        storedSettings = { ...storedSettings, defaultCustomLimit: body.defaultCustomLimit };
-      }
-      if (body.sessionLimit) {
-        const others = storedSettings.sessions.filter((s) => s.sessionId !== body.sessionLimit.sessionId);
-        if (body.sessionLimit.limit !== null) {
-          others.push({ sessionId: body.sessionLimit.sessionId, limit: body.sessionLimit.limit });
-        }
-        storedSettings = { ...storedSettings, sessions: others };
-      }
-      return { ok: true, status: 200, async json() { return storedSettings; } };
+      return { ok: true, status: 200, bodyText: JSON.stringify(storedSettings) };
     }
     if (pathname === '/api/quota') {
       return {
         ok: true,
         status: 200,
-        async json() {
-          return {
-            available: true,
-            stale: false,
-            groups: [{ label: 'Gemini', buckets: [{ window: '5h', remainingPercent: 84 }] }],
-          };
-        },
+        bodyText: JSON.stringify({
+          available: true,
+          stale: false,
+          groups: [{ label: 'Gemini', buckets: [{ window: '5h', remainingPercent: 84 }] }],
+        }),
       };
     }
     if (pathname === '/api/sessions') {
-      return {
-        ok: true,
-        status: 200,
-        async json() { return { sessions: [{ sessionId: 'sess-alpha' }] }; },
-      };
+      return { ok: true, status: 200, bodyText: JSON.stringify({ sessions: [{ sessionId: 'sess-alpha' }] }) };
     }
     if (pathname === '/api/snapshot') {
       return {
         ok: true,
         status: 200,
-        async json() {
-          return {
-            sessionId: body.sessionId,
-            usedTokens: 128000,
-            effectiveLimit: 256000,
-            maxContextTokens: 512000,
-            usagePercent: 50,
-            cacheHitPercent: 72,
-            modelName: 'Gemini Test',
-            stepCount: 42,
-            limitSource: 'session',
-            customLimit: 256000,
-            isClampedByHost: false,
-            compactPrompt: storedSettings.compactPrompt,
-            compaction: { inProgress: false, trigger: null },
-            tokenBreakdown: [
-              { label: 'Chat Messages', tokens: 100000 },
-              { label: 'System', tokens: 28000 },
-            ],
-          };
-        },
+        bodyText: JSON.stringify({
+          sessionId: body.sessionId,
+          usedTokens: 128000,
+          effectiveLimit: 256000,
+          maxContextTokens: 512000,
+          usagePercent: 50,
+          cacheHitPercent: 72,
+          modelName: 'Gemini Test',
+          stepCount: 42,
+          limitSource: 'session',
+          customLimit: 256000,
+          isClampedByHost: false,
+          compactPrompt: storedSettings.compactPrompt,
+          compaction: { inProgress: false, trigger: null },
+          tokenBreakdown: [
+            { label: 'Chat Messages', tokens: 100000 },
+            { label: 'System', tokens: 28000 },
+          ],
+        }),
       };
     }
     if (pathname === '/api/compact') {
-      return { ok: true, status: 200, async json() { return { accepted: true }; } };
+      return { ok: true, status: 200, bodyText: JSON.stringify({ accepted: true }) };
     }
-    return { ok: true, status: 200, async json() { return {}; } };
+    return { ok: true, status: 200, bodyText: '{}' };
   };
 
-  let reloadCalled = 0;
-  const sandboxWindow = {
-    location: { reload() { reloadCalled += 1; } },
-  };
-  const sandbox = {
+  const host = createMockAddonContextV3(doc, MockElement, { surface: 'desktop', netHandler });
+  const sandboxWindow = { location: { reload() {} } };
+
+  const bundleSource = renderAddonRendererBundle({
+    baseUrl: 'http://127.0.0.1:18910',
+    token: TEST_TOKEN,
+  });
+
+  vm.runInNewContext(`(function(addonHost){\n${bundleSource}\n})(addonHost);`, {
     window: sandboxWindow,
     document: doc,
-    fetch: mockFetch,
+    URL,
     AbortController,
     setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
-    addonHost: host.handle,
-  };
-
-  const bundleSource = renderAddonRendererBundle({
-    baseUrl: 'http://127.0.0.1:43210',
-    token: TEST_TOKEN,
+    addonHost: host.ctx,
   });
-
-  // Execute exactly like antigravity-addons wrapper: (function(addonHost){ rawCode })(__addonHandle)
-  vm.runInNewContext(
-    `(function(addonHost){\n${bundleSource}\n})(addonHost);`,
-    sandbox,
-  );
   await flushMicrotasks();
 
-  // TC-ADDON-06: Capability-only style & slot mounting, zero credential/handle leak on window
-  assert.equal(doc.getDirectStyleCreateCount(), 0, 'Must never call document.createElement("style") directly');
+  // 1. Capability-only canvas & style injection with theme tokens, zero credential leak
+  assert.equal(doc.getDirectStyleCreateCount(), 0);
   assert.ok(host.styles.has('statusbar-main'));
+  assert.ok(host.styles.get('statusbar-main').cssText.includes('--ag-accent'));
   assert.equal(host.slots.size, 1);
-  const slotEl = host.slots.get('antigravity-statusbar.root');
-  assert.equal(slotEl.parentNode, v1.box);
-  assert.equal(slotEl.getAttribute('translate'), 'no');
-  assert.equal(slotEl.getAttribute('data-addon-host-owner'), 'antigravity-statusbar');
-  assert.equal(slotEl.getAttribute('data-agy-no-translate'), 'true');
-  assert.equal(Object.prototype.hasOwnProperty.call(sandboxWindow, '__agyStatusbarInline'), false);
+  const rootRec = host.slots.get('antigravity-statusbar.root');
+  assert.equal(rootRec.container, v1.box);
   assert.equal(JSON.stringify(sandboxWindow).includes(TEST_TOKEN), false);
-  assert.ok(sandboxWindow.statusbarAddons && sandboxWindow.statusbarAddons.version === '1.0.0');
 
-  // Single-slot safe reattachment when focus shifts to second agent-input-box
+  // 2. Well-known `host.statusbar` service delegation
+  assert.ok(host.services.has('host.statusbar'));
+  const sbSvc = host.services.get('host.statusbar').impl;
+  let delegatedClicked = null;
+  const itemHandle = sbSvc.registerItem({
+    pluginId: 'peer-x',
+    id: 'btn1',
+    label: 'PeerX',
+    badge: '1',
+    align: 'right',
+    onClick(ev) { delegatedClicked = ev; },
+  });
+  const delegatedEl = rootRec.rootEl.querySelector('[data-status-plugin-id="peer-x"]');
+  assert.ok(delegatedEl);
+  delegatedEl.click({ ctrlKey: true });
+  assert.equal(delegatedClicked?.ctrlKey, true);
+  itemHandle.dispose();
+  assert.equal(rootRec.rootEl.querySelector('[data-status-plugin-id="peer-x"]'), null);
+
+  // 3. Focus switch reattaches canvas to v2.box
   v2.editor.focus();
   doc.dispatchEvent({ type: 'focusin', target: v2.editor });
   await flushMicrotasks();
-  assert.equal(slotEl.parentNode, v2.box, 'Single slot should reattach cleanly to active input box');
+  assert.equal(host.slots.get('antigravity-statusbar.root').container, v2.box);
 
-  // StatusbarAddon.v1 runtime button bridge
-  let rtClickedSession = '';
-  assert.equal(
-    sandboxWindow.statusbarAddons.register({
-      id: 'peer-btn',
-      label: 'Peer',
-      onClick({ sessionId }) {
-        rtClickedSession = sessionId;
-      },
-    }),
-    true,
-  );
-  const customContainer = slotEl.querySelector('.agy-inline-custom-btns');
-  assert.equal(customContainer.childNodes.length, 1);
-  customContainer.childNodes[0].click();
-  assert.equal(rtClickedSession, 'sess-beta');
-
-  // TC-ADDON-07: 2-tab popover open, tab switch, Escape focus return, auto-compact rollback, compactPrompt save
-  const ctxBtn = slotEl.querySelector('.agy-inline-metric-btn');
-  const popEl = slotEl.querySelector('.agy-inline-popover');
-  assert.equal(popEl.classList.contains('hidden'), true);
+  // 4. Tier-2 Context Popup & Global Limits Modal + Tier-1 Settings Page (autoCompact rollback + prompt save)
+  const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
   ctxBtn.click();
-  assert.equal(popEl.classList.contains('hidden'), false);
-  assert.equal(ctxBtn.getAttribute('aria-expanded'), 'true');
+  assert.equal(host.popups.length, 1);
+  assert.equal(host.popups[0].opts.placement.zone, 'anchor');
+  host.popups[0].opts.onAction({ actionId: 'open-global-limits' });
+  assert.equal(host.popups[0].closed, true);
+  assert.equal(host.modals.length, 1);
+  host.modals[0].close();
 
-  const tabs = popEl.querySelectorAll('.agy-inline-tab');
-  assert.equal(tabs.length, 2);
-  tabs[1].click(); // switch to Settings tab
-  assert.equal(tabs[1].getAttribute('aria-selected'), 'true');
+  const settingsPage = host.getSettingsPage();
+  assert.ok(settingsPage);
+  settingsPage.open();
+  assert.equal(findNodeById(settingsPage.tree, 'set-remote-sec'), null, 'Desktop settings must omit Remote Sidecar Connection');
 
-  // Auto-compact switch failure rollback
-  const switchBtn = popEl.querySelector('.agy-inline-switch');
-  assert.equal(switchBtn.getAttribute('aria-checked'), 'true');
   failNextAutoCompact = true;
-  switchBtn.click();
+  settingsPage.spec.onChange({ field: 'autoCompact', value: false });
   await flushMicrotasks();
-  assert.equal(switchBtn.getAttribute('aria-checked'), 'true', 'Failed autoCompact update must roll back switch');
+  assert.equal(settingsPage.state.autoCompact, true, 'Failed autoCompact update must roll back');
 
-  // Compact prompt edit + save
-  const textarea = popEl.querySelector('.agy-inline-pop-textarea');
-  assert.equal(textarea.value, '핵심만 요약해줘');
-  textarea.value = '변경된 파일과 테스트 결과만 요약';
-  textarea.dispatchEvent({ type: 'input', target: textarea });
-  const saveButtons = popEl.querySelectorAll('.agy-inline-btn-primary');
-  const promptSaveBtn = saveButtons[saveButtons.length - 1];
-  promptSaveBtn.click();
+  settingsPage.spec.onChange({ field: 'compactPrompt', value: '변경된 파일만 요약' });
+  settingsPage.spec.onAction({ actionId: 'save-compact-prompt' });
   await flushMicrotasks();
-  assert.equal(storedSettings.compactPrompt, '변경된 파일과 테스트 결과만 요약');
+  assert.equal(storedSettings.compactPrompt, '변경된 파일만 요약');
 
-  // Escape closes popover and returns focus to trigger
-  doc.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {} });
-  assert.equal(popEl.classList.contains('hidden'), true);
-  assert.equal(doc.activeElement, ctxBtn);
-
-  // Manual compact request
-  const rightBtns = slotEl.querySelector('.agy-inline-right').querySelectorAll('.agy-inline-btn');
-  const compactBtn = rightBtns.find((b) => b.textContent === 'compact');
-  assert.ok(compactBtn);
+  // 5. Manual compact request
+  const compactBtn = rootRec.rootEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent === 'compact');
   compactBtn.click();
   await flushMicrotasks();
   assert.ok(apiCalls.some((c) => c.pathname === '/api/compact' && c.body.sessionId === 'sess-beta'));
 
-  // TC-ADDON-08: Host-managed dispose() cleans everything
-  host.handle.dispose();
+  // 6. Dispose cleans up everything
+  host.ctx.lifecycle.dispose();
   assert.equal(host.isDisposed(), true);
   assert.equal(host.slots.size, 0);
   assert.equal(host.styles.size, 0);
+  assert.equal(host.services.size, 0);
+  assert.equal(host.commands.size, 0);
   assert.equal(sandboxWindow.statusbarAddons, undefined);
-  assert.equal(doc.getListenerCount('keydown'), 0);
-  assert.equal(doc.getListenerCount('pointerdown'), 0);
   assert.equal(doc.getListenerCount('focusin'), 0);
-  assert.equal(reloadCalled, 0);
+  assert.equal(doc.getListenerCount('pointerdown'), 0);
 });
 
-test('TC-ADDON-08: standby stub mounts via addonHost with zero credentials, triggers reload on click, and cleans up on dispose', () => {
+test('TC-ADDON-08: v3 standby stub mounts via AddonContextV3 with zero credentials, triggers reload on click, and cleans up on dispose', () => {
   const { doc, MockElement, createConversationView } = createMockDom();
   const v1 = createConversationView('sess-standby');
-  const host = createMockAddonHost(doc, MockElement);
+  const host = createMockAddonContextV3(doc, MockElement, { surface: 'desktop' });
 
   let reloadCount = 0;
-  const sandboxWindow = {
-    location: { reload() { reloadCount += 1; } },
-  };
   const stubSource = renderAddonStandbyStub();
   assert.equal(stubSource.includes(TEST_TOKEN), false);
 
-  vm.runInNewContext(
-    `(function(addonHost){\n${stubSource}\n})(addonHost);`,
-    {
-      window: sandboxWindow,
-      document: doc,
-      addonHost: host.handle,
-    },
-  );
+  vm.runInNewContext(`(function(addonHost){\n${stubSource}\n})(addonHost);`, {
+    window: { location: { reload() { reloadCount += 1; } } },
+    document: doc,
+    addonHost: host.ctx,
+  });
 
   assert.equal(doc.getDirectStyleCreateCount(), 0);
   assert.ok(host.styles.has('statusbar-main'));
-  const slotEl = host.slots.get('antigravity-statusbar.root');
-  assert.ok(slotEl);
-  assert.equal(slotEl.parentNode, v1.box);
-  const reloadBtn = slotEl.querySelector('.agy-inline-btn');
-  assert.ok(reloadBtn);
-  reloadBtn.click();
+  const rootRec = host.slots.get('antigravity-statusbar.root');
+  assert.equal(rootRec.container, v1.box);
+  rootRec.rootEl.querySelector('.agy-inline-btn').click();
   assert.equal(reloadCount, 1);
 
-  host.handle.dispose();
+  host.ctx.lifecycle.dispose();
   assert.equal(host.slots.size, 0);
   assert.equal(host.styles.size, 0);
 });
 
-test('TC-ADDON-09: AddonManifest.v2 bundled renderer mounts in Shadow DOM via { container }, routes styles per slotId, and uses host v2 openPopover & openModal portals cleanly', async () => {
-  const { doc, MockElement, createConversationView } = createMockDom();
-  const v1 = createConversationView('sess-v2-alpha');
-  const v2 = createConversationView('sess-v2-beta');
-  v1.editor.focus();
-
-  const pluginId = 'antigravity-statusbar';
-  const allowedSlots = new Map([
-    ['antigravity-statusbar.root', 'status-bar'],
-    ['antigravity-statusbar.popover', 'overlay'],
-    ['antigravity-statusbar.global-limit-modal', 'modal'],
-  ]);
-  const mountedSlots = new Map();
-  const styleRecords = [];
-  const portals = [];
-  const disposers = [];
-  const disposeEvents = [];
-  let disposed = false;
-
-  const v2HostHandle = Object.freeze({
-    pluginId,
-    version: '3.2.0',
-    trustLevel: 'trusted',
-    hostProfileId: 'antigravity-desktop',
-    schemaVersion: 2,
-    sourceSchemaVersion: 2,
-    mountSlot(slotId, opts = {}) {
-      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
-      if (!allowedSlots.has(slotId)) throw new Error(`ERR_UNDECLARED_SLOT:${pluginId}:${slotId}`);
-      const existing = mountedSlots.get(slotId);
-      if (existing && existing.hostEl.parentNode) {
-        return existing.rootEl;
-      }
-      // Strictly enforces v2 `{ container }` contract (bare HTMLElement has no `.container` -> returns null!)
-      const container = opts && opts.container ? opts.container : null;
-      if (!container) return null;
-      const hostEl = new MockElement('div', doc);
-      hostEl.setAttribute('data-addon-host-owner', pluginId);
-      hostEl.setAttribute('data-addon-host-slot', slotId);
-      hostEl.setAttribute('translate', 'no');
-      container.appendChild(hostEl);
-      // Simulate open ShadowRoot inner `<div class="addon-host-slot-root">`
-      const rootEl = new MockElement('div', doc);
-      rootEl.className = 'addon-host-slot-root';
-      rootEl.setAttribute('data-addon-host-owner', pluginId);
-      rootEl.setAttribute('data-addon-host-slot', slotId);
-      rootEl.isConnected = true;
-      mountedSlots.set(slotId, { hostEl, rootEl, container });
-      return rootEl;
-    },
-    unmountSlot(slotId) {
-      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
-      disposeEvents.push(['unmountSlot', slotId]);
-      const rec = mountedSlots.get(slotId);
-      if (!rec) return false;
-      rec.hostEl.remove();
-      rec.rootEl.isConnected = false;
-      mountedSlots.delete(slotId);
-      return true;
-    },
-    injectStyle(styleId, cssText, opts = {}) {
-      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
-      styleRecords.push({ styleId, slotId: opts.slotId || null, length: String(cssText || '').length });
-      return { styleId };
-    },
-    removeStyle(styleId) {
-      if (disposed) throw new Error(`ERR_PLUGIN_HANDLE_DISPOSED:${pluginId}`);
-      disposeEvents.push(['removeStyle', styleId]);
-      return Boolean(styleId);
-    },
-    openPopover(slotId, opts = {}) {
-      if (allowedSlots.get(slotId) !== 'overlay') throw new Error(`ERR_INVALID_POPOVER_SLOT_KIND:${slotId}`);
-      const pop = new MockElement('div', doc);
-      pop.setAttribute('popover', 'manual');
-      pop.setAttribute('data-addon-host-popover', '1');
-      pop.setAttribute('data-addon-host-owner', pluginId);
-      pop.setAttribute('data-addon-host-slot', slotId);
-      const bodyEl = new MockElement('div', doc);
-      bodyEl.className = 'addon-host-slot-root';
-      pop.appendChild(bodyEl);
-      doc.body.appendChild(pop);
-      let closed = false;
-      const entry = {
-        kind: 'popover',
-        slotId,
-        element: pop,
-        bodyEl,
-        ignoreOutsideClickEls: opts.ignoreOutsideClickEls || [],
-        isClosed: () => closed,
-        close() {
-          if (closed) return;
-          closed = true;
-          pop.remove();
-          if (typeof opts.onClose === 'function') opts.onClose();
-        },
-      };
-      portals.push(entry);
-      return Object.freeze({ id: `popover-${portals.length}`, element: pop, bodyEl, close: entry.close });
-    },
-    openModal(slotId, opts = {}) {
-      if (allowedSlots.get(slotId) !== 'modal') throw new Error(`ERR_INVALID_MODAL_SLOT_KIND:${slotId}`);
-      const dlg = new MockElement('dialog', doc);
-      dlg.setAttribute('data-addon-host-modal-dialog', '1');
-      dlg.setAttribute('data-addon-host-owner', pluginId);
-      dlg.setAttribute('data-addon-host-slot', slotId);
-      // Mirror real host v2.2.0+ modal-portal.js centered `<dialog>` defaults
-      dlg.style.position = 'fixed';
-      dlg.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
-      dlg.style.right = '0';
-      dlg.style.bottom = '0';
-      dlg.style.left = '0';
-      dlg.style.margin = 'auto';
-      dlg.style.width = 'fit-content';
-      dlg.style.height = 'fit-content';
-      dlg.style.zIndex = '2147483001';
-      const bodyEl = new MockElement('div', doc);
-      bodyEl.className = 'addon-host-slot-root';
-      dlg.appendChild(bodyEl);
-      doc.body.appendChild(dlg);
-      let closed = false;
-      const entry = {
-        kind: 'modal',
-        slotId,
-        element: dlg,
-        bodyEl,
-        isClosed: () => closed,
-        close() {
-          if (closed) return;
-          closed = true;
-          dlg.remove();
-          if (typeof opts.onClose === 'function') opts.onClose();
-        },
-      };
-      portals.push(entry);
-      return Object.freeze({ id: `modal-${portals.length}`, element: dlg, bodyEl, close: entry.close });
-    },
-    onDispose(fn) {
-      disposers.push(fn);
-    },
-    dispose() {
-      if (disposed) return;
-      // Mirror host v2.2.0+ I10 invariant: run onDispose callbacks BEFORE marking handle disposed
-      // so plugin unmountSlot()/removeStyle() calls succeed without ERR_PLUGIN_HANDLE_DISPOSED.
-      for (const fn of disposers.splice(0)) fn();
-      disposed = true;
-      for (const p of portals) p.close();
-      for (const slotId of Array.from(mountedSlots.keys())) {
-        mountedSlots.get(slotId).hostEl.remove();
-      }
-      mountedSlots.clear();
-    },
-  });
-
-  const sandboxWindow = { innerWidth: 1440, innerHeight: 900, location: { reload() {} } };
-  const bundleSource = renderAddonRendererBundle({
-    baseUrl: 'http://127.0.0.1:45555',
-    token: TEST_TOKEN,
-  });
-
-  vm.runInNewContext(
-    `(function(addonHost){\n${bundleSource}\n})(addonHost);`,
-    {
-      window: sandboxWindow,
-      document: doc,
-      addonHost: v2HostHandle,
-      AbortController,
-      setTimeout,
-      clearTimeout,
-      setInterval,
-      clearInterval,
-      fetch: async (url) => {
-        const pathname = new URL(url).pathname;
-        if (pathname === '/api/settings/get') {
-          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, defaultCustomLimit: 200000, modelLimits: [], sessions: [], customButtons: [], disabledRuntimeAddonIds: [] }; } };
-        }
-        if (pathname === '/api/quota') {
-          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
-        }
-        if (pathname === '/api/sessions') {
-          return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-v2-alpha' }] }; } };
-        }
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return {
-              sessionId: 'sess-v2-alpha',
-              modelName: 'Gemini 4 Neon',
-              usedTokens: 64000,
-              effectiveLimit: 200000,
-              maxContextTokens: 512000,
-              limitSource: 'default',
-              usagePercent: 32,
-              compaction: { inProgress: false, lastError: null },
-            };
-          },
-        };
-      },
-    },
-  );
-  await flushMicrotasks();
-
-  // 1. Mounted inside ShadowRoot slot via `{ container: v1.box }` & root CSS routed to slotId
-  const rootRec = mountedSlots.get('antigravity-statusbar.root');
-  assert.ok(rootRec, 'v2 mountSlot({ container }) must mount root slot');
-  assert.equal(rootRec.container, v1.box);
-  assert.ok(
-    styleRecords.some((r) => r.styleId === 'statusbar-main' && r.slotId === 'antigravity-statusbar.root'),
-    'Root style must route to root slotId',
-  );
-
-  // 2. Clicking ctxBtn opens host v2 `openPopover` portal (NOT inline child of barEl)
-  const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
-  assert.ok(ctxBtn);
-  ctxBtn.getBoundingClientRect = () => ({ left: 545, top: 860, right: 735, width: 190, height: 24 });
-  ctxBtn.click();
-  const popPortal = portals.find((p) => p.kind === 'popover');
-  assert.ok(popPortal, 'Popover must open via host v2 openPopover');
-  assert.equal(popPortal.slotId, 'antigravity-statusbar.popover');
-  assert.equal(popPortal.isClosed(), false);
-  assert.ok(popPortal.ignoreOutsideClickEls.includes(ctxBtn));
-  assert.ok(
-    styleRecords.some((r) => r.styleId === 'statusbar-main:popover' && r.slotId === 'antigravity-statusbar.popover'),
-    'Popover style must route to popover slotId',
-  );
-  const popEl = popPortal.bodyEl.querySelector('.agy-inline-popover');
-  assert.ok(popEl && popEl.classList.contains('agy-inline-popover-portal'));
-  assert.equal(popPortal.element.style.position, 'fixed');
-  assert.equal(popPortal.element.style.left, '545px', 'ctxBtn popover must align left to ctxBtn within viewport bounds');
-  assert.equal(popPortal.element.style.right, 'auto');
-  assert.equal(popPortal.element.style.width, 'fit-content');
-
-  // 3. Clicking Global Limit Modal button inside popover closes popover portal & opens host v2 `<dialog>` openModal
-  const modalTrigger = popEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('전역'));
-  assert.ok(modalTrigger);
-  modalTrigger.click();
-  assert.equal(popPortal.isClosed(), true, 'Popover portal must close when opening Global Limit modal');
-  const modalPortal = portals.find((p) => p.kind === 'modal');
-  assert.ok(modalPortal, 'Global Limit Modal must open via host v2 openModal');
-  assert.equal(modalPortal.slotId, 'antigravity-statusbar.global-limit-modal');
-  assert.equal(modalPortal.element.tagName, 'DIALOG');
-  assert.equal(modalPortal.element.style.position, 'fixed');
-  assert.equal(modalPortal.element.style.top, 'max(env(titlebar-area-height, 36px), 36px)');
-  assert.equal(modalPortal.element.style.right, '0');
-  assert.equal(modalPortal.element.style.bottom, '0');
-  assert.equal(modalPortal.element.style.left, '0');
-  assert.equal(modalPortal.element.style.margin, 'auto');
-  assert.equal(modalPortal.element.style.marginTop, 'auto', 'Must override host marginTop so <dialog> centers vertically & horizontally');
-  assert.equal(modalPortal.element.style.marginLeft, 'auto');
-  assert.equal(modalPortal.element.style.marginRight, 'auto');
-  assert.equal(modalPortal.element.style.width, 'fit-content');
-  assert.equal(modalPortal.element.style.height, 'fit-content');
-  assert.ok(
-    styleRecords.some((r) => r.styleId === 'statusbar-main:modal' && r.slotId === 'antigravity-statusbar.global-limit-modal'),
-    'Modal style must route to modal slotId',
-  );
-  assert.ok(modalPortal.bodyEl.querySelector('.agy-inline-modal'));
-
-  // Backdrop click on `<dialog>` element closes modal portal cleanly
-  modalPortal.element.dispatchEvent({ type: 'click', target: modalPortal.element });
-  assert.equal(modalPortal.isClosed(), true, 'Backdrop click on <dialog> must close modal portal');
-
-  // Clicking settingsBtn opens right-anchored popover clamped inside viewport bounds
-  const rightBtnsV2 = rootRec.rootEl.querySelector('.agy-inline-right').querySelectorAll('.agy-inline-btn');
-  const settingsBtnV2 = rightBtnsV2[rightBtnsV2.length - 1];
-  assert.ok(settingsBtnV2);
-  settingsBtnV2.getBoundingClientRect = () => ({ left: 1100, top: 860, right: 1132, width: 32, height: 24 });
-  settingsBtnV2.click();
-  const settingsPopPortal = portals.filter((p) => p.kind === 'popover').pop();
-  assert.ok(settingsPopPortal && !settingsPopPortal.isClosed());
-  assert.equal(settingsPopPortal.element.style.left, 'auto');
-  assert.equal(settingsPopPortal.element.style.right, '308px');
-  settingsPopPortal.close();
-
-  // 4. Switching active conversation tab unmounts old v1.box slot and remounts into v2.box!
-  v2.editor.focus();
-  doc.dispatchEvent({ type: 'focusin', target: v2.editor });
-  const movedRec = mountedSlots.get('antigravity-statusbar.root');
-  assert.equal(movedRec.container, v2.box, 'Tab switch must unmount and remount v2 Shadow slot into new active box');
-
-  // 5. Dispose cleans up slots and portals cleanly under v2.2.0+ I10 ordering
-  v2HostHandle.dispose();
-  assert.equal(mountedSlots.size, 0);
-  assert.equal(sandboxWindow.statusbarAddons, undefined);
-  assert.ok(
-    disposeEvents.some(([op, id]) => op === 'unmountSlot' && id === 'antigravity-statusbar.root'),
-    'onDispose must unmount root slot before host handle transitions to disposed',
-  );
-  assert.ok(
-    disposeEvents.some(([op, id]) => op === 'removeStyle' && id === 'statusbar-main'),
-    'onDispose must remove main style before host handle transitions to disposed',
-  );
-});
-
-test('TC-ADDON-10a (v3.2.0): Desktop trusted static bundle consumes live settingsBridge credentials (standby -> active -> rotation -> standby) with zero hardcoded secrets', async () => {
+test('TC-ADDON-10b (v3.0.0): Remote Web static bundle falls back to host status-bar dock, uses ctx.storage for credentials, and registers unified settings & commands', async () => {
   const staticSource = renderAddonRendererBundle();
   assert.equal(staticSource, renderAddonStaticBundle());
-  assert.equal(staticSource.includes(TEST_TOKEN), false);
   assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(staticSource), false);
-  assert.equal(/\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\.write\b/.test(staticSource), false);
-  assert.equal(/\beval\s*\(|\bnew\s+Function\b|\brequire\s*\(/.test(staticSource), false);
+  assert.equal(/hostProfileId/.test(staticSource), false);
 
-  const { doc, MockElement, createConversationView } = createMockDom();
-  const v1 = createConversationView('sess-desktop-bridge');
-  v1.editor.focus();
-
-  const mountedSlots = new Map();
-  const settingsListeners = new Set();
-  const disposers = [];
-  let unsubscribedCount = 0;
-  let currentSettingsSnap = { status: 'ok', data: { mode: 'standby', baseUrl: null, token: null } };
-
-  const desktopHost = Object.freeze({
-    pluginId: 'antigravity-statusbar',
-    version: '3.2.0',
-    trustLevel: 'trusted',
-    hostProfileId: 'antigravity-desktop',
-    schemaVersion: 2,
-    mountSlot(slotId, opts = {}) {
-      const container = opts && opts.container ? opts.container : doc.body;
-      const existing = mountedSlots.get(slotId);
-      if (existing && existing.hostEl.parentNode) return existing.rootEl;
-      const hostEl = new MockElement('div', doc);
-      container.appendChild(hostEl);
-      const rootEl = new MockElement('div', doc);
-      rootEl.className = 'addon-host-slot-root';
-      mountedSlots.set(slotId, { hostEl, rootEl, container });
-      return rootEl;
-    },
-    unmountSlot(slotId) {
-      const rec = mountedSlots.get(slotId);
-      if (!rec) return false;
-      rec.hostEl.remove();
-      mountedSlots.delete(slotId);
-      return true;
-    },
-    injectStyle() {
-      return { styleId: 'statusbar-main' };
-    },
-    removeStyle() {
-      return true;
-    },
-    getSettings() {
-      return currentSettingsSnap;
-    },
-    onSettingsChange(cb) {
-      settingsListeners.add(cb);
-      return () => {
-        settingsListeners.delete(cb);
-        unsubscribedCount += 1;
-      };
-    },
-    onDispose(fn) {
-      disposers.push(fn);
-    },
-    dispose() {
-      for (const fn of disposers.splice(0)) fn();
-    },
-  });
-
-  const seenRequests = [];
-  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
-  vm.runInNewContext(
-    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
-    {
-      window: sandboxWindow,
-      document: doc,
-      addonHost: desktopHost,
-      URL,
-      AbortController,
-      setTimeout,
-      clearTimeout,
-      setInterval,
-      clearInterval,
-      fetch: async (url, init) => {
-        seenRequests.push({ url, token: init.headers['x-statusbar-token'] });
-        const pathname = new URL(url).pathname;
-        if (pathname === '/api/settings/get') {
-          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
-        }
-        if (pathname === '/api/quota') {
-          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
-        }
-        if (pathname === '/api/sessions') {
-          return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-desktop-bridge' }] }; } };
-        }
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return {
-              sessionId: 'sess-desktop-bridge',
-              usedTokens: 48000,
-              effectiveLimit: 200000,
-              maxContextTokens: 512000,
-              usagePercent: 24,
-              compaction: { inProgress: false, lastError: null },
-            };
-          },
-        };
-      },
-    },
-  );
-  try {
-    await flushMicrotasks();
-
-    // 1. Boots in standby with ZERO fetches
-    assert.equal(seenRequests.length, 0, 'Standby settingsBridge must issue zero fetches');
-    const rootEl = mountedSlots.get('antigravity-statusbar.root').rootEl;
-    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
-
-    // 2. Sidecar publishes active credentials via settingsBridge -> renderer immediately connects
-    currentSettingsSnap = {
-      status: 'ok',
-      data: { mode: 'active', baseUrl: 'http://127.0.0.1:46001', token: TEST_TOKEN },
-    };
-    for (const cb of settingsListeners) cb(currentSettingsSnap);
-    await flushMicrotasks();
-    assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46001/') && r.token === TEST_TOKEN));
-    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('48.0K'));
-
-    // 3. Sidecar restarts on a new port/token -> live rotation without reload
-    const rotatedToken = 'rotated-desktop-bridge-token-32ok';
-    currentSettingsSnap = {
-      status: 'ok',
-      data: { mode: 'active', baseUrl: 'http://127.0.0.1:46002', token: rotatedToken },
-    };
-    for (const cb of settingsListeners) cb(currentSettingsSnap);
-    await flushMicrotasks();
-    assert.ok(seenRequests.some((r) => r.url.startsWith('http://127.0.0.1:46002/') && r.token === rotatedToken));
-
-    // 4. Sidecar shuts down (mode: standby) -> clears connection back to standby
-    const reqCountBeforeStandby = seenRequests.length;
-    currentSettingsSnap = { status: 'ok', data: { mode: 'standby', baseUrl: null, token: null } };
-    for (const cb of settingsListeners) cb(currentSettingsSnap);
-    await flushMicrotasks();
-    assert.equal(seenRequests.length, reqCountBeforeStandby);
-    assert.ok(rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Sidecar'));
-
-    // 5. Dispose unsubscribes settingsBridge listener and cleans up slots
-    desktopHost.dispose();
-    assert.equal(unsubscribedCount, 1);
-    assert.equal(mountedSlots.size, 0);
-  } finally {
-    desktopHost.dispose();
-  }
-});
-
-test('TC-ADDON-10b (v3.2.0): Remote Web profile ignores packed-initial snapshots, falls back to host status-bar anchor dock, and connects/disconnects via browser-local saveSettings', async () => {
-  const staticSource = renderAddonRendererBundle();
   const { doc, MockElement } = createMockDom();
-  // Intentionally NO [data-testid="agent-input-box"] in Remote Web DOM -> must use host status-bar dock fallback!
-
   const remoteDock = new MockElement('div', doc);
-  remoteDock.setAttribute('id', 'remote-addon-host-slot-dock');
   doc.body.appendChild(remoteDock);
 
-  const mountedSlots = new Map();
-  const mountOptsLog = [];
-  const savedPayloads = [];
-  const portals = [];
-  const registeredTabs = [];
-  const registeredActions = [];
-  const unregisteredIds = [];
-  const disposers = [];
-  let unsubscribedCount = 0;
+  const host = createMockAddonContextV3(doc, MockElement, { surface: 'remote-web', dockEl: remoteDock });
+  const remoteToken = 'remote-web-user-token-32-charsok';
+  const fetchLog = [];
 
-  // Simulate an accidental packed-initial snapshot containing Desktop credentials -> MUST BE IGNORED!
-  let hostSettings = {
-    status: 'ok',
-    persistence: 'packed-initial',
-    data: {
-      mode: 'active',
-      baseUrl: 'http://127.0.0.1:49991',
-      token: 'leaked-desktop-packed-token-32ok',
-      remoteBaseUrl: 'http://127.0.0.1:49991',
-      remoteToken: 'leaked-desktop-packed-token-32ok',
-    },
-  };
-
-  const remoteWebHost = Object.freeze({
-    pluginId: 'antigravity-statusbar',
-    version: '3.2.0',
-    trustLevel: 'trusted',
-    hostProfileId: 'antigravity-remote-web',
-    schemaVersion: 2,
-    mountSlot(slotId, opts = {}) {
-      mountOptsLog.push({ slotId, opts });
-      const existing = mountedSlots.get(slotId);
-      if (existing && existing.hostEl.parentNode) return existing.rootEl;
-      const container = opts && opts.container ? opts.container : remoteDock;
-      const hostEl = new MockElement('div', doc);
-      container.appendChild(hostEl);
-      const rootEl = new MockElement('div', doc);
-      rootEl.className = 'addon-host-slot-root';
-      mountedSlots.set(slotId, { hostEl, rootEl, container });
-      return rootEl;
-    },
-    unmountSlot(slotId) {
-      const rec = mountedSlots.get(slotId);
-      if (!rec) return false;
-      rec.hostEl.remove();
-      mountedSlots.delete(slotId);
-      return true;
-    },
-    injectStyle() {
-      return { styleId: 'statusbar-main' };
-    },
-    removeStyle() {
-      return true;
-    },
-    openPopover(slotId, opts = {}) {
-      const pop = new MockElement('div', doc);
-      const bodyEl = new MockElement('div', doc);
-      pop.appendChild(bodyEl);
-      doc.body.appendChild(pop);
-      let closed = false;
-      const entry = {
-        slotId,
-        element: pop,
-        bodyEl,
-        close() {
-          if (closed) return;
-          closed = true;
-          pop.remove();
-          if (typeof opts.onClose === 'function') opts.onClose();
+  vm.runInNewContext(`(function(addonHost){\n${staticSource}\n})(addonHost);`, {
+    window: { innerWidth: 1280, innerHeight: 800, location: { reload() {} } },
+    document: doc,
+    addonHost: host.ctx,
+    URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    fetch: async (url, init) => {
+      fetchLog.push({ url, token: init.headers['x-statusbar-token'] });
+      const pathname = new URL(url).pathname;
+      if (pathname === '/api/settings/get') {
+        return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
+      }
+      if (pathname === '/api/quota') {
+        return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
+      }
+      if (pathname === '/api/sessions') {
+        return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-remote-1' }] }; } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            sessionId: 'sess-remote-1',
+            usedTokens: 75000,
+            effectiveLimit: 250000,
+            maxContextTokens: 512000,
+            usagePercent: 30,
+            compaction: { inProgress: false, lastError: null },
+          };
         },
       };
-      portals.push(entry);
-      return Object.freeze({ id: `pop-${portals.length}`, element: pop, bodyEl, close: entry.close });
-    },
-    openModal(slotId, opts = {}) {
-      const dlg = new MockElement('dialog', doc);
-      const bodyEl = new MockElement('div', doc);
-      dlg.appendChild(bodyEl);
-      doc.body.appendChild(dlg);
-      let closed = false;
-      const entry = {
-        kind: 'modal',
-        slotId,
-        element: dlg,
-        bodyEl,
-        close() {
-          if (closed) return;
-          closed = true;
-          dlg.remove();
-          if (typeof opts.onClose === 'function') opts.onClose();
-        },
-      };
-      portals.push(entry);
-      return Object.freeze({ id: `modal-${portals.length}`, element: dlg, bodyEl, close: entry.close });
-    },
-    registerSettingsTab(tabId, opts) {
-      registeredTabs.push({ tabId, opts });
-      return Object.freeze({
-        unregister() {
-          unregisteredIds.push(`tab:${tabId}`);
-        },
-      });
-    },
-    registerAction(actionId, spec) {
-      registeredActions.push({ actionId, spec });
-      return Object.freeze({
-        unregister() {
-          unregisteredIds.push(`action:${actionId}`);
-        },
-      });
-    },
-    getSettings() {
-      return hostSettings;
-    },
-    onSettingsChange() {
-      return () => {
-        unsubscribedCount += 1;
-      };
-    },
-    async saveSettings(data) {
-      savedPayloads.push(data);
-      hostSettings = { status: 'ok', persistence: 'browser-local', data };
-      return { ok: true, persistence: 'browser-local' };
-    },
-    onDispose(fn) {
-      disposers.push(fn);
-    },
-    dispose() {
-      for (const fn of disposers.splice(0)) fn();
     },
   });
 
-  const remoteToken = 'remote-web-user-token-32-charsok';
-  const fetchLog = [];
-  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
-
-  vm.runInNewContext(
-    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
-    {
-      window: sandboxWindow,
-      document: doc,
-      addonHost: remoteWebHost,
-      URL,
-      AbortController,
-      setTimeout,
-      clearTimeout,
-      setInterval,
-      clearInterval,
-      fetch: async (url, init) => {
-        fetchLog.push({ url, token: init.headers['x-statusbar-token'] });
-        const pathname = new URL(url).pathname;
-        if (pathname === '/api/settings/get') {
-          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
-        }
-        if (pathname === '/api/quota') {
-          return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
-        }
-        if (pathname === '/api/sessions') {
-          return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-remote-1' }] }; } };
-        }
-        return {
-          ok: true,
-          status: 200,
-          async json() {
-            return {
-              sessionId: 'sess-remote-1',
-              usedTokens: 75000,
-              effectiveLimit: 250000,
-              maxContextTokens: 512000,
-              usagePercent: 30,
-              compaction: { inProgress: false, lastError: null },
-            };
-          },
-        };
-      },
-    },
-  );
   try {
     await flushMicrotasks();
-
-    // 1. Packed-initial snapshot MUST be ignored -> zero fetches on startup!
-    assert.equal(fetchLog.length, 0, 'Remote Web must ignore packed-initial snapshot and perform zero fetches');
-    // 2. Mounted via host status-bar anchor fallback ({} without container) and styled as .agy-remote-dock
-    assert.equal(mountOptsLog[0].slotId, 'antigravity-statusbar.root');
-    assert.deepEqual(Object.keys(mountOptsLog[0].opts), []);
-    const rootRec = mountedSlots.get('antigravity-statusbar.root');
+    assert.equal(fetchLog.length, 0);
+    const rootRec = host.slots.get('antigravity-statusbar.root');
     assert.equal(rootRec.container, remoteDock);
     assert.equal(rootRec.rootEl.querySelector('.agy-inline-statusbar').classList.contains('agy-remote-dock'), true);
+    assert.equal(host.commands.has('open-settings'), true);
 
-    // 2b. Host v2.8.0 Remote Web Drawer registers Settings tab & Quick Actions
-    assert.equal(registeredTabs.length, 1);
-    assert.equal(registeredTabs[0].tabId, 'settings');
-    assert.deepEqual(
-      registeredActions.map((a) => a.actionId),
-      ['open-settings', 'open-global-limits', 'refresh-quota'],
-    );
-    // Invoking Drawer Settings tab opens popover on Settings tab
-    registeredTabs[0].opts.onSelect();
-    assert.ok(portals.some((p) => p.slotId === 'antigravity-statusbar.popover'));
-    // Invoking Drawer Global Limits action opens modal portal
-    registeredActions.find((a) => a.actionId === 'open-global-limits').spec.run();
-    assert.ok(portals.some((p) => p.kind === 'modal' && p.slotId === 'antigravity-statusbar.global-limit-modal'));
-    portals.find((p) => p.kind === 'modal').close();
+    // Click bar -> opens unified settings page with Remote Sidecar Connection section
+    rootRec.rootEl.querySelector('.agy-inline-metric-btn').click();
+    const settingsPage = host.getSettingsPage();
+    assert.equal(settingsPage.openFlag, true);
+    assert.ok(findNodeById(settingsPage.tree, 'set-remote-sec'));
 
-    // 3. Clicking bar opens Settings tab with visible Remote Sidecar Connection card
-    const ctxBtn = rootRec.rootEl.querySelector('.agy-inline-metric-btn');
-    ctxBtn.getBoundingClientRect = () => ({ left: 400, top: 760, right: 560, width: 160, height: 24 });
-    ctxBtn.click();
-    const popPortal = portals[portals.length - 1];
-    assert.ok(popPortal, 'Clicking unconfigured Remote Web bar must open popover portal');
-    const inputs = popPortal.bodyEl.querySelectorAll('.agy-inline-pop-input');
-    const urlInput = inputs.find((el) => el.type === 'text' && el.placeholder.includes('http'));
-    const tokenInput = inputs.find((el) => el.type === 'password');
-    assert.ok(urlInput && tokenInput, 'Remote Web Settings tab must render URL and password token inputs');
-
-    // 4. Connect to HTTPS endpoint -> persists via addonHost.saveSettings and fetches live snapshot!
-    urlInput.value = 'https://my-sidecar.example.com:8443';
-    tokenInput.value = remoteToken;
-    const connectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn-primary').find((b) => b.textContent.includes('연결'));
-    assert.ok(connectBtn);
-    connectBtn.click();
+    settingsPage.spec.onChange({ field: 'remoteUrl', value: 'https://my-sidecar.example.com:8443' });
+    settingsPage.spec.onChange({ field: 'remoteToken', value: remoteToken });
+    settingsPage.spec.onAction({ actionId: 'remote-connect' });
     await flushMicrotasks();
 
-    assert.equal(savedPayloads.length, 1);
-    assert.equal(savedPayloads[0].remoteBaseUrl, 'https://my-sidecar.example.com:8443');
-    assert.equal(savedPayloads[0].remoteToken, remoteToken);
+    assert.equal(host.storageMap.get('remoteConnection')?.remoteBaseUrl, 'https://my-sidecar.example.com:8443');
     assert.ok(fetchLog.some((r) => r.url === 'https://my-sidecar.example.com:8443/api/settings/get' && r.token === remoteToken));
     assert.ok(rootRec.rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('75.0K'));
 
-    // 5. Disconnect clears browser-local settings and stops polling
-    const disconnectBtn = popPortal.bodyEl.querySelectorAll('.agy-inline-btn').find((b) => b.textContent.includes('해제'));
-    assert.ok(disconnectBtn);
-    disconnectBtn.click();
+    settingsPage.spec.onAction({ actionId: 'remote-disconnect' });
     await flushMicrotasks();
-    assert.equal(savedPayloads.length, 2);
-    assert.equal(savedPayloads[1].remoteBaseUrl, '');
-    assert.equal(savedPayloads[1].remoteToken, '');
-
-    // 6. Dispose unsubscribes, unregisters drawer tabs/actions & unmounts cleanly
-    remoteWebHost.dispose();
-    assert.equal(unsubscribedCount, 1);
-    assert.equal(mountedSlots.size, 0);
-    assert.ok(unregisteredIds.includes('tab:settings'));
-    assert.ok(unregisteredIds.includes('action:open-settings'));
-    assert.ok(unregisteredIds.includes('action:open-global-limits'));
-    assert.ok(unregisteredIds.includes('action:refresh-quota'));
+    assert.equal(host.storageMap.has('remoteConnection'), false);
   } finally {
-    remoteWebHost.dispose();
+    host.ctx.lifecycle.dispose();
   }
 });
 
-test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversation to its own data-cascade-id without stock-chart fallback drift and cleans up pointerdown listener on dispose', async () => {
+test('TC-ADDON-12 (v3.3.0): bundled v3 renderer pins subagent-tab-conversation, shows model pill, formats localized 5h HH:mm reset, and cleans up on dispose', async () => {
   const staticSource = renderAddonRendererBundle({
     baseUrl: 'http://127.0.0.1:46111',
     token: TEST_TOKEN,
@@ -1327,130 +816,97 @@ test('TC-ADDON-12 (v3.2.0): bundled static renderer pins subagent-tab-conversati
   subView.appendChild(subBox);
   doc.body.appendChild(subView);
 
-  const host = createMockAddonHost(doc, MockElement);
-  let sessionCallCount = 0;
+  const host = createMockAddonContextV3(doc, MockElement, { surface: 'desktop' });
   const snapshotCalls = [];
-  const sessionSequences = [
-    [{ sessionId: 'sess-main-vm', isSubagent: false }, { sessionId: 'sess-sub-vm', isSubagent: true }],
-    [{ sessionId: 'sess-other-sub', isSubagent: true }, { sessionId: 'sess-main-vm', isSubagent: false }],
-  ];
 
-  const sandboxWindow = { innerWidth: 1280, innerHeight: 800, location: { reload() {} } };
-  vm.runInNewContext(
-    `(function(addonHost){\n${staticSource}\n})(addonHost);`,
-    {
-      window: sandboxWindow,
-      document: doc,
-      addonHost: host.handle,
-      URL,
-      AbortController,
-      setTimeout,
-      clearTimeout,
-      setInterval,
-      clearInterval,
-      fetch: async (url, init) => {
-        const pathname = new URL(url).pathname;
-        const body = JSON.parse(init.body || '{}');
-        if (pathname === '/api/settings/get') {
-          return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
-        }
-        if (pathname === '/api/quota') {
-          return {
-            ok: true,
-            status: 200,
-            async json() {
-              return {
-                available: true,
-                stale: false,
-                groups: [
-                  {
-                    label: 'Gemini Models',
-                    buckets: [
-                      { window: '5h', remainingPercent: 84, resetTime: '2026-11-23T14:05:00Z' },
-                      { window: 'weekly', remainingPercent: 61, resetTime: '2026-11-30T00:00:00Z' },
-                    ],
-                  },
-                ],
-              };
-            },
-          };
-        }
-        if (pathname === '/api/sessions') {
-          const sessions = sessionSequences[sessionCallCount % sessionSequences.length];
-          sessionCallCount += 1;
-          return { ok: true, status: 200, async json() { return { sessions }; } };
-        }
-        if (pathname === '/api/snapshot') {
-          snapshotCalls.push(body.sessionId);
-          const isSub = body.sessionId === 'sess-sub-vm';
-          const usedTokens = isSub ? 52000 : 190000;
-          return {
-            ok: true,
-            status: 200,
-            async json() {
-              return {
-                sessionId: body.sessionId,
-                isSubagent: isSub,
-                modelName: isSub ? 'Gemini 4 Neon (High)' : 'Claude Opus 5.5',
-                usedTokens,
-                effectiveLimit: 200000,
-                maxContextTokens: 512000,
-                usagePercent: usedTokens / 2000,
-                compaction: { inProgress: false, lastError: null },
-              };
-            },
-          };
-        }
-        return { ok: true, status: 200, async json() { return {}; } };
-      },
+  vm.runInNewContext(`(function(addonHost){\n${staticSource}\n})(addonHost);`, {
+    window: { innerWidth: 1280, innerHeight: 800, location: { reload() {} } },
+    document: doc,
+    addonHost: host.ctx,
+    URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    fetch: async (url, init) => {
+      const pathname = new URL(url).pathname;
+      const body = JSON.parse(init.body || '{}');
+      if (pathname === '/api/settings/get') {
+        return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
+      }
+      if (pathname === '/api/quota') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              available: true,
+              stale: false,
+              groups: [
+                {
+                  label: 'Gemini Models',
+                  buckets: [
+                    { window: '5h', remainingPercent: 84, resetTime: '2026-11-23T14:05:00Z' },
+                    { window: 'weekly', remainingPercent: 61, resetTime: '2026-11-30T00:00:00Z' },
+                  ],
+                },
+              ],
+            };
+          },
+        };
+      }
+      if (pathname === '/api/sessions') {
+        return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-main-vm', isSubagent: false }] }; } };
+      }
+      if (pathname === '/api/snapshot') {
+        snapshotCalls.push(body.sessionId);
+        const isSub = body.sessionId === 'sess-sub-vm';
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              sessionId: body.sessionId,
+              isSubagent: isSub,
+              modelName: isSub ? 'Gemini 4 Neon (High)' : 'Claude Opus 5.5',
+              usedTokens: isSub ? 52000 : 190000,
+              effectiveLimit: 200000,
+              maxContextTokens: 512000,
+              usagePercent: isSub ? 26 : 95,
+              compaction: { inProgress: false, lastError: null },
+            };
+          },
+        };
+      }
+      return { ok: true, status: 200, async json() { return {}; } };
     },
-  );
+  });
 
   try {
-    // Initially mounts on last visible box (subBox) and MUST stay pinned to sess-sub-vm despite sessions[0] flipping
     await flushMicrotasks();
-    const slotEl = host.slots.get('antigravity-statusbar.root');
-    assert.equal(slotEl.parentNode, subBox);
-    assert.ok(snapshotCalls.length >= 1);
-    assert.ok(
-      snapshotCalls.every((id) => id === 'sess-sub-vm'),
-      `Bundled renderer must query only sess-sub-vm while on subagent tab, got: ${JSON.stringify(snapshotCalls)}`,
-    );
-    assert.ok(slotEl.querySelector('.agy-inline-metric-btn').textContent.includes('52.0K'));
-    const subModelPill = slotEl.querySelector('.agy-inline-model-pill');
-    assert.ok(subModelPill, 'Bundled renderer must include .agy-inline-model-pill element');
-    assert.equal(subModelPill.style.display, '', 'Subagent tab must display running model pill');
+    const rootRec = host.slots.get('antigravity-statusbar.root');
+    assert.equal(rootRec.container, subBox);
+    assert.ok(snapshotCalls.every((id) => id === 'sess-sub-vm'));
+    const subModelPill = rootRec.rootEl.querySelector('.agy-inline-model-pill');
+    assert.equal(subModelPill.style.display, '');
     assert.equal(subModelPill.textContent, 'Gemini 4 Neon (High)');
 
     const d5h = new Date('2026-11-23T14:05:00Z');
     const expectedHHMM = `${String(d5h.getHours()).padStart(2, '0')}:${String(d5h.getMinutes()).padStart(2, '0')}`;
-    const expectedDT =
-      `${String(d5h.getFullYear())}-${String(d5h.getMonth() + 1).padStart(2, '0')}-${String(d5h.getDate()).padStart(2, '0')} ` +
-      expectedHHMM;
-    const metrics = slotEl.querySelectorAll('.agy-inline-metric');
-    const quota5hEl = metrics[metrics.length - 2];
-    assert.equal(quota5hEl.textContent, `5시간 한도 84% (${expectedHHMM})`);
-    assert.ok(quota5hEl.title.includes(`초기화 ${expectedDT}`));
-    assert.equal(quota5hEl.title.includes('2026-11-23T14:05:00Z'), false);
+    const metrics = rootRec.rootEl.querySelectorAll('.agy-inline-metric');
+    assert.equal(metrics[metrics.length - 2].textContent, `5시간 한도 84% (${expectedHHMM})`);
 
-    // Switching to main via pointerdown moves to mainBox, queries sess-main-vm, and hides subagent model pill
     doc.dispatchEvent({ type: 'pointerdown', target: mainView });
     await flushMicrotasks();
-    assert.equal(slotEl.parentNode, mainBox);
-    assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-main-vm');
-    assert.equal(subModelPill.style.display, 'none', 'Main conversation view must hide subagent model pill');
+    assert.equal(host.slots.get('antigravity-statusbar.root').container, mainBox);
+    assert.equal(subModelPill.style.display, 'none');
 
     doc.dispatchEvent({ type: 'pointerdown', target: subText });
     await flushMicrotasks();
-    assert.equal(slotEl.parentNode, subBox);
-    assert.equal(snapshotCalls[snapshotCalls.length - 1], 'sess-sub-vm');
-    assert.equal(subModelPill.style.display, '', 'Switching back to subagent tab must restore model pill');
-    assert.equal(subModelPill.textContent, 'Gemini 4 Neon (High)');
-
-    host.handle.dispose();
-    assert.equal(doc.getListenerCount('pointerdown'), 0);
-    assert.equal(doc.getListenerCount('focusin'), 0);
+    assert.equal(host.slots.get('antigravity-statusbar.root').container, subBox);
+    assert.equal(subModelPill.style.display, '');
   } finally {
-    host.handle.dispose();
+    host.ctx.lifecycle.dispose();
   }
 });

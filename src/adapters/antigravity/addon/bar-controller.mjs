@@ -1,18 +1,22 @@
 /**
- * Stateful inline statusbar + popover controller (SRP / DIP).
- * Depends exclusively on injected abstractions (`api`, `i18n`, `addons`, `barView`, `popoverView`).
+ * Stateful AddonContextV3 statusbar controller (SRP / DIP).
+ *
+ * API-First 3-Tier Design:
+ * - Zero manual overlay DOM construction, coordinate math, resize listeners, or manual Escape/outside-click handling.
+ * - Context details & session limit popup -> Tier 2 `hostPort.openPopup({ placement: { zone: 'anchor', ... }, tree, state })`
+ * - Global context limits modal -> Tier 2 `hostPort.openModal({ placement: { zone: 'surface-center', ... }, tree, state })`
+ * - Settings UI (Desktop + Remote Web unified) -> Tier 1 `hostPort.registerSettingsPage(...)`
+ * - Transient notifications -> Tier 1 `hostPort.showToast(...)` (plus inline bar status note fallback)
+ * - In-place ID-based DOM patching via `handle.update(nextTree, nextState)` preserves focused inputs across 1s polls.
  */
 
 export function createBarController({
-  doc,
-  win = null,
   api,
   i18n,
   addons,
   barView,
-  popoverView,
-  globalModalView = null,
-  portalHost = null,
+  uiSchemas,
+  hostPort,
   sharedState,
   isRemoteWeb = false,
   onSettingsChanged,
@@ -21,35 +25,22 @@ export function createBarController({
   onRemoteConnectionClear = null,
   presets,
 }) {
-  const PRESETS = Array.isArray(presets) && presets.length > 0
-    ? presets
-    : [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
-
-  const hasPopoverPortal = Boolean(portalHost && typeof portalHost.openPopover === 'function');
-  const hasModalPortal = Boolean(portalHost && typeof portalHost.openModal === 'function');
-
-  if (!hasPopoverPortal) {
-    barView.barEl.appendChild(popoverView.popEl);
-  }
-  if (!hasModalPortal && globalModalView && globalModalView.backdropEl) {
-    barView.barEl.appendChild(globalModalView.backdropEl);
-  }
+  const PRESETS =
+    Array.isArray(presets) && presets.length > 0
+      ? presets
+      : [32000, 64000, 128000, 200000, 256000, 384000, 512000, 980000];
 
   const state = {
     disposed: false,
     viewEl: null,
-    popOpen: false,
-    modalOpen: false,
-    popoverPortalHandle: null,
-    popoverResizeListener: null,
-    modalPortalHandle: null,
-    modalBackdropListener: null,
-    activeTab: 'context',
-    lastTriggerEl: barView.settingsBtn,
-    modalTriggerEl: barView.settingsBtn,
-    feedbackTimer: null,
-    modalFeedbackTimer: null,
+    contextPopupHandle: null,
+    globalModalHandle: null,
+    settingsPageHandle: null,
+    settingsPageOpen: false,
     noteTimer: null,
+    popupFeedbackTimer: null,
+    modalFeedbackTimer: null,
+    settingsFeedbackTimer: null,
     lastSessionId: '',
     snapshot: null,
     epoch: 0,
@@ -58,15 +49,40 @@ export function createBarController({
     inFlightPromise: null,
     pendingRefresh: false,
     compacting: false,
-    limitDirty: false,
-    promptDirty: false,
     lastAddonsKey: '',
-    syncedLimitKey: '',
-    syncedPromptVal: null,
     lastAutoErrAt: 0,
     consecutiveSnapshotFailures: 0,
     lastConnectionError: null,
-    remoteUrlDirty: false,
+    // Controlled Tier-2 declarative form drafts (preserved across live poll updates)
+    popupDraft: {
+      scope: 'session',
+      preset: '',
+      customLimit: '',
+      dirty: false,
+      syncedKey: '',
+      feedback: '',
+      feedbackIsErr: false,
+    },
+    modalDraft: {
+      defaultPreset: '',
+      defaultLimitInput: '',
+      defaultDirty: false,
+      modelNameInput: '',
+      modelPreset: '',
+      modelLimitInput: '',
+      feedback: '',
+      feedbackIsErr: false,
+    },
+    settingsDraft: {
+      remoteUrl: '',
+      remoteUrlDirty: false,
+      remoteToken: '',
+      compactPrompt: '',
+      promptDirty: false,
+      syncedPromptVal: null,
+      feedback: '',
+      feedbackIsErr: false,
+    },
   };
 
   function isApiConfigured() {
@@ -77,131 +93,93 @@ export function createBarController({
     return typeof api.getBaseUrl === 'function' ? api.getBaseUrl() : '';
   }
 
-  function syncRemoteConnectionPanel(force = false) {
-    if (!isRemoteWeb || !popoverView.remoteUrlInput) return;
-    const tr = i18n.t();
-    const configured = isApiConfigured();
-    const currentUrl = getApiBaseUrl();
-    if (force || (!state.remoteUrlDirty && !isElementFocused(popoverView.remoteUrlInput))) {
-      popoverView.remoteUrlInput.value = currentUrl;
-      state.remoteUrlDirty = false;
-    }
-    if (!configured) {
-      popoverView.setRemoteConnectionStatus(tr.remoteDisconnected, false);
-    } else if (api.isConnected()) {
-      popoverView.setRemoteConnectionStatus(
-        i18n.formatTemplate(tr.remoteConnected, { url: currentUrl }),
-        false,
-      );
-    } else if (state.lastConnectionError) {
-      const status = state.lastConnectionError.status;
-      if (status === 401 || status === 403) {
-        popoverView.setRemoteConnectionStatus(
-          i18n.formatTemplate(tr.remoteAuthFailed, { status }),
-          true,
-        );
-      } else {
-        popoverView.setRemoteConnectionStatus(tr.remoteUnreachable, true);
-      }
-    } else {
-      popoverView.setRemoteConnectionStatus(tr.connecting, false);
-    }
-  }
-
-  function isElementFocused(el) {
-    if (!el) return false;
-    if (typeof el.getRootNode === 'function') {
+  function emitToast(message, variant = 'info', durationMs = 3500) {
+    if (!message || state.disposed) return;
+    if (hostPort && typeof hostPort.showToast === 'function') {
       try {
-        const root = el.getRootNode();
-        if (root && root !== doc && 'activeElement' in root) {
-          return root.activeElement === el;
-        }
+        hostPort.showToast({ message, variant, durationMs });
       } catch {}
     }
-    return doc.activeElement === el;
   }
 
-  function getViewportWindow() {
-    return win || (typeof window !== 'undefined' ? window : null);
+  function showNote(text, durationMs = 4000, toastVariant = null) {
+    if (state.noteTimer) {
+      clearTimeout(state.noteTimer);
+      state.noteTimer = null;
+    }
+    barView.setNote(text);
+    if (text && toastVariant) {
+      emitToast(text, toastVariant, durationMs);
+    }
+    if (text && durationMs > 0) {
+      state.noteTimer = setTimeout(() => {
+        state.noteTimer = null;
+        if (!state.disposed) barView.setNote('');
+      }, durationMs);
+    }
   }
 
-  function applyModalPortalLayout(dialogEl) {
-    if (!dialogEl || !dialogEl.style) return;
-    dialogEl.style.position = 'fixed';
-    dialogEl.style.inset = '0';
-    dialogEl.style.top = '36px';
-    dialogEl.style.top = 'max(env(titlebar-area-height, 36px), 36px)';
-    dialogEl.style.right = '0';
-    dialogEl.style.bottom = '0';
-    dialogEl.style.left = '0';
-    dialogEl.style.margin = 'auto';
-    dialogEl.style.marginTop = 'auto';
-    dialogEl.style.marginRight = 'auto';
-    dialogEl.style.marginBottom = 'auto';
-    dialogEl.style.marginLeft = 'auto';
-    dialogEl.style.width = 'fit-content';
-    dialogEl.style.height = 'fit-content';
-    dialogEl.style.padding = '0';
-    dialogEl.style.border = 'none';
-    dialogEl.style.background = 'transparent';
-    dialogEl.style.color = 'inherit';
-    dialogEl.style.overflow = 'visible';
-    dialogEl.style.maxWidth = 'calc(100vw - 32px)';
-    dialogEl.style.maxHeight = 'calc(100vh - 72px)';
-  }
-
-  function positionPopoverPortal(portalEl, anchorEl) {
-    if (!portalEl || !portalEl.style) return;
-    const POPOVER_WIDTH = 352;
-    const VIEWPORT_MARGIN = 8;
-    const viewWin = getViewportWindow();
-    const vw =
-      viewWin && typeof viewWin.innerWidth === 'number' && viewWin.innerWidth > 0
-        ? viewWin.innerWidth
-        : 1280;
-    const vh =
-      viewWin && typeof viewWin.innerHeight === 'number' && viewWin.innerHeight > 0
-        ? viewWin.innerHeight
-        : 800;
-    let rect = null;
-    if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
-      try {
-        const r = anchorEl.getBoundingClientRect();
-        if (r && (r.width > 0 || r.height > 0 || r.top > 0 || r.right > 0 || r.left > 0)) {
-          rect = r;
+  function setPopupFeedback(text, isErr = false) {
+    if (state.popupFeedbackTimer) {
+      clearTimeout(state.popupFeedbackTimer);
+      state.popupFeedbackTimer = null;
+    }
+    state.popupDraft.feedback = text || '';
+    state.popupDraft.feedbackIsErr = Boolean(isErr);
+    if (text) {
+      emitToast(text, isErr ? 'danger' : 'success', 3500);
+      state.popupFeedbackTimer = setTimeout(() => {
+        state.popupFeedbackTimer = null;
+        if (!state.disposed) {
+          state.popupDraft.feedback = '';
+          state.popupDraft.feedbackIsErr = false;
+          updateContextPopupInPlace();
         }
-      } catch {}
+      }, 3500);
     }
-    portalEl.style.top = 'auto';
-    if (rect) {
-      const maxEdgeOffset = Math.max(VIEWPORT_MARGIN, vw - POPOVER_WIDTH - VIEWPORT_MARGIN);
-      if (rect.top < 220 && vh - rect.bottom > rect.top) {
-        // ISS-10: Flip below anchor when insufficient vertical space exists above
-        portalEl.style.bottom = 'auto';
-        portalEl.style.top = `${Math.max(VIEWPORT_MARGIN, Math.round(rect.bottom + 8))}px`;
-        popoverView.popEl.style.maxHeight = `${Math.max(160, Math.round(vh - rect.bottom - 16))}px`;
-      } else {
-        const bottomPx = Math.max(VIEWPORT_MARGIN, Math.min(vh - 80, Math.round(vh - rect.top + 8)));
-        portalEl.style.bottom = `${bottomPx}px`;
-        popoverView.popEl.style.maxHeight = `${Math.max(160, Math.round(rect.top - 16))}px`;
-      }
-      if (anchorEl === barView.ctxBtn && typeof rect.left === 'number') {
-        const leftPx = Math.max(VIEWPORT_MARGIN, Math.min(maxEdgeOffset, Math.round(rect.left)));
-        portalEl.style.left = `${leftPx}px`;
-        portalEl.style.right = 'auto';
-      } else {
-        const rightPx = Math.max(
-          VIEWPORT_MARGIN,
-          Math.min(maxEdgeOffset, Math.round(vw - rect.right)),
-        );
-        portalEl.style.left = 'auto';
-        portalEl.style.right = `${rightPx}px`;
-      }
-    } else {
-      portalEl.style.left = 'auto';
-      portalEl.style.bottom = '48px';
-      portalEl.style.right = '12px';
+    updateContextPopupInPlace();
+  }
+
+  function setModalFeedback(text, isErr = false) {
+    if (state.modalFeedbackTimer) {
+      clearTimeout(state.modalFeedbackTimer);
+      state.modalFeedbackTimer = null;
     }
+    state.modalDraft.feedback = text || '';
+    state.modalDraft.feedbackIsErr = Boolean(isErr);
+    if (text) {
+      emitToast(text, isErr ? 'danger' : 'success', 4000);
+      state.modalFeedbackTimer = setTimeout(() => {
+        state.modalFeedbackTimer = null;
+        if (!state.disposed) {
+          state.modalDraft.feedback = '';
+          state.modalDraft.feedbackIsErr = false;
+          updateGlobalModalInPlace();
+        }
+      }, 4000);
+    }
+    updateGlobalModalInPlace();
+  }
+
+  function setSettingsFeedback(text, isErr = false) {
+    if (state.settingsFeedbackTimer) {
+      clearTimeout(state.settingsFeedbackTimer);
+      state.settingsFeedbackTimer = null;
+    }
+    state.settingsDraft.feedback = text || '';
+    state.settingsDraft.feedbackIsErr = Boolean(isErr);
+    if (text) {
+      emitToast(text, isErr ? 'danger' : 'success', 3500);
+      state.settingsFeedbackTimer = setTimeout(() => {
+        state.settingsFeedbackTimer = null;
+        if (!state.disposed) {
+          state.settingsDraft.feedback = '';
+          state.settingsDraft.feedbackIsErr = false;
+          updateSettingsPageInPlace();
+        }
+      }, 3500);
+    }
+    updateSettingsPageInPlace();
   }
 
   const SUBAGENT_VIEW_TESTIDS = new Set([
@@ -278,63 +256,12 @@ export function createBarController({
   function getSessionId() {
     const domSid = resolveDomSessionId();
     if (domSid) return domSid;
-    // Fail-Closed: never fall back to global fallbackSessionId inside an unattributed subagent/side-question view
     if (isIsolatedSubagentView(state.viewEl)) return '';
     return sharedState.fallbackSessionId || '';
   }
 
-  function showNote(text, durationMs = 4000) {
-    if (state.noteTimer) {
-      clearTimeout(state.noteTimer);
-      state.noteTimer = null;
-    }
-    barView.setNote(text);
-    if (text && durationMs > 0) {
-      state.noteTimer = setTimeout(() => {
-        state.noteTimer = null;
-        if (!state.disposed) barView.setNote('');
-      }, durationMs);
-    }
-  }
-
-  function showFeedback(text, isErr = false) {
-    if (state.feedbackTimer) {
-      clearTimeout(state.feedbackTimer);
-      state.feedbackTimer = null;
-    }
-    popoverView.setFeedback(text, isErr);
-    if (text) {
-      state.feedbackTimer = setTimeout(() => {
-        state.feedbackTimer = null;
-        if (!state.disposed) popoverView.setFeedback('', false);
-      }, 3500);
-    }
-  }
-
-  function showModalFeedback(text, isErr = false) {
-    if (!globalModalView) return;
-    if (state.modalFeedbackTimer) {
-      clearTimeout(state.modalFeedbackTimer);
-      state.modalFeedbackTimer = null;
-    }
-    globalModalView.setFeedback(text, isErr);
-    if (text) {
-      state.modalFeedbackTimer = setTimeout(() => {
-        state.modalFeedbackTimer = null;
-        if (!state.disposed) globalModalView.setFeedback('', false);
-      }, 4000);
-    }
-  }
-
-  function parseStrictLimitInput(inputElOrValue, { allowBlank = true } = {}) {
-    if (inputElOrValue && typeof inputElOrValue === 'object') {
-      if (inputElOrValue.validity && inputElOrValue.validity.badInput === true) {
-        return { ok: false, value: null };
-      }
-    }
-    const rawStr =
-      inputElOrValue && typeof inputElOrValue === 'object' ? inputElOrValue.value : inputElOrValue;
-    const raw = String(rawStr || '').replace(/[\s,]/g, '').trim();
+  function parseStrictLimitInput(rawValue, { allowBlank = true } = {}) {
+    const raw = String(rawValue ?? '').replace(/[\s,]/g, '').trim();
     if (raw === '') {
       return allowBlank ? { ok: true, value: null } : { ok: false, value: null };
     }
@@ -365,167 +292,446 @@ export function createBarController({
     return null;
   }
 
-  function syncLimitControls(force = false) {
-    const scope = popoverView.scopeSelect.value === 'default' ? 'default' : 'session';
+  function syncPopupLimitDraft(force = false) {
+    const scope = state.popupDraft.scope === 'default' ? 'default' : 'session';
     const sid = getSessionId();
     const savedVal = getSavedLimitForScope(scope);
     const nextKey = `${sid}:${scope}:${savedVal === null ? 'null' : savedVal}`;
-
-    if (!force) {
-      if (state.limitDirty) return;
-      if (state.syncedLimitKey === nextKey) return;
-      if (
-        isElementFocused(popoverView.customInput) ||
-        isElementFocused(popoverView.presetSelect)
-      ) {
-        return;
-      }
-    }
-
-    state.syncedLimitKey = nextKey;
-    state.limitDirty = false;
-    const strVal = savedVal !== null ? String(savedVal) : '';
-    popoverView.customInput.value = strVal;
-    popoverView.presetSelect.value = savedVal !== null && PRESETS.includes(savedVal) ? strVal : '';
-  }
-
-  function syncCompactPrompt(force = false) {
-    if (!force) {
-      if (state.promptDirty) return;
-      if (state.syncedPromptVal === sharedState.compactPrompt) return;
-      if (isElementFocused(popoverView.compactPromptInput)) return;
-    }
-    state.syncedPromptVal = sharedState.compactPrompt;
-    state.promptDirty = false;
-    popoverView.compactPromptInput.value = sharedState.compactPrompt;
-    popoverView.updatePromptCount();
-  }
-
-  function setActiveTab(tab) {
-    const next = tab === 'settings' ? 'settings' : 'context';
-    state.activeTab = next;
-    popoverView.setActiveTab(next);
-    barView.setExpandedState({ open: state.popOpen, activeTab: state.activeTab });
-  }
-
-  function detachPopoverResizeListener() {
-    if (!state.popoverResizeListener) return;
-    const viewWin = getViewportWindow();
-    if (viewWin && typeof viewWin.removeEventListener === 'function') {
-      try {
-        viewWin.removeEventListener('resize', state.popoverResizeListener);
-      } catch {}
-    }
-    state.popoverResizeListener = null;
-  }
-
-  function finalizePopoverClosed() {
-    detachPopoverResizeListener();
-    state.popoverPortalHandle = null;
-    state.popOpen = false;
-    popoverView.setVisible(false);
-    popoverView.popEl.classList.remove('agy-inline-popover-portal');
-    if (hasPopoverPortal) {
-      try {
-        popoverView.popEl.remove();
-      } catch {}
-    }
-    barView.setExpandedState({ open: false, activeTab: state.activeTab });
-  }
-
-  function setPopoverOpen(open, tab, triggerEl) {
-    const nextOpen = Boolean(open);
-    const wasOpen = state.popOpen;
-    if (triggerEl) state.lastTriggerEl = triggerEl;
-    if (tab) setActiveTab(tab);
-
-    if (hasPopoverPortal) {
-      if (nextOpen) {
-        if (!state.popoverPortalHandle) {
-          const handle = portalHost.openPopover({
-            ignoreOutsideClickEls: [barView.ctxBtn, barView.settingsBtn],
-            onClose: finalizePopoverClosed,
-          });
-          if (!handle) return;
-          state.popoverPortalHandle = handle;
-          if (handle.element && handle.element.style) {
-            handle.element.style.margin = '0';
-            handle.element.style.marginTop = '0';
-            handle.element.style.marginRight = '0';
-            handle.element.style.marginBottom = '0';
-            handle.element.style.marginLeft = '0';
-            handle.element.style.width = 'fit-content';
-            handle.element.style.height = 'fit-content';
-            handle.element.style.padding = '0';
-            handle.element.style.border = 'none';
-            handle.element.style.background = 'transparent';
-            handle.element.style.color = 'inherit';
-            handle.element.style.overflow = 'visible';
-            handle.element.style.position = 'fixed';
-            handle.element.style.inset = 'auto';
-          }
-          positionPopoverPortal(handle.element, state.lastTriggerEl || barView.barEl);
-          detachPopoverResizeListener();
-          const viewWin = getViewportWindow();
-          if (viewWin && typeof viewWin.addEventListener === 'function') {
-            const onResize = () => {
-              if (!state.disposed && state.popOpen && state.popoverPortalHandle?.element) {
-                positionPopoverPortal(
-                  state.popoverPortalHandle.element,
-                  state.lastTriggerEl || barView.barEl,
-                );
-              }
-            };
-            state.popoverResizeListener = onResize;
-            try {
-              viewWin.addEventListener('resize', onResize);
-            } catch {}
-          }
-          if (typeof portalHost.syncStyle === 'function') {
-            portalHost.syncStyle('popover');
-          }
-          popoverView.popEl.classList.add('agy-inline-popover-portal');
-          const mountTarget = handle.bodyEl || handle.element;
-          if (mountTarget && popoverView.popEl.parentNode !== mountTarget) {
-            mountTarget.appendChild(popoverView.popEl);
-          }
-        } else {
-          positionPopoverPortal(
-            state.popoverPortalHandle.element,
-            state.lastTriggerEl || barView.barEl,
-          );
-        }
-        state.popOpen = true;
-        popoverView.setVisible(true);
-        barView.setExpandedState({ open: true, activeTab: state.activeTab });
-        if (!wasOpen) {
-          showFeedback('', false);
-          syncLimitControls(true);
-          syncCompactPrompt(true);
-        }
-      } else if (state.popoverPortalHandle) {
-        const handle = state.popoverPortalHandle;
-        state.popoverPortalHandle = null;
-        try {
-          handle.close();
-        } catch {}
-        if (state.popOpen) {
-          finalizePopoverClosed();
-        }
-      } else {
-        finalizePopoverClosed();
-      }
+    if (!force && (state.popupDraft.dirty || state.popupDraft.syncedKey === nextKey)) {
       return;
     }
+    state.popupDraft.syncedKey = nextKey;
+    state.popupDraft.dirty = false;
+    const strVal = savedVal !== null ? String(savedVal) : '';
+    state.popupDraft.customLimit = strVal;
+    state.popupDraft.preset = savedVal !== null && PRESETS.includes(savedVal) ? strVal : '';
+  }
 
-    state.popOpen = nextOpen;
-    popoverView.setVisible(state.popOpen);
-    barView.setExpandedState({ open: state.popOpen, activeTab: state.activeTab });
-    if (nextOpen && !wasOpen) {
-      showFeedback('', false);
-      syncLimitControls(true);
-      syncCompactPrompt(true);
+  function syncModalDefaultDraft(force = false) {
+    if (!force && state.modalDraft.defaultDirty) return;
+    const defVal = typeof sharedState.defaultCustomLimit === 'number' ? sharedState.defaultCustomLimit : null;
+    const strVal = defVal !== null ? String(defVal) : '';
+    state.modalDraft.defaultLimitInput = strVal;
+    state.modalDraft.defaultPreset = defVal !== null && PRESETS.includes(defVal) ? strVal : '';
+    state.modalDraft.defaultDirty = false;
+  }
+
+  function syncSettingsDraft(force = false) {
+    if (force || (!state.settingsDraft.promptDirty && state.settingsDraft.syncedPromptVal !== sharedState.compactPrompt)) {
+      state.settingsDraft.syncedPromptVal = sharedState.compactPrompt;
+      state.settingsDraft.compactPrompt = sharedState.compactPrompt;
+      state.settingsDraft.promptDirty = false;
     }
+    if (isRemoteWeb && (force || !state.settingsDraft.remoteUrlDirty)) {
+      state.settingsDraft.remoteUrl = getApiBaseUrl();
+      state.settingsDraft.remoteUrlDirty = false;
+    }
+  }
+
+  function buildRemoteStatusSummary() {
+    const tr = i18n.t();
+    const configured = isApiConfigured();
+    const currentUrl = getApiBaseUrl();
+    if (!configured) {
+      return { text: tr.remoteDisconnected, isErr: false };
+    }
+    if (api.isConnected()) {
+      return {
+        text: i18n.formatTemplate(tr.remoteConnected, { url: currentUrl }),
+        isErr: false,
+      };
+    }
+    if (state.lastConnectionError) {
+      const status = state.lastConnectionError.status;
+      if (status === 401 || status === 403) {
+        return {
+          text: i18n.formatTemplate(tr.remoteAuthFailed, { status }),
+          isErr: true,
+        };
+      }
+      return { text: tr.remoteUnreachable, isErr: true };
+    }
+    return { text: tr.connecting, isErr: false };
+  }
+
+  function getCombinedAddonsForSettings() {
+    const persistedSorted = addons.getSortedPersisted();
+    const runtimeSorted = addons.getSortedRuntime();
+    const delegated =
+      typeof addons.getSortedDelegatedItems === 'function'
+        ? addons.getSortedDelegatedItems()
+        : { left: [], right: [] };
+    const allDelegated = [...delegated.left, ...delegated.right];
+    return [
+      ...persistedSorted.map((b) => ({
+        id: b.id,
+        label: b.label,
+        source: b.source || 'agent',
+        detail: b.description || b.command,
+        enabled: b.enabled !== false,
+        runtime: false,
+        delegated: false,
+      })),
+      ...runtimeSorted.map((r) => ({
+        id: r.id,
+        label: r.label,
+        source: r.source || 'plugin',
+        detail: r.description || r.title || r.id,
+        enabled: !addons.isRuntimeDisabled(r.id),
+        runtime: true,
+        delegated: false,
+      })),
+      ...allDelegated.map((d) => ({
+        id: d.key,
+        label: d.label,
+        source: d.pluginId,
+        detail: d.tooltip || d.id,
+        enabled: true,
+        runtime: true,
+        delegated: true,
+      })),
+    ];
+  }
+
+  function buildCurrentContextPopupSpec() {
+    return uiSchemas.buildContextPopupSpec({
+      snap: state.snapshot,
+      scope: state.popupDraft.scope,
+      customLimit: state.popupDraft.customLimit,
+      preset: state.popupDraft.preset,
+      feedback: state.popupDraft.feedback,
+      feedbackIsErr: state.popupDraft.feedbackIsErr,
+    });
+  }
+
+  function buildCurrentGlobalModalSpec() {
+    return uiSchemas.buildGlobalLimitModalSpec({
+      defaultCustomLimit:
+        typeof sharedState.defaultCustomLimit === 'number' ? sharedState.defaultCustomLimit : null,
+      defaultLimitInput: state.modalDraft.defaultLimitInput,
+      defaultPreset: state.modalDraft.defaultPreset,
+      modelLimits: Array.isArray(sharedState.modelLimits) ? sharedState.modelLimits : [],
+      currentModelName: state.snapshot?.modelName || '',
+      modelNameInput: state.modalDraft.modelNameInput,
+      modelLimitInput: state.modalDraft.modelLimitInput,
+      modelPreset: state.modalDraft.modelPreset,
+      sessionOverrideLimit: getSavedLimitForScope('session'),
+      feedback: state.modalDraft.feedback,
+      feedbackIsErr: state.modalDraft.feedbackIsErr,
+    });
+  }
+
+  function buildCurrentSettingsPageSpec() {
+    const remoteStatus = buildRemoteStatusSummary();
+    return uiSchemas.buildSettingsPageSpec({
+      isRemoteWeb,
+      remoteUrl: state.settingsDraft.remoteUrl,
+      remoteToken: state.settingsDraft.remoteToken,
+      remoteStatusText: remoteStatus.text,
+      remoteStatusErr: remoteStatus.isErr,
+      autoCompact: sharedState.autoCompactEnabled,
+      compactPrompt: state.settingsDraft.compactPrompt,
+      addonsList: getCombinedAddonsForSettings(),
+      locale: i18n.getLocale(),
+      feedback: state.settingsDraft.feedback,
+      feedbackIsErr: state.settingsDraft.feedbackIsErr,
+    });
+  }
+
+  function updateContextPopupInPlace() {
+    if (!state.contextPopupHandle || state.disposed) return;
+    try {
+      const { tree, state: nextState } = buildCurrentContextPopupSpec();
+      state.contextPopupHandle.update(tree, nextState);
+    } catch {}
+  }
+
+  function updateGlobalModalInPlace() {
+    if (!state.globalModalHandle || state.disposed) return;
+    try {
+      const { tree, state: nextState } = buildCurrentGlobalModalSpec();
+      state.globalModalHandle.update(tree, nextState);
+    } catch {}
+  }
+
+  function updateSettingsPageInPlace() {
+    if (!state.settingsPageHandle || state.disposed) return;
+    try {
+      const { tree, state: nextState } = buildCurrentSettingsPageSpec();
+      state.settingsPageHandle.update(tree, nextState);
+    } catch {}
+  }
+
+  function closeContextPopup() {
+    if (!state.contextPopupHandle) return;
+    const handle = state.contextPopupHandle;
+    state.contextPopupHandle = null;
+    try {
+      handle.close();
+    } catch {}
+    barView.setExpandedState({ open: state.settingsPageOpen, activeTab: state.settingsPageOpen ? 'settings' : 'context' });
+  }
+
+  function closeGlobalModal() {
+    if (!state.globalModalHandle) return;
+    const handle = state.globalModalHandle;
+    state.globalModalHandle = null;
+    try {
+      handle.close();
+    } catch {}
+  }
+
+  function openContextPopup(anchorEl) {
+    if (state.disposed || !hostPort || typeof hostPort.openPopup !== 'function') return null;
+    if (state.contextPopupHandle) {
+      closeContextPopup();
+      return null;
+    }
+    state.popupDraft.feedback = '';
+    state.popupDraft.feedbackIsErr = false;
+    syncPopupLimitDraft(true);
+    const { tree, state: initState } = buildCurrentContextPopupSpec();
+    const handle = hostPort.openPopup({
+      title: `${i18n.t().settingsTitle} · ${i18n.t().tabContext}`,
+      placement: {
+        zone: 'anchor',
+        anchorEl: anchorEl || barView.ctxBtn,
+        prefer: 'top-start',
+        width: 360,
+      },
+      tree,
+      state: initState,
+      closeOnOutsideClick: true,
+      onChange({ field, value }) {
+        if (field === 'scope') {
+          const nextScope = value === 'default' ? 'default' : 'session';
+          state.popupDraft.scope = nextScope;
+          if (
+            state.popupDraft.dirty &&
+            parseStrictLimitInput(state.popupDraft.customLimit, { allowBlank: false }).ok
+          ) {
+            state.popupDraft.feedback = '';
+            updateContextPopupInPlace();
+            return;
+          }
+          state.popupDraft.dirty = false;
+          state.popupDraft.syncedKey = '';
+          state.popupDraft.feedback = '';
+          syncPopupLimitDraft(true);
+          updateContextPopupInPlace();
+          return;
+        }
+        if (field === 'preset') {
+          state.popupDraft.dirty = true;
+          state.popupDraft.preset = String(value || '');
+          state.popupDraft.customLimit = String(value || '');
+          state.popupDraft.feedback = '';
+          updateContextPopupInPlace();
+          return;
+        }
+        if (field === 'customLimit') {
+          state.popupDraft.dirty = true;
+          state.popupDraft.customLimit = String(value ?? '');
+          const raw = state.popupDraft.customLimit.replace(/[\s,]/g, '').trim();
+          const parsed = raw ? Number(raw) : NaN;
+          state.popupDraft.preset = PRESETS.includes(parsed) ? String(parsed) : '';
+          state.popupDraft.feedback = '';
+          updateContextPopupInPlace();
+        }
+      },
+      onAction({ actionId }) {
+        if (actionId === 'apply-limit') {
+          handleApplyLimit();
+        } else if (actionId === 'open-global-limits') {
+          openGlobalLimits();
+        } else if (actionId === 'open-settings') {
+          closeContextPopup();
+          openSettings();
+        }
+      },
+      onClose() {
+        state.contextPopupHandle = null;
+        barView.setExpandedState({
+          open: state.settingsPageOpen,
+          activeTab: state.settingsPageOpen ? 'settings' : 'context',
+        });
+      },
+    });
+    state.contextPopupHandle = handle;
+    barView.setExpandedState({ open: true, activeTab: 'context' });
+    return handle;
+  }
+
+  function openGlobalLimits() {
+    if (state.disposed || !hostPort || typeof hostPort.openModal !== 'function') return null;
+    closeContextPopup();
+    if (state.globalModalHandle) {
+      updateGlobalModalInPlace();
+      return state.globalModalHandle;
+    }
+    state.modalDraft.feedback = '';
+    state.modalDraft.feedbackIsErr = false;
+    syncModalDefaultDraft(true);
+    const { tree, state: initState } = buildCurrentGlobalModalSpec();
+    const handle = hostPort.openModal({
+      title: i18n.t().globalModalTitle,
+      placement: { zone: 'surface-center', width: 460 },
+      tree,
+      state: initState,
+      onChange({ field, value }) {
+        if (field === 'defaultPreset') {
+          state.modalDraft.defaultDirty = true;
+          state.modalDraft.defaultPreset = String(value || '');
+          state.modalDraft.defaultLimitInput = String(value || '');
+          state.modalDraft.feedback = '';
+          updateGlobalModalInPlace();
+          return;
+        }
+        if (field === 'defaultLimitInput') {
+          state.modalDraft.defaultDirty = true;
+          state.modalDraft.defaultLimitInput = String(value ?? '');
+          const raw = state.modalDraft.defaultLimitInput.replace(/[\s,]/g, '').trim();
+          const parsed = raw ? Number(raw) : NaN;
+          state.modalDraft.defaultPreset = PRESETS.includes(parsed) ? String(parsed) : '';
+          state.modalDraft.feedback = '';
+          updateGlobalModalInPlace();
+          return;
+        }
+        if (field === 'modelNameInput') {
+          state.modalDraft.modelNameInput = String(value ?? '');
+          state.modalDraft.feedback = '';
+          return;
+        }
+        if (field === 'modelPreset') {
+          state.modalDraft.modelPreset = String(value || '');
+          state.modalDraft.modelLimitInput = String(value || '');
+          state.modalDraft.feedback = '';
+          updateGlobalModalInPlace();
+          return;
+        }
+        if (field === 'modelLimitInput') {
+          state.modalDraft.modelLimitInput = String(value ?? '');
+          const raw = state.modalDraft.modelLimitInput.replace(/[\s,]/g, '').trim();
+          const parsed = raw ? Number(raw) : NaN;
+          state.modalDraft.modelPreset = PRESETS.includes(parsed) ? String(parsed) : '';
+          state.modalDraft.feedback = '';
+          updateGlobalModalInPlace();
+        }
+      },
+      onAction({ actionId, payload }) {
+        if (actionId === 'clear-session-limit') {
+          handleClearCurrentSessionLimit();
+        } else if (actionId === 'save-default-limit') {
+          handleSaveGlobalDefault(state.modalDraft.defaultLimitInput);
+        } else if (actionId === 'reset-default-limit') {
+          state.modalDraft.defaultLimitInput = '';
+          state.modalDraft.defaultPreset = '';
+          handleSaveGlobalDefault('');
+        } else if (actionId === 'use-current-model') {
+          const curModel = state.snapshot?.modelName || '';
+          if (curModel) {
+            state.modalDraft.modelNameInput = curModel;
+            updateGlobalModalInPlace();
+          }
+        } else if (actionId === 'save-model-limit') {
+          handleSaveModelLimit(state.modalDraft.modelNameInput, state.modalDraft.modelLimitInput);
+        } else if (actionId === 'edit-model-limit' && payload) {
+          state.modalDraft.modelNameInput = String(payload.model || '');
+          state.modalDraft.modelLimitInput = String(payload.limit || '');
+          state.modalDraft.modelPreset = PRESETS.includes(payload.limit) ? String(payload.limit) : '';
+          updateGlobalModalInPlace();
+        } else if (actionId === 'remove-model-limit' && payload) {
+          handleSaveModelLimit(payload.model, null);
+        }
+      },
+      onClose() {
+        state.globalModalHandle = null;
+      },
+    });
+    state.globalModalHandle = handle;
+    return handle;
+  }
+
+  function registerUnifiedSettingsPage() {
+    if (!hostPort || typeof hostPort.registerSettingsPage !== 'function') return null;
+    syncSettingsDraft(true);
+    const initial = buildCurrentSettingsPageSpec();
+    const reg = hostPort.registerSettingsPage({
+      id: 'settings',
+      title: i18n.t().settingsTitle,
+      order: 50,
+      width: 520,
+      schema: initial.tree,
+      state: initial.state,
+      getSchema() {
+        syncSettingsDraft(false);
+        return buildCurrentSettingsPageSpec().tree;
+      },
+      getState() {
+        syncSettingsDraft(false);
+        return buildCurrentSettingsPageSpec().state;
+      },
+      onChange({ field, value }) {
+        if (field === 'autoCompact') {
+          handleToggleAutoCompact(Boolean(value));
+        } else if (field === 'compactPrompt') {
+          state.settingsDraft.promptDirty = true;
+          state.settingsDraft.compactPrompt = String(value ?? '');
+          state.settingsDraft.feedback = '';
+          updateSettingsPageInPlace();
+        } else if (field === 'locale') {
+          applyLocale(String(value || 'ko'));
+        } else if (field === 'remoteUrl') {
+          state.settingsDraft.remoteUrlDirty = true;
+          state.settingsDraft.remoteUrl = String(value ?? '');
+          state.settingsDraft.feedback = '';
+        } else if (field === 'remoteToken') {
+          state.settingsDraft.remoteToken = String(value ?? '');
+          state.settingsDraft.feedback = '';
+        }
+      },
+      onAction({ actionId, payload }) {
+        if (actionId === 'open-global-limits') {
+          openGlobalLimits();
+        } else if (actionId === 'save-compact-prompt') {
+          saveCompactPromptValue(state.settingsDraft.compactPrompt);
+        } else if (actionId === 'reset-compact-prompt') {
+          state.settingsDraft.compactPrompt = '';
+          saveCompactPromptValue('');
+        } else if (actionId === 'toggle-addon' && payload) {
+          handleToggleAddon(payload.id, payload.enabled, Boolean(payload.runtime));
+        } else if (actionId === 'remove-addon' && payload) {
+          handleRemoveAddon(payload.id, Boolean(payload.runtime));
+        } else if (actionId === 'remote-connect') {
+          handleRemoteConnect();
+        } else if (actionId === 'remote-disconnect') {
+          handleRemoteDisconnect();
+        }
+      },
+      onClose() {
+        state.settingsPageOpen = false;
+        barView.setExpandedState({
+          open: Boolean(state.contextPopupHandle),
+          activeTab: state.contextPopupHandle ? 'context' : 'settings',
+        });
+      },
+    });
+    state.settingsPageHandle = reg;
+    return reg;
+  }
+
+  function openSettings() {
+    if (state.disposed) return null;
+    closeContextPopup();
+    state.settingsDraft.feedback = '';
+    state.settingsDraft.feedbackIsErr = false;
+    syncSettingsDraft(true);
+    if (state.settingsPageHandle && typeof state.settingsPageHandle.open === 'function') {
+      state.settingsPageOpen = true;
+      barView.setExpandedState({ open: true, activeTab: 'settings' });
+      return state.settingsPageHandle.open();
+    }
+    return null;
   }
 
   async function handleCustomCommand(btnDef, btnEl) {
@@ -534,10 +740,10 @@ export function createBarController({
     if (btnEl) btnEl.disabled = true;
     try {
       await api.post('/api/command', { sessionId: sid, command: btnDef.command });
-      showNote(`${btnDef.label}: ${i18n.t().cmdSent}`);
+      showNote(`${btnDef.label}: ${i18n.t().cmdSent}`, 4000, 'success');
       if (typeof onBurstRequested === 'function') onBurstRequested();
     } catch {
-      showNote(`${btnDef.label}: ${i18n.t().cmdFail}`);
+      showNote(`${btnDef.label}: ${i18n.t().cmdFail}`, 4000, 'danger');
     } finally {
       if (btnEl) btnEl.disabled = false;
     }
@@ -547,10 +753,10 @@ export function createBarController({
     try {
       const updated = await api.post('/api/addons/toggle', { id, enabled, runtime: isRuntime });
       addons.applyPersistedSettings(updated);
-      showFeedback(i18n.t().applied, false);
+      setSettingsFeedback(i18n.t().applied, false);
       render();
     } catch (err) {
-      showFeedback(err?.message || 'Error', true);
+      setSettingsFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -563,16 +769,20 @@ export function createBarController({
     try {
       const updated = await api.post('/api/addons/remove', { id });
       addons.applyPersistedSettings(updated);
-      showFeedback(i18n.t().applied, false);
+      setSettingsFeedback(i18n.t().applied, false);
       render();
     } catch (err) {
-      showFeedback(err?.message || 'Error', true);
+      setSettingsFeedback(err?.message || 'Error', true);
     }
   }
 
   function renderAddons() {
     const persistedSorted = addons.getSortedPersisted();
     const runtimeSorted = addons.getSortedRuntime();
+    const delegated =
+      typeof addons.getSortedDelegatedItems === 'function'
+        ? addons.getSortedDelegatedItems()
+        : { left: [], right: [] };
     const nextAddonsKey = JSON.stringify({
       locale: i18n.getLocale(),
       p: persistedSorted.map((b) => [
@@ -591,9 +801,18 @@ export function createBarController({
         !addons.isRuntimeDisabled(r.id),
         r.source,
       ]),
+      dl: delegated.left.map((d) => [d.key, d.label, d.icon, d.badge, d.tooltip, d.priority]),
+      dr: delegated.right.map((d) => [d.key, d.label, d.icon, d.badge, d.tooltip, d.priority]),
     });
     if (state.lastAddonsKey === nextAddonsKey) return;
     state.lastAddonsKey = nextAddonsKey;
+
+    if (typeof barView.renderDelegatedItems === 'function') {
+      barView.renderDelegatedItems({
+        leftItems: delegated.left,
+        rightItems: delegated.right,
+      });
+    }
 
     const visibleRuntime = runtimeSorted.filter((r) => !addons.isRuntimeDisabled(r.id));
     barView.renderAddonButtons({
@@ -602,47 +821,19 @@ export function createBarController({
       onPersistedClick: handleCustomCommand,
       onRuntimeClick(rtDef) {
         try {
-          // P1: Do not leak live barEl/buttonEl DOM handles to peer runtime add-ons
           rtDef.onClick({ sessionId: getSessionId() });
         } catch {}
       },
-    });
-
-    const combined = [
-      ...persistedSorted.map((b) => ({
-        id: b.id,
-        label: b.label,
-        source: b.source || 'agent',
-        detail: b.description || b.command,
-        enabled: b.enabled !== false,
-        runtime: false,
-      })),
-      ...runtimeSorted.map((r) => ({
-        id: r.id,
-        label: r.label,
-        source: r.source || 'plugin',
-        detail: r.description || r.title || r.id,
-        enabled: !addons.isRuntimeDisabled(r.id),
-        runtime: true,
-      })),
-    ];
-    popoverView.renderAddonList({
-      items: combined,
-      onToggle: handleToggleAddon,
-      onRemove: handleRemoveAddon,
     });
   }
 
   function render() {
     if (state.disposed) return;
     const snap = state.snapshot;
-    if (snap && typeof snap.compactPrompt === 'string' && !state.promptDirty) {
+    if (snap && typeof snap.compactPrompt === 'string' && !state.settingsDraft.promptDirty) {
       sharedState.compactPrompt = snap.compactPrompt;
     }
-    popoverView.renderLocaleAndStatic({
-      autoCompactEnabled: sharedState.autoCompactEnabled,
-    });
-    syncCompactPrompt(false);
+    syncSettingsDraft(false);
     renderAddons();
 
     const configured = isApiConfigured();
@@ -660,13 +851,8 @@ export function createBarController({
     if (configured && (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected()))) {
       barView.setReconnecting();
     }
-    if (isRemoteWeb) {
-      syncRemoteConnectionPanel(false);
-    }
-    popoverView.renderSnapshotDetails(snap);
     if (snap) {
-      syncLimitControls(false);
-      // A-3: Surface newly observed auto-compaction failure instead of hiding it silently
+      syncPopupLimitDraft(false);
       const autoErr = snap.compaction?.lastError;
       if (autoErr && typeof autoErr.at === 'number' && autoErr.at > state.lastAutoErrAt) {
         state.lastAutoErrAt = autoErr.at;
@@ -675,136 +861,21 @@ export function createBarController({
             msg: autoErr.message || autoErr.code || 'Error',
           }),
           6000,
+          'danger',
         );
       }
     }
     barView.renderQuota(sharedState.quotaState, state.snapshot?.modelName || '');
-    if (globalModalView && state.modalOpen) {
-      renderGlobalModal(false);
-    }
-  }
 
-  function renderGlobalModal(syncDefaultInputs = false) {
-    if (!globalModalView) return;
-    const sessionOverrideLimit = getSavedLimitForScope('session');
-    globalModalView.render({
-      defaultCustomLimit:
-        typeof sharedState.defaultCustomLimit === 'number' ? sharedState.defaultCustomLimit : null,
-      modelLimits: Array.isArray(sharedState.modelLimits) ? sharedState.modelLimits : [],
-      currentModelName: state.snapshot?.modelName || '',
-      sessionOverrideLimit,
-      syncDefaultInputs,
-      onEditModel(item) {
-        globalModalView.modelNameInput.value = item.model;
-        globalModalView.modelLimitInput.value = String(item.limit);
-        globalModalView.modelPresetSelect.value = PRESETS.includes(item.limit)
-          ? String(item.limit)
-          : '';
-        try {
-          globalModalView.modelLimitInput.focus();
-        } catch {}
-      },
-      onRemoveModel(modelName) {
-        handleSaveModelLimit(modelName, null);
-      },
-    });
-  }
-
-  function finalizeModalClosed(returnFocus = true) {
-    if (state.modalBackdropListener && state.modalPortalHandle?.element) {
-      try {
-        state.modalPortalHandle.element.removeEventListener('click', state.modalBackdropListener);
-      } catch {}
+    if (state.contextPopupHandle) {
+      updateContextPopupInPlace();
     }
-    state.modalBackdropListener = null;
-    state.modalPortalHandle = null;
-    state.modalOpen = false;
-    if (hasModalPortal && globalModalView && globalModalView.dialogEl) {
-      try {
-        globalModalView.dialogEl.remove();
-      } catch {}
+    if (state.globalModalHandle) {
+      syncModalDefaultDraft(false);
+      updateGlobalModalInPlace();
     }
-    if (returnFocus && !state.disposed) {
-      try {
-        (state.modalTriggerEl || barView.settingsBtn).focus();
-      } catch {}
-    }
-  }
-
-  function openGlobalModal(triggerEl) {
-    if (!globalModalView) return;
-    // ISS-10: Always restore focus to a visible bar trigger (never a detached popover button)
-    const isVisibleBarTrigger =
-      triggerEl === barView.settingsBtn || triggerEl === barView.ctxBtn;
-    state.modalTriggerEl = isVisibleBarTrigger ? triggerEl : barView.settingsBtn;
-    setPopoverOpen(false);
-
-    if (hasModalPortal) {
-      if (!state.modalPortalHandle) {
-        const handle = portalHost.openModal({
-          onClose: finalizeModalClosed,
-        });
-        if (!handle) return;
-        state.modalPortalHandle = handle;
-        applyModalPortalLayout(handle.element);
-        const onDialogBackdropClick = (e) => {
-          if (e && e.target === handle.element) {
-            closeGlobalModal(true);
-          }
-        };
-        if (handle.element && typeof handle.element.addEventListener === 'function') {
-          handle.element.addEventListener('click', onDialogBackdropClick);
-          state.modalBackdropListener = onDialogBackdropClick;
-        }
-        if (typeof portalHost.syncStyle === 'function') {
-          portalHost.syncStyle('modal');
-        }
-        const mountTarget = handle.bodyEl || handle.element;
-        if (mountTarget && globalModalView.dialogEl.parentNode !== mountTarget) {
-          mountTarget.appendChild(globalModalView.dialogEl);
-        }
-      }
-      state.modalOpen = true;
-      showModalFeedback('', false);
-      renderGlobalModal(true);
-      try {
-        globalModalView.defaultInput.focus();
-      } catch {}
-      return;
-    }
-
-    state.modalOpen = true;
-    showModalFeedback('', false);
-    renderGlobalModal(true);
-    globalModalView.setVisible(true);
-    try {
-      globalModalView.defaultInput.focus();
-    } catch {}
-  }
-
-  function closeGlobalModal(returnFocus = true) {
-    if (!globalModalView || !state.modalOpen) return;
-    if (hasModalPortal && state.modalPortalHandle) {
-      const handle = state.modalPortalHandle;
-      try {
-        handle.close();
-      } catch {}
-      if (state.modalOpen) {
-        finalizeModalClosed();
-      }
-      if (returnFocus) {
-        try {
-          (state.modalTriggerEl || barView.settingsBtn).focus();
-        } catch {}
-      }
-      return;
-    }
-    state.modalOpen = false;
-    globalModalView.setVisible(false);
-    if (returnFocus) {
-      try {
-        (state.modalTriggerEl || barView.settingsBtn).focus();
-      } catch {}
+    if (state.settingsPageOpen && state.settingsPageHandle) {
+      updateSettingsPageInPlace();
     }
   }
 
@@ -833,8 +904,8 @@ export function createBarController({
         state.pendingRefresh = false;
         state.lastSessionId = '';
         state.snapshot = null;
-        state.limitDirty = false;
-        state.syncedLimitKey = '';
+        state.popupDraft.dirty = false;
+        state.popupDraft.syncedKey = '';
         render();
       }
       return;
@@ -842,14 +913,13 @@ export function createBarController({
     const sessionChanged = Boolean(state.lastSessionId && state.lastSessionId !== sid);
     if (sessionChanged) {
       state.snapshot = null;
-      state.limitDirty = false;
-      state.syncedLimitKey = '';
+      state.popupDraft.dirty = false;
+      state.popupDraft.syncedKey = '';
       render();
       if (state.abortCtrl) state.abortCtrl.abort();
     } else if (state.inFlight) {
       state.pendingRefresh = true;
       if (waitForFresh && state.inFlightPromise) {
-        // G-1: Wait for the in-flight poll to finish AND await the fresh post-update snapshot
         await state.inFlightPromise;
         if (!state.disposed && state.inFlightPromise) {
           await state.inFlightPromise;
@@ -881,8 +951,8 @@ export function createBarController({
         if (!state.snapshot || state.consecutiveSnapshotFailures >= 2 || !api.isConnected()) {
           barView.setReconnecting();
         }
-        if (isRemoteWeb) {
-          syncRemoteConnectionPanel(false);
+        if (isRemoteWeb && state.settingsPageOpen) {
+          updateSettingsPageInPlace();
         }
       } finally {
         if (reqEpoch === state.epoch) {
@@ -907,12 +977,14 @@ export function createBarController({
     render();
     try {
       await api.post('/api/compact', { sessionId: sid });
-      showNote(i18n.t().compactSent);
+      showNote(i18n.t().compactSent, 4000, 'success');
       if (typeof onBurstRequested === 'function') onBurstRequested();
       refreshSnapshot();
     } catch (err) {
       showNote(
         err?.code === 'COMPACTION_IN_PROGRESS' ? i18n.t().compactInProgress : i18n.t().compactFail,
+        4000,
+        'danger',
       );
     } finally {
       state.compacting = false;
@@ -922,16 +994,16 @@ export function createBarController({
 
   async function handleApplyLimit() {
     const tr = i18n.t();
-    const parsedLimit = parseStrictLimitInput(popoverView.customInput, { allowBlank: true });
+    const parsedLimit = parseStrictLimitInput(state.popupDraft.customLimit, { allowBlank: true });
     if (!parsedLimit.ok) {
-      showFeedback(tr.invalidLimit, true);
+      setPopupFeedback(tr.invalidLimit, true);
       return;
     }
     const limitVal = parsedLimit.value;
-    const scope = popoverView.scopeSelect.value === 'default' ? 'default' : 'session';
+    const scope = state.popupDraft.scope === 'default' ? 'default' : 'session';
     const sid = getSessionId();
     if (scope === 'session' && !sid) {
-      showFeedback(tr.noActiveSession, true);
+      setPopupFeedback(tr.noActiveSession, true);
       return;
     }
     const payload =
@@ -941,14 +1013,14 @@ export function createBarController({
     try {
       const updated = await api.post('/api/settings/update', payload);
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
-      state.limitDirty = false;
-      state.syncedLimitKey = '';
+      state.popupDraft.dirty = false;
+      state.popupDraft.syncedKey = '';
       await refreshSnapshot({ waitForFresh: true });
-      syncLimitControls(true);
+      syncPopupLimitDraft(true);
       const hostMax = state.snapshot?.maxContextTokens || 0;
       const sessionOverrideVal = getSavedLimitForScope('session');
       if (scope === 'default' && limitVal !== null && typeof sessionOverrideVal === 'number') {
-        showFeedback(
+        setPopupFeedback(
           i18n.formatTemplate(tr.appliedMaskedBySession, {
             val: i18n.formatTokens(limitVal),
             sessionVal: i18n.formatTokens(sessionOverrideVal),
@@ -956,7 +1028,7 @@ export function createBarController({
           false,
         );
       } else if (limitVal !== null && hostMax > 0 && limitVal > hostMax) {
-        showFeedback(
+        setPopupFeedback(
           i18n.formatTemplate(tr.appliedClamped, {
             val: i18n.formatTokens(limitVal),
             max: i18n.formatTokens(hostMax),
@@ -964,10 +1036,10 @@ export function createBarController({
           false,
         );
       } else {
-        showFeedback(tr.applied, false);
+        setPopupFeedback(tr.applied, false);
       }
     } catch (err) {
-      showFeedback(err?.message || 'Error', true);
+      setPopupFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -975,21 +1047,22 @@ export function createBarController({
     const tr = i18n.t();
     const parsedLimit = parseStrictLimitInput(rawInputValue, { allowBlank: true });
     if (!parsedLimit.ok) {
-      showModalFeedback(tr.invalidLimit, true);
+      setModalFeedback(tr.invalidLimit, true);
       return;
     }
     const limitVal = parsedLimit.value;
     try {
       const updated = await api.post('/api/settings/update', { defaultCustomLimit: limitVal });
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
-      state.limitDirty = false;
-      state.syncedLimitKey = '';
+      state.popupDraft.dirty = false;
+      state.popupDraft.syncedKey = '';
+      state.modalDraft.defaultDirty = false;
       await refreshSnapshot({ waitForFresh: true });
-      syncLimitControls(true);
-      renderGlobalModal(true);
+      syncPopupLimitDraft(true);
+      syncModalDefaultDraft(true);
       const sessionOverrideVal = getSavedLimitForScope('session');
       if (limitVal !== null && typeof sessionOverrideVal === 'number') {
-        showModalFeedback(
+        setModalFeedback(
           i18n.formatTemplate(tr.appliedMaskedBySession, {
             val: i18n.formatTokens(limitVal),
             sessionVal: i18n.formatTokens(sessionOverrideVal),
@@ -997,10 +1070,10 @@ export function createBarController({
           false,
         );
       } else {
-        showModalFeedback(tr.applied, false);
+        setModalFeedback(tr.applied, false);
       }
     } catch (err) {
-      showModalFeedback(err?.message || 'Error', true);
+      setModalFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -1008,14 +1081,14 @@ export function createBarController({
     const tr = i18n.t();
     const model = String(rawModelName || '').trim();
     if (!model || model.length > 128) {
-      showModalFeedback(tr.invalidModelName, true);
+      setModalFeedback(tr.invalidModelName, true);
       return;
     }
     let limitVal = null;
     if (rawLimitValue !== null) {
       const parsedLimit = parseStrictLimitInput(rawLimitValue, { allowBlank: false });
       if (!parsedLimit.ok) {
-        showModalFeedback(tr.invalidLimit, true);
+        setModalFeedback(tr.invalidLimit, true);
         return;
       }
       limitVal = parsedLimit.value;
@@ -1025,19 +1098,18 @@ export function createBarController({
         modelLimit: { model, limit: limitVal },
       });
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
-      state.limitDirty = false;
-      state.syncedLimitKey = '';
+      state.popupDraft.dirty = false;
+      state.popupDraft.syncedKey = '';
       await refreshSnapshot({ waitForFresh: true });
-      syncLimitControls(true);
-      if (globalModalView && limitVal !== null) {
-        globalModalView.modelNameInput.value = '';
-        globalModalView.modelLimitInput.value = '';
-        globalModalView.modelPresetSelect.value = '';
+      syncPopupLimitDraft(true);
+      if (limitVal !== null) {
+        state.modalDraft.modelNameInput = '';
+        state.modalDraft.modelLimitInput = '';
+        state.modalDraft.modelPreset = '';
       }
-      renderGlobalModal(false);
-      showModalFeedback(tr.applied, false);
+      setModalFeedback(tr.applied, false);
     } catch (err) {
-      showModalFeedback(err?.message || 'Error', true);
+      setModalFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -1045,7 +1117,7 @@ export function createBarController({
     const tr = i18n.t();
     const sid = getSessionId();
     if (!sid) {
-      showModalFeedback(tr.noActiveSession, true);
+      setModalFeedback(tr.noActiveSession, true);
       return;
     }
     try {
@@ -1053,29 +1125,29 @@ export function createBarController({
         sessionLimit: { sessionId: sid, limit: null },
       });
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
-      state.limitDirty = false;
-      state.syncedLimitKey = '';
+      state.popupDraft.dirty = false;
+      state.popupDraft.syncedKey = '';
       await refreshSnapshot({ waitForFresh: true });
-      syncLimitControls(true);
-      renderGlobalModal(false);
-      showModalFeedback(tr.applied, false);
+      syncPopupLimitDraft(true);
+      setModalFeedback(tr.applied, false);
     } catch (err) {
-      showModalFeedback(err?.message || 'Error', true);
+      setModalFeedback(err?.message || 'Error', true);
     }
   }
 
-  async function handleToggleAutoCompact() {
-    const next = !sharedState.autoCompactEnabled;
+  async function handleToggleAutoCompact(nextValue) {
+    const prev = sharedState.autoCompactEnabled;
+    const next = typeof nextValue === 'boolean' ? nextValue : !prev;
     sharedState.autoCompactEnabled = next;
     render();
     try {
       const updated = await api.post('/api/settings/update', { autoCompact: next });
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
-      showFeedback(i18n.t().applied, false);
+      setSettingsFeedback(i18n.t().applied, false);
     } catch (err) {
-      sharedState.autoCompactEnabled = !next;
+      sharedState.autoCompactEnabled = prev;
       render();
-      showFeedback(err?.message || 'Error', true);
+      setSettingsFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -1086,14 +1158,13 @@ export function createBarController({
       if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
       sharedState.compactPrompt =
         typeof updated?.compactPrompt === 'string' ? updated.compactPrompt : nextPrompt;
-      state.promptDirty = false;
-      state.syncedPromptVal = sharedState.compactPrompt;
-      popoverView.compactPromptInput.value = sharedState.compactPrompt;
-      popoverView.updatePromptCount();
+      state.settingsDraft.promptDirty = false;
+      state.settingsDraft.syncedPromptVal = sharedState.compactPrompt;
+      state.settingsDraft.compactPrompt = sharedState.compactPrompt;
       render();
-      showFeedback(i18n.t().applied, false);
+      setSettingsFeedback(i18n.t().applied, false);
     } catch (err) {
-      showFeedback(err?.message || 'Error', true);
+      setSettingsFeedback(err?.message || 'Error', true);
     }
   }
 
@@ -1107,132 +1178,43 @@ export function createBarController({
     } catch {}
   }
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') {
-      if (state.modalOpen) {
-        // When host v2 ModalPortal owns the modal, host capture-phase Escape closes it (LIFO).
-        if (state.modalPortalHandle) return;
-        closeGlobalModal(true);
-        return;
-      }
-      if (state.popOpen) {
-        if (state.popoverPortalHandle) return;
-        setPopoverOpen(false);
-        try {
-          (state.lastTriggerEl || barView.settingsBtn).focus();
-        } catch {}
-      }
-    }
-  };
-  const onDocPointerDown = (e) => {
-    if (!state.popOpen || state.popoverPortalHandle) return;
-    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
-    const target = e.target;
-    if (
-      path.includes(popoverView.popEl) ||
-      path.includes(barView.settingsBtn) ||
-      path.includes(barView.ctxBtn) ||
-      popoverView.popEl.contains(target) ||
-      barView.settingsBtn.contains(target) ||
-      barView.ctxBtn.contains(target)
-    ) {
-      return;
-    }
-    setPopoverOpen(false);
-  };
-  const onInputKeyDown = (e) => {
-    if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleApplyLimit();
-    }
-  };
-  const onPresetChange = () => {
-    state.limitDirty = true;
-    popoverView.customInput.value = popoverView.presetSelect.value;
-    showFeedback('', false);
-  };
-  const onCustomInput = () => {
-    state.limitDirty = true;
-    const raw = popoverView.customInput.value.replace(/[\s,]/g, '').trim();
-    const parsed = raw ? Number(raw) : NaN;
-    popoverView.presetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
-    showFeedback('', false);
-  };
-  const onScopeChange = () => {
-    // G-1: Preserve a valid in-progress numeric entry when switching scope before clicking Apply;
-    // discard invalid/blank inputs so target scope's saved limit loads cleanly.
-    if (
-      state.limitDirty &&
-      parseStrictLimitInput(popoverView.customInput.value, { allowBlank: false }).ok
-    ) {
-      showFeedback('', false);
-      return;
-    }
-    state.limitDirty = false;
-    state.syncedLimitKey = '';
-    showFeedback('', false);
-    syncLimitControls(true);
-  };
-  const onPromptInput = () => {
-    state.promptDirty = true;
-    popoverView.updatePromptCount();
-    showFeedback('', false);
-  };
-  const onPromptKeyDown = (e) => {
-    if (e.isComposing || e.keyCode === 229) return;
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      saveCompactPromptValue(popoverView.compactPromptInput.value);
-    }
-  };
-  const onTabKeyDown = (e) => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-      e.preventDefault();
-      const next = state.activeTab === 'context' ? 'settings' : 'context';
-      setActiveTab(next);
-      try {
-        (next === 'context' ? popoverView.tabContextBtn : popoverView.tabSettingsBtn).focus();
-      } catch {}
-    }
-  };
-
   async function handleRemoteConnect() {
     if (!isRemoteWeb || typeof onRemoteConnectionSave !== 'function') return;
     const tr = i18n.t();
-    const baseUrl = popoverView.remoteUrlInput ? popoverView.remoteUrlInput.value.trim() : '';
-    const token = popoverView.remoteTokenInput ? popoverView.remoteTokenInput.value.trim() : '';
+    const baseUrl = String(state.settingsDraft.remoteUrl || '').trim();
+    const token = String(state.settingsDraft.remoteToken || '').trim();
     try {
       const result = await onRemoteConnectionSave({ baseUrl, token });
-      state.remoteUrlDirty = false;
+      state.settingsDraft.remoteUrlDirty = false;
       if (result && result.ok) {
         state.consecutiveSnapshotFailures = 0;
         state.lastConnectionError = null;
-        if (popoverView.remoteTokenInput) popoverView.remoteTokenInput.value = '';
-        showFeedback(
+        state.settingsDraft.remoteToken = '';
+        state.settingsDraft.remoteUrl = result.baseUrl || baseUrl;
+        setSettingsFeedback(
           i18n.formatTemplate(tr.remoteConnected, { url: result.baseUrl || baseUrl }),
           false,
         );
       } else if (result && result.code === 'ERR_INVALID_ENDPOINT_URL') {
-        showFeedback(tr.remoteInvalidUrl, true);
+        setSettingsFeedback(tr.remoteInvalidUrl, true);
       } else if (result && result.code === 'ERR_INVALID_SIDECAR_TOKEN') {
-        showFeedback(tr.remoteInvalidToken, true);
+        setSettingsFeedback(tr.remoteInvalidToken, true);
       } else if (result && (result.status === 401 || result.status === 403)) {
         state.lastConnectionError = { status: result.status };
-        showFeedback(i18n.formatTemplate(tr.remoteAuthFailed, { status: result.status }), true);
+        setSettingsFeedback(i18n.formatTemplate(tr.remoteAuthFailed, { status: result.status }), true);
       } else if (result && result.code === 'ERR_SAVE_SETTINGS_FAILED') {
-        showFeedback(
+        setSettingsFeedback(
           i18n.formatTemplate(tr.remoteSaveFailed, { reason: result.reason || 'Error' }),
           true,
         );
       } else {
         state.lastConnectionError = new Error(result?.message || 'unreachable');
-        showFeedback(tr.remoteUnreachable, true);
+        setSettingsFeedback(tr.remoteUnreachable, true);
       }
       render();
     } catch (err) {
       state.lastConnectionError = err;
-      showFeedback(err?.message || tr.remoteUnreachable, true);
+      setSettingsFeedback(err?.message || tr.remoteUnreachable, true);
       render();
     }
   }
@@ -1242,170 +1224,29 @@ export function createBarController({
     const tr = i18n.t();
     try {
       await onRemoteConnectionClear();
-      state.remoteUrlDirty = false;
-      if (popoverView.remoteUrlInput) popoverView.remoteUrlInput.value = '';
-      if (popoverView.remoteTokenInput) popoverView.remoteTokenInput.value = '';
+      state.settingsDraft.remoteUrlDirty = false;
+      state.settingsDraft.remoteUrl = '';
+      state.settingsDraft.remoteToken = '';
       resetConnectionState();
-      showFeedback(tr.remoteDisconnectedSaved, false);
+      setSettingsFeedback(tr.remoteDisconnectedSaved, false);
     } catch (err) {
-      showFeedback(err?.message || 'Error', true);
+      setSettingsFeedback(err?.message || 'Error', true);
     }
   }
 
   barView.ctxBtn.addEventListener('click', () => {
-    const preferredTab = isRemoteWeb && !isApiConfigured() ? 'settings' : 'context';
-    if (state.popOpen && state.activeTab === preferredTab) {
-      setPopoverOpen(false);
-    } else {
-      setPopoverOpen(true, preferredTab, barView.ctxBtn);
-      if (preferredTab === 'settings' && isRemoteWeb) {
-        syncRemoteConnectionPanel(true);
-      }
+    if (isRemoteWeb && !isApiConfigured()) {
+      openSettings();
+      return;
     }
+    openContextPopup(barView.ctxBtn);
   });
   barView.settingsBtn.addEventListener('click', () => {
-    if (state.popOpen && state.activeTab === 'settings') {
-      setPopoverOpen(false);
-    } else {
-      setPopoverOpen(true, 'settings', barView.settingsBtn);
-    }
-  });
-  popoverView.tabContextBtn.addEventListener('click', () => setActiveTab('context'));
-  popoverView.tabSettingsBtn.addEventListener('click', () => setActiveTab('settings'));
-  popoverView.tabContextBtn.addEventListener('keydown', onTabKeyDown);
-  popoverView.tabSettingsBtn.addEventListener('keydown', onTabKeyDown);
-  popoverView.closeBtn.addEventListener('click', () => {
-    setPopoverOpen(false);
-    try {
-      (state.lastTriggerEl || barView.settingsBtn).focus();
-    } catch {}
+    openSettings();
   });
   barView.compactBtn.addEventListener('click', handleCompact);
-  popoverView.applyBtn.addEventListener('click', handleApplyLimit);
-  popoverView.autoCompactBtn.addEventListener('click', handleToggleAutoCompact);
-  popoverView.autoCompactStateText.addEventListener('click', handleToggleAutoCompact);
-  popoverView.compactPromptSaveBtn.addEventListener('click', () =>
-    saveCompactPromptValue(popoverView.compactPromptInput.value),
-  );
-  popoverView.compactPromptResetBtn.addEventListener('click', () => {
-    popoverView.compactPromptInput.value = '';
-    popoverView.updatePromptCount();
-    saveCompactPromptValue('');
-  });
-  popoverView.compactPromptInput.addEventListener('input', onPromptInput);
-  popoverView.compactPromptInput.addEventListener('keydown', onPromptKeyDown);
-  popoverView.langSelect.addEventListener('change', () => applyLocale(popoverView.langSelect.value));
-  popoverView.scopeSelect.addEventListener('change', onScopeChange);
-  popoverView.presetSelect.addEventListener('change', onPresetChange);
-  popoverView.customInput.addEventListener('input', onCustomInput);
-  popoverView.customInput.addEventListener('keydown', onInputKeyDown);
-  if (isRemoteWeb && popoverView.remoteConnectBtn) {
-    popoverView.remoteConnectBtn.addEventListener('click', handleRemoteConnect);
-  }
-  if (isRemoteWeb && popoverView.remoteDisconnectBtn) {
-    popoverView.remoteDisconnectBtn.addEventListener('click', handleRemoteDisconnect);
-  }
-  if (isRemoteWeb && popoverView.remoteUrlInput) {
-    popoverView.remoteUrlInput.addEventListener('input', () => {
-      state.remoteUrlDirty = true;
-      showFeedback('', false);
-    });
-    popoverView.remoteUrlInput.addEventListener('keydown', (e) => {
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleRemoteConnect();
-      }
-    });
-  }
-  if (isRemoteWeb && popoverView.remoteTokenInput) {
-    popoverView.remoteTokenInput.addEventListener('keydown', (e) => {
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleRemoteConnect();
-      }
-    });
-  }
-  if (popoverView.openGlobalModalBtn) {
-    popoverView.openGlobalModalBtn.addEventListener('click', () =>
-      openGlobalModal(popoverView.openGlobalModalBtn),
-    );
-  }
-  if (popoverView.openGlobalModalSettingsBtn) {
-    popoverView.openGlobalModalSettingsBtn.addEventListener('click', () =>
-      openGlobalModal(popoverView.openGlobalModalSettingsBtn),
-    );
-  }
-  if (globalModalView) {
-    globalModalView.closeBtn.addEventListener('click', () => closeGlobalModal(true));
-    globalModalView.backdropEl.addEventListener('click', (e) => {
-      if (e.target === globalModalView.backdropEl) closeGlobalModal(true);
-    });
-    globalModalView.clearSessionLimitBtn.addEventListener('click', handleClearCurrentSessionLimit);
-    globalModalView.defaultPresetSelect.addEventListener('change', () => {
-      globalModalView.defaultInput.value = globalModalView.defaultPresetSelect.value;
-      showModalFeedback('', false);
-    });
-    globalModalView.defaultInput.addEventListener('input', () => {
-      const raw = globalModalView.defaultInput.value.replace(/[\s,]/g, '').trim();
-      const parsed = raw ? Number(raw) : NaN;
-      globalModalView.defaultPresetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
-      showModalFeedback('', false);
-    });
-    globalModalView.defaultInput.addEventListener('keydown', (e) => {
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSaveGlobalDefault(globalModalView.defaultInput.value);
-      }
-    });
-    globalModalView.defaultApplyBtn.addEventListener('click', () =>
-      handleSaveGlobalDefault(globalModalView.defaultInput.value),
-    );
-    globalModalView.defaultResetBtn.addEventListener('click', () => {
-      globalModalView.defaultInput.value = '';
-      globalModalView.defaultPresetSelect.value = '';
-      handleSaveGlobalDefault('');
-    });
-    globalModalView.useCurrentModelBtn.addEventListener('click', () => {
-      const curModel = state.snapshot?.modelName || '';
-      if (curModel) {
-        globalModalView.modelNameInput.value = curModel;
-        try {
-          globalModalView.modelLimitInput.focus();
-        } catch {}
-      }
-    });
-    globalModalView.modelPresetSelect.addEventListener('change', () => {
-      globalModalView.modelLimitInput.value = globalModalView.modelPresetSelect.value;
-      showModalFeedback('', false);
-    });
-    globalModalView.modelLimitInput.addEventListener('input', () => {
-      const raw = globalModalView.modelLimitInput.value.replace(/[\s,]/g, '').trim();
-      const parsed = raw ? Number(raw) : NaN;
-      globalModalView.modelPresetSelect.value = PRESETS.includes(parsed) ? String(parsed) : '';
-      showModalFeedback('', false);
-    });
-    globalModalView.modelLimitInput.addEventListener('keydown', (e) => {
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSaveModelLimit(
-          globalModalView.modelNameInput.value,
-          globalModalView.modelLimitInput.value,
-        );
-      }
-    });
-    globalModalView.modelSaveBtn.addEventListener('click', () =>
-      handleSaveModelLimit(
-        globalModalView.modelNameInput.value,
-        globalModalView.modelLimitInput.value,
-      ),
-    );
-  }
-  doc.addEventListener('keydown', onKeyDown);
-  doc.addEventListener('pointerdown', onDocPointerDown);
+
+  registerUnifiedSettingsPage();
 
   function setTargetView(viewEl) {
     const nextView = viewEl || null;
@@ -1433,38 +1274,23 @@ export function createBarController({
   function destroy() {
     if (state.disposed) return;
     state.disposed = true;
-    if (state.feedbackTimer) clearTimeout(state.feedbackTimer);
-    if (state.modalFeedbackTimer) clearTimeout(state.modalFeedbackTimer);
     if (state.noteTimer) clearTimeout(state.noteTimer);
+    if (state.popupFeedbackTimer) clearTimeout(state.popupFeedbackTimer);
+    if (state.modalFeedbackTimer) clearTimeout(state.modalFeedbackTimer);
+    if (state.settingsFeedbackTimer) clearTimeout(state.settingsFeedbackTimer);
     if (state.abortCtrl) state.abortCtrl.abort();
-    if (state.modalPortalHandle) {
+    closeGlobalModal();
+    closeContextPopup();
+    if (state.settingsPageHandle && typeof state.settingsPageHandle.dispose === 'function') {
       try {
-        state.modalPortalHandle.close();
+        state.settingsPageHandle.dispose();
       } catch {}
-      finalizeModalClosed();
     }
-    if (state.popoverPortalHandle) {
-      try {
-        state.popoverPortalHandle.close();
-      } catch {}
-      finalizePopoverClosed();
-    }
-    detachPopoverResizeListener();
-    doc.removeEventListener('keydown', onKeyDown);
-    doc.removeEventListener('pointerdown', onDocPointerDown);
+    state.settingsPageHandle = null;
+    state.settingsPageOpen = false;
     try {
       barView.barEl.remove();
     } catch {}
-  }
-
-  function openSettings() {
-    if (state.disposed) return;
-    setPopoverOpen(true, 'settings', barView.settingsBtn);
-  }
-
-  function openGlobalLimits() {
-    if (state.disposed) return;
-    openGlobalModal(barView.settingsBtn);
   }
 
   render();
@@ -1476,8 +1302,10 @@ export function createBarController({
     render,
     refreshSnapshot,
     resetConnectionState,
+    openContextPopup,
     openSettings,
     openGlobalLimits,
+    triggerCompact: handleCompact,
     destroy,
   });
 }
