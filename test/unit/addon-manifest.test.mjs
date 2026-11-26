@@ -70,6 +70,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
   });
   assert.equal(manifest.configBridge, undefined);
   assert.equal(manifest.permissions?.events, undefined, 'Unused events permission must be omitted');
+  assert.equal(manifest.permissions?.storage, undefined, 'Unused storage permission must be omitted (no plugin-owned remote URL/token storage)');
   assert.equal(manifest.permissions?.configBridge, undefined, 'Unused configBridge permission must be omitted');
   assert.equal(manifest.permissions?.ui?.dialogs, false);
   assert.equal(manifest.permissions?.ui?.statusItems, false);
@@ -77,7 +78,6 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
     provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }],
   });
   assert.deepEqual(manifest.permissions?.net, {
-    userApprovedHttps: true,
     localLoopback: ['antigravity-sidecar'],
   });
   assert.deepEqual(manifest.permissions?.dom, {
@@ -88,7 +88,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
     surfaces: ['desktop', 'remote-web'],
     hostProfile: 'antigravity-desktop',
     hostProfiles: ['antigravity-desktop', 'antigravity-remote-web'],
-    minHostVersion: '3.0.3',
+    minHostVersion: '3.1.1',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {
@@ -274,13 +274,29 @@ test('TC-ADDON-03: addon-host-adapter.mjs adapts AddonContextV3 (surface/capabil
   assert.equal(port.capabilities.hasLocalLoopback, true);
   assert.equal(port.lifecycleSignal, abortCtrl.signal);
 
+  let liveBridgeConnected = false;
   const remotePort = createAddonHostAdapter({
     ...fakeV3Ctx,
-    env: { surface: 'remote-web', layoutMode: 'compact', capabilities: { hasLocalLoopback: false } },
+    env: {
+      surface: 'remote-web',
+      layoutMode: 'compact',
+      capabilities: {
+        get hasLocalLoopback() {
+          return liveBridgeConnected;
+        },
+        get hasRemoteHostBridge() {
+          return liveBridgeConnected;
+        },
+      },
+    },
   });
   assert.equal(remotePort.surface, 'remote-web');
   assert.equal(remotePort.layoutMode, 'compact');
   assert.equal(remotePort.capabilities.hasLocalLoopback, false);
+  assert.equal(remotePort.capabilities.hasRemoteHostBridge, false);
+  liveBridgeConnected = true;
+  assert.equal(remotePort.capabilities.hasLocalLoopback, true);
+  assert.equal(remotePort.capabilities.hasRemoteHostBridge, true);
 
   port.mountSlot(box1);
   port.mountSlot(box1);
@@ -446,41 +462,39 @@ test('TC-ADDON-05: i18n.mjs, api-client.mjs (ctx.net.fetch + fetchImpl), and add
   );
   assert.equal(netApi.isConnected(), false);
 
-  // 2. Remote HTTPS validation & dynamic configure/clearConnection
-  const remoteRequests = [];
-  const remoteApi = assertStatusbarApiPort(
+  // 2. Strictly loopback-only validation (non-loopback HTTPS rejected; ERR_REMOTE_HOST_NOT_CONNECTED propagated)
+  const bridgeApi = assertStatusbarApiPort(
     createSidecarApiClient({
-      allowRemoteHttps: true,
-      fetchImpl: async (url, init) => {
-        remoteRequests.push({ url, init });
-        if (url.endsWith('/unauth')) {
-          return {
-            ok: false,
-            status: 401,
-            async json() {
-              return { error: { code: 'UNAUTHORIZED', message: 'Invalid token' } };
-            },
-          };
+      netFetchImpl: async (url) => {
+        if (url.endsWith('/offline')) {
+          return { ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
         }
-        return { ok: true, status: 200, async json() { return { ok: true }; } };
+        return { ok: true, status: 200, bodyText: JSON.stringify({ ok: true }) };
       },
     }),
   );
-  assert.equal(remoteApi.isConfigured(), false);
+  assert.equal(bridgeApi.isConfigured(), false);
   assert.throws(
-    () => remoteApi.configure({ baseUrl: 'http://remote.example.com:8080', token: TEST_TOKEN }),
-    /ERR_INVALID_ENDPOINT_URL/,
+    () => bridgeApi.configure({ baseUrl: 'https://sidecar.example.com', token: TEST_TOKEN }),
+    /ERR_INVALID_LOOPBACK_BASE_URL/,
+  );
+  assert.throws(
+    () => bridgeApi.configure({ baseUrl: 'http://remote.example.com:8080', token: TEST_TOKEN }),
+    /ERR_INVALID_LOOPBACK_BASE_URL/,
   );
   assert.equal(
-    remoteApi.configure({ baseUrl: 'https://sidecar.example.com:8443/prefix/', token: TEST_TOKEN }),
+    bridgeApi.configure({ baseUrl: 'http://127.0.0.1:43210/', token: TEST_TOKEN }),
     true,
   );
-  await remoteApi.post('/api/settings/get', {});
-  assert.equal(remoteApi.isConnected(), true);
-  assert.equal(remoteRequests[0].url, 'https://sidecar.example.com:8443/prefix/api/settings/get');
-  await assert.rejects(() => remoteApi.post('/unauth', {}));
-  assert.equal(remoteApi.isConnected(), false);
-  assert.equal(remoteApi.clearConnection(), true);
+  assert.equal(bridgeApi.getBaseUrl(), 'http://127.0.0.1:43210');
+  await bridgeApi.post('/api/settings/get', {});
+  assert.equal(bridgeApi.isConnected(), true);
+  await assert.rejects(
+    () => bridgeApi.post('/offline', {}),
+    (err) => err?.code === 'ERR_REMOTE_HOST_NOT_CONNECTED',
+  );
+  assert.equal(bridgeApi.isConnected(), false);
+  assert.equal(bridgeApi.clearConnection(), true);
 
   // 3. addon-bridge well-known `host.statusbar` service contract
   let changes = 0;

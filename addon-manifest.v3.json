@@ -16,7 +16,7 @@
       "antigravity-desktop",
       "antigravity-remote-web"
     ],
-    "minHostVersion": "3.0.3"
+    "minHostVersion": "3.1.1"
   },
   "capabilities": [
     "renderer"
@@ -35,10 +35,6 @@
       "settingsPages": true,
       "canvas": true
     },
-    "storage": {
-      "maxBytes": 16384,
-      "namespace": "antigravity-statusbar"
-    },
     "services": {
       "provide": [
         {
@@ -50,7 +46,6 @@
       ]
     },
     "net": {
-      "userApprovedHttps": true,
       "localLoopback": [
         "antigravity-sidecar"
       ]

@@ -886,11 +886,11 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
       'antigravity-remote-web',
     ]);
     assert.equal(addonManifest.compatibility.excludeHostProfiles, undefined);
-    assert.equal(addonManifest.compatibility.minHostVersion, '3.0.3');
+    assert.equal(addonManifest.compatibility.minHostVersion, '3.1.1');
     assert.deepEqual(addonManifest.permissions.net, {
-      userApprovedHttps: true,
       localLoopback: ['antigravity-sidecar'],
     });
+    assert.equal(addonManifest.permissions.storage, undefined);
     assert.deepEqual(addonManifest.permissions.services, {
       provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }],
     });

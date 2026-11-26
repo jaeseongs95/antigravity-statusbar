@@ -3,19 +3,17 @@
  *
  * AddonManifest.v3 Networking & Security Invariants:
  * - Routes requests through `ctx.net.fetch` (`netFetchImpl`) whenever granted by the host
- *   (Desktop `permissions.net.localLoopback` or Remote Web `permissions.net.httpsHosts`).
- * - Eliminates non-standard userscript XHR probing; all host network
- *   privileges remain behind the host `ctx.net.fetch` broker.
- * - On Desktop (default), restricts requests strictly to loopback `http://127.0.0.1|localhost|[::1]:<port>`.
- * - On Remote Web (`allowRemoteHttps: true`), allows loopback HTTP or explicit `https://` endpoints
- *   with zero embedded URL credentials, query strings, or fragments (rejects cleartext remote HTTP).
+ *   (Desktop `permissions.net.localLoopback` and Remote Web via Native Host v3.1.1 Host Bridge).
+ * - Eliminates non-standard userscript XHR probing and plugin-owned remote HTTPS endpoints;
+ *   all host network privileges remain behind the host `ctx.net.fetch` broker.
+ * - Restricts requests strictly to loopback `http://127.0.0.1|localhost|[::1]:<port>`
+ *   (on Remote Web, Native Host v3.1.1 transparently proxies `localLoopback` over the paired Host Bridge).
  * - Seals `token` strictly inside closure scope; never writes or returns it on `window`, DOM, or API getters.
  */
 
 export function createSidecarApiClient({
   baseUrl = null,
   token = null,
-  allowRemoteHttps = false,
   netFetchImpl = null,
   fetchImpl,
 } = {}) {
@@ -23,39 +21,16 @@ export function createSidecarApiClient({
 
   function normalizeValidatedBaseUrl(rawUrl) {
     if (typeof rawUrl !== 'string') {
-      throw new Error(allowRemoteHttps ? 'ERR_INVALID_ENDPOINT_URL' : 'ERR_INVALID_LOOPBACK_BASE_URL');
+      throw new Error('ERR_INVALID_LOOPBACK_BASE_URL');
     }
     const trimmed = rawUrl.trim();
     const loopbackMatch = LOOPBACK_RE.exec(trimmed);
     if (loopbackMatch) {
       const port = Number(loopbackMatch[1]);
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error(allowRemoteHttps ? 'ERR_INVALID_ENDPOINT_URL' : 'ERR_INVALID_LOOPBACK_BASE_URL');
+        throw new Error('ERR_INVALID_LOOPBACK_BASE_URL');
       }
       return trimmed.replace(/\/+$/, '');
-    }
-    if (allowRemoteHttps) {
-      let parsed;
-      try {
-        parsed = new URL(trimmed);
-      } catch {
-        throw new Error('ERR_INVALID_ENDPOINT_URL');
-      }
-      if (
-        parsed.protocol !== 'https:' ||
-        !parsed.hostname ||
-        parsed.username ||
-        parsed.password ||
-        parsed.search ||
-        parsed.hash
-      ) {
-        throw new Error('ERR_INVALID_ENDPOINT_URL');
-      }
-      const cleanedPath =
-        parsed.pathname && parsed.pathname !== '/'
-          ? parsed.pathname.replace(/\/+$/, '')
-          : '';
-      return `${parsed.origin}${cleanedPath}`;
     }
     throw new Error('ERR_INVALID_LOOPBACK_BASE_URL');
   }

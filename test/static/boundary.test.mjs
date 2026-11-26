@@ -131,6 +131,11 @@ test('TC-ADDON-06: addon renderer modules obey v3 API-First invariants (zero HTM
     /\bpositionPopoverPortal\b/,
     /\bapplyModalPortalLayout\b/,
     /\.hostProfileId\b/,
+    /['"]set-remote-url['"]/,
+    /['"]set-remote-token['"]/,
+    /['"]remote-connect['"]/,
+    /['"]remote-disconnect['"]/,
+    /\buserApprovedHttps\b/,
   ];
 
   for (const file of files) {
@@ -171,7 +176,7 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v3.json d
   assert.equal(addonManifest.version, '3.2.0');
   assert.equal(addonManifest.trustLevel, 'trusted');
   assert.deepEqual(addonManifest.compatibility?.surfaces, ['desktop', 'remote-web']);
-  assert.equal(addonManifest.compatibility?.minHostVersion, '3.0.3');
+  assert.equal(addonManifest.compatibility?.minHostVersion, '3.1.1');
   assert.deepEqual(addonManifest.capabilities, ['renderer']);
   assert.equal(addonManifest.entry?.rendererScript, 'runtime/statusbar-renderer.js');
   assert.equal(addonManifest.entry?.mainHookScript, null);
@@ -185,10 +190,6 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v3.json d
       settingsPages: true,
       canvas: true,
     },
-    storage: {
-      maxBytes: 16384,
-      namespace: 'antigravity-statusbar',
-    },
     services: {
       provide: [
         {
@@ -198,7 +199,6 @@ test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v3.json d
       ],
     },
     net: {
-      userApprovedHttps: true,
       localLoopback: ['antigravity-sidecar'],
     },
     dom: {

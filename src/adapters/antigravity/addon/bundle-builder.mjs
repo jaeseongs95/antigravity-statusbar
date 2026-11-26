@@ -70,16 +70,12 @@ export function setupStatusbarV3(
   const hostPort = assertRendererHostPort(createAddonHostAdapter(ctx, ADDON_SLOT_IDS));
   const isRemoteWeb = hostPort.surface === 'remote-web';
   const hasStaticInitialConnection = Boolean(!isRemoteWeb && baseUrl && token);
-  const useNetBroker = Boolean(
-    typeof hostPort.netFetch === 'function' &&
-      (isRemoteWeb ? hostPort.capabilities?.hasNetHttps : hostPort.capabilities?.hasLocalLoopback),
-  );
+  const netFetchImpl = typeof hostPort.netFetch === 'function' ? hostPort.netFetch : null;
   const api = assertStatusbarApiPort(
     createSidecarApiClient({
       baseUrl: hasStaticInitialConnection ? baseUrl : null,
       token: hasStaticInitialConnection ? token : null,
-      allowRemoteHttps: isRemoteWeb,
-      netFetchImpl: useNetBroker ? hostPort.netFetch : null,
+      netFetchImpl,
       fetchImpl,
     }),
   );
@@ -175,15 +171,11 @@ export function renderAddonRendererBundle(opts = {}) {
     '  const hostPort = assertRendererHostPort(createAddonHostAdapter(hostHandle, cfg.slotIds));',
     "  const isRemoteWeb = hostPort.surface === 'remote-web';",
     '  const hasStaticInitialConnection = Boolean(!isRemoteWeb && cfg.baseUrl && cfg.token);',
-    '  const useNetBroker = Boolean(',
-    "    typeof hostPort.netFetch === 'function' &&",
-    '      (isRemoteWeb ? hostPort.capabilities && hostPort.capabilities.hasNetHttps : hostPort.capabilities && hostPort.capabilities.hasLocalLoopback),',
-    '  );',
+    "  const netFetchImpl = typeof hostPort.netFetch === 'function' ? hostPort.netFetch : null;",
     '  const api = assertStatusbarApiPort(createSidecarApiClient({',
     '    baseUrl: hasStaticInitialConnection ? cfg.baseUrl : null,',
     '    token: hasStaticInitialConnection ? cfg.token : null,',
-    '    allowRemoteHttps: isRemoteWeb,',
-    '    netFetchImpl: useNetBroker ? hostPort.netFetch : null,',
+    '    netFetchImpl,',
     '  }));',
     "  const i18n = createInlineI18n('ko');",
     '  let runtimeRef = null;',

@@ -382,11 +382,24 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
     connected: false,
     configured: false,
     isRemoteWeb: true,
+    remoteBridgeConnected: false,
     compacting: false,
     hasSession: false,
     compactPrompt: '',
   });
   assert.equal(view.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+
+  view.renderSnapshot({
+    snap: null,
+    connected: false,
+    configured: false,
+    isRemoteWeb: true,
+    remoteBridgeConnected: true,
+    compacting: false,
+    hasSession: false,
+    compactPrompt: '',
+  });
+  assert.equal(view.ctxBtn.textContent, i18n.t().standby);
   view.setRemoteDockMode(true);
   assert.equal(view.barEl.classList.contains('agy-remote-dock'), true);
   view.setRemoteDockMode(false);
@@ -597,7 +610,7 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
   assert.equal(feedbackNode.variant, 'danger');
   assert.equal(ctxSpec.state.hasFeedback, true);
 
-  // 2. Desktop Settings Page MUST NOT include Remote Sidecar Connection section; Remote Web MUST include it
+  // 2. Desktop Settings Page omits Remote Host Bridge section; Remote Web shows read-only status with zero URL/token inputs
   const desktopSettings = schemas.buildSettingsPageSpec({
     isRemoteWeb: false,
     autoCompact: true,
@@ -608,23 +621,29 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
     ],
     locale: 'ko',
   });
-  assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-sec'), null, 'Desktop settings schema must omit Remote Sidecar Connection');
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-bridge-sec'), null, 'Desktop settings schema must omit Remote Host Bridge section');
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-url'), null);
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-token'), null);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-prompt-count').text, '5 / 1,000');
 
   const remoteSettings = schemas.buildSettingsPageSpec({
     isRemoteWeb: true,
-    remoteUrl: 'https://sidecar.example.com',
-    remoteToken: '',
-    remoteStatusText: '연결됨',
-    remoteStatusErr: false,
+    remoteBridgeBadgeText: 'Host Bridge 미연결',
+    remoteBridgeBadgeVariant: 'warning',
+    remoteBridgeStatusText: i18n.t().remoteBridgeGuideDisconnected,
+    remoteBridgeStatusVariant: 'warning',
     autoCompact: true,
     compactPrompt: '',
     addonsList: [],
     locale: 'ko',
   });
-  assert.ok(findSchemaNode(remoteSettings.tree, 'set-remote-sec'));
-  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-url').inputType, 'text');
-  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-token').inputType, 'password');
+  assert.ok(findSchemaNode(remoteSettings.tree, 'set-remote-bridge-sec'));
+  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-bridge-badge').text, 'Host Bridge 미연결');
+  assert.ok(findSchemaNode(remoteSettings.tree, 'set-remote-bridge-status').text.includes('Host Bridge'));
+  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-url'), null, 'Must NOT render plugin-owned Sidecar URL input');
+  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-token'), null, 'Must NOT render plugin-owned X-Statusbar-Token input');
+  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-connect-btn'), null);
+  assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-disconnect-btn'), null);
 
   // 3. Global Limit Modal schema
   const modalSpec = schemas.buildGlobalLimitModalSpec({
@@ -801,26 +820,42 @@ test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty drafts 
   assert.equal(fakeHost.getSettingsPage(), null);
 });
 
-test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured and handles Remote Web connect/disconnect & validation via Tier-1 settings page', async () => {
+test('TC-UNIT-05b (v3.1.1): bar-controller.mjs shows read-only Host Bridge guidance when offline or on ERR_REMOTE_HOST_NOT_CONNECTED, and renders live data when Host Bridge is connected', async () => {
   const { doc } = createUnitMockDom();
   const i18n = createInlineI18n('ko');
   const barView = createBarView({ doc, i18n });
   const uiSchemas = createDeclarativeUiSchemas({ i18n });
   const fakeHost = createFakeV3HostPort({ surface: 'remote-web' });
 
+  let bridgeConnected = false;
+  let bridgeBaseUrl = '';
   let configured = false;
   let connected = false;
-  let currentUrl = '';
+  let returnBridgeOfflineErr = false;
   let postCount = 0;
-  const savedEvents = [];
-  let clearCount = 0;
   const api = {
     isConfigured: () => configured,
     isConnected: () => connected,
-    getBaseUrl: () => currentUrl,
     abortAll() {},
-    async post() {
+    async post(pathname) {
       postCount += 1;
+      if (returnBridgeOfflineErr) {
+        connected = false;
+        const err = new Error('ERR_REMOTE_HOST_NOT_CONNECTED');
+        err.code = 'ERR_REMOTE_HOST_NOT_CONNECTED';
+        throw err;
+      }
+      connected = true;
+      if (pathname === '/api/snapshot') {
+        return {
+          sessionId: 'sess-remote-unit',
+          usedTokens: 64000,
+          effectiveLimit: 200000,
+          maxContextTokens: 512000,
+          usagePercent: 32,
+          compaction: { inProgress: false, lastError: null },
+        };
+      }
       return {};
     },
   };
@@ -832,7 +867,7 @@ test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured a
     modelLimits: [],
     sessionLimits: new Map(),
     quotaState: null,
-    fallbackSessionId: '',
+    fallbackSessionId: 'sess-remote-unit',
   };
   const addons = createAddonRegistry({ api, onChange() {} });
   const ctrl = createBarController({
@@ -844,32 +879,12 @@ test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured a
     hostPort: fakeHost.hostPort,
     sharedState,
     isRemoteWeb: true,
+    getRemoteBridgeState: () => ({ connected: bridgeConnected, baseUrl: bridgeBaseUrl }),
     onSettingsChanged() {},
     onBurstRequested() {},
-    async onRemoteConnectionSave({ baseUrl, token }) {
-      savedEvents.push({ baseUrl, token });
-      if (baseUrl.startsWith('http://remote.')) {
-        return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
-      }
-      if (token === 'wrong-token-16-chars!') {
-        configured = true;
-        connected = false;
-        currentUrl = baseUrl;
-        return { ok: false, status: 401, code: 'UNAUTHORIZED' };
-      }
-      configured = true;
-      connected = true;
-      currentUrl = baseUrl;
-      return { ok: true, baseUrl };
-    },
-    async onRemoteConnectionClear() {
-      clearCount += 1;
-      configured = false;
-      connected = false;
-      currentUrl = '';
-    },
   });
 
+  // 1. Disconnected Host Bridge: zero polling, bar shows Host Bridge offline, Settings shows read-only guidance
   ctrl.render();
   await ctrl.refreshSnapshot();
   assert.equal(postCount, 0);
@@ -877,37 +892,27 @@ test('TC-UNIT-05b (v3.2.0): bar-controller.mjs skips polling when unconfigured a
   barView.ctxBtn.click();
   const settingsPage = fakeHost.getSettingsPage();
   assert.equal(settingsPage.openFlag, true);
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-url'), null);
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-token'), null);
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-bridge-badge').text, i18n.t().remoteBridgeBadgeOffline);
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-bridge-status').text, i18n.t().remoteBridgeGuideDisconnected);
 
-  // Invalid URL
-  settingsPage.spec.onChange({ field: 'remoteUrl', value: 'http://remote.example:8080' });
-  settingsPage.spec.onChange({ field: 'remoteToken', value: TEST_TOKEN });
-  settingsPage.spec.onAction({ actionId: 'remote-connect' });
-  await flush();
-  assert.equal(findSchemaNode(settingsPage.tree, 'set-feedback').text, i18n.t().remoteInvalidUrl);
+  // 2. Host Bridge connected + Sidecar active: renders snapshot and connected status
+  bridgeConnected = true;
+  bridgeBaseUrl = 'http://127.0.0.1:19384';
+  configured = true;
+  await ctrl.refreshSnapshot();
+  assert.equal(postCount, 1);
+  assert.ok(barView.ctxBtn.textContent.includes('64.0K'));
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-bridge-badge').text, i18n.t().remoteBridgeBadgeConnected);
+  assert.ok(findSchemaNode(settingsPage.tree, 'set-remote-bridge-status').text.includes('http://127.0.0.1:19384'));
 
-  // 401 auth error
-  settingsPage.spec.onChange({ field: 'remoteUrl', value: 'https://sidecar.example.com' });
-  settingsPage.spec.onChange({ field: 'remoteToken', value: 'wrong-token-16-chars!' });
-  settingsPage.spec.onAction({ actionId: 'remote-connect' });
-  await flush();
-  assert.equal(
-    findSchemaNode(settingsPage.tree, 'set-feedback').text,
-    i18n.formatTemplate(i18n.t().remoteAuthFailed, { status: 401 }),
-  );
-
-  // Valid HTTPS connection + disconnect
-  settingsPage.spec.onChange({ field: 'remoteUrl', value: 'https://sidecar.example.com' });
-  settingsPage.spec.onChange({ field: 'remoteToken', value: TEST_TOKEN });
-  settingsPage.spec.onAction({ actionId: 'remote-connect' });
-  await flush();
-  assert.ok(findSchemaNode(settingsPage.tree, 'set-remote-status').text.includes('https://sidecar.example.com'));
-  assert.equal(savedEvents.length, 3);
-
-  settingsPage.spec.onAction({ actionId: 'remote-disconnect' });
-  await flush();
-  assert.equal(clearCount, 1);
-  assert.equal(configured, false);
+  // 3. Runtime ERR_REMOTE_HOST_NOT_CONNECTED clears stale snapshot and displays Host Bridge guidance
+  returnBridgeOfflineErr = true;
+  await ctrl.refreshSnapshot();
   assert.equal(barView.ctxBtn.textContent, i18n.t().remoteSetupNeeded);
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-bridge-badge').text, i18n.t().remoteBridgeBadgeOffline);
+  assert.equal(findSchemaNode(settingsPage.tree, 'set-remote-bridge-status').text, i18n.t().remoteBridgeGuideDisconnected);
 
   ctrl.destroy();
 });
@@ -1287,6 +1292,12 @@ test('TC-UNIT-06b: subagent views stay pinned without fallback fluctuation, fail
     const fakeHost = createFakeV3HostPort({ surface: 'remote-web' });
     const hostPort = {
       ...fakeHost.hostPort,
+      capabilities: {
+        hasLocalLoopback: true,
+        hasRemoteHostBridge: true,
+        hasNetHttps: false,
+        hasSettingsBridge: true,
+      },
       mountSlot() {
         doc.body.appendChild(slotEl);
         return slotEl;

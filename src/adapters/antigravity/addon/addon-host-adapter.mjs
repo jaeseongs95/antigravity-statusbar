@@ -49,11 +49,24 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
   const envObj = addonHost.env && typeof addonHost.env === 'object' ? addonHost.env : {};
   const surface = envObj.surface === 'remote-web' ? 'remote-web' : 'desktop';
   const capabilities = Object.freeze({
-    hasLocalLoopback: Boolean(envObj.capabilities?.hasLocalLoopback),
-    hasNetHttps: Boolean(envObj.capabilities?.hasNetHttps),
-    hasConfigBridge: Boolean(envObj.capabilities?.hasConfigBridge),
-    hasSettingsBridge: Boolean(envObj.capabilities?.hasSettingsBridge),
-    hasDocumentTransform: Boolean(envObj.capabilities?.hasDocumentTransform),
+    get hasLocalLoopback() {
+      return Boolean(addonHost.env?.capabilities?.hasLocalLoopback);
+    },
+    get hasRemoteHostBridge() {
+      return Boolean(addonHost.env?.capabilities?.hasRemoteHostBridge);
+    },
+    get hasNetHttps() {
+      return Boolean(addonHost.env?.capabilities?.hasNetHttps);
+    },
+    get hasConfigBridge() {
+      return Boolean(addonHost.env?.capabilities?.hasConfigBridge);
+    },
+    get hasSettingsBridge() {
+      return Boolean(addonHost.env?.capabilities?.hasSettingsBridge);
+    },
+    get hasDocumentTransform() {
+      return Boolean(addonHost.env?.capabilities?.hasDocumentTransform);
+    },
   });
 
   let lastMountTarget = undefined;

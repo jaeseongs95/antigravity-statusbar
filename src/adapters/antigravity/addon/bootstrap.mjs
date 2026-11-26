@@ -3,11 +3,13 @@
  *
  * API-First Architecture:
  * - Branches strictly on `hostPort.surface === 'remote-web'` (NEVER raw `hostProfileId`).
+ * - Uses Native Host v3.1.1 centralized Remote Host Bridge on Remote Web (`hasRemoteHostBridge`,
+ *   `hasLocalLoopback`, `host:remote-bridge-changed`, `ctx.settingsBridge`, `ctx.net.fetch`),
+ *   identical to Desktop's `localLoopback` + `settingsBridge` path (zero plugin-owned remote URL/token storage).
  * - Provides well-known service `host.statusbar` (`allowedCallers: ["*"]`) via `ctx.services.provide`
  *   so other plugins calling `ctx.ui.registerStatusItem(...)` render seamlessly on this statusbar.
  * - Registers Tier-1 commands (`open-settings`, `open-global-limits`, `refresh-quota`, `compact-now`)
  *   and Tier-1 unified settings page across both Desktop and Remote Web.
- * - Uses `ctx.storage` (KV + `onDidChange`) for browser-local Remote Web connection & locale state.
  * - Syncs `ctx.theme` (`getTokenCss()` + `onDidChange`) into the Tier-3 statusbar canvas style.
  * - Uses `ctx.lifecycle.signal` (`AbortSignal`), `addManagedListener`, and `onDispose` for cleanup.
  */
@@ -35,7 +37,6 @@ export function startAddonStatusbar({
   const QUOTA_FOCUS_THROTTLE_MS = pollConfig.quotaFocusThrottleMs || 3000;
   const MAX_BURST_MS = pollConfig.maxBurstMs || 20000;
   const DOM_DEBOUNCE_MS = pollConfig.domDebounceMs || 150;
-  const REMOTE_STORAGE_KEY = 'remoteConnection';
 
   let disposed = false;
   let burstUntil = 0;
@@ -48,12 +49,34 @@ export function startAddonStatusbar({
   let observer = null;
   let unsubscribeSettings = null;
   let unsubscribeTheme = null;
-  let unsubscribeStorage = null;
+  let unsubscribeRemoteBridge = null;
   let statusbarServiceHandle = null;
   const hostDisposables = [];
   let currentSlotEl = null;
   let activeBoxEl = null;
   let preferredBoxEl = null;
+
+  const remoteBridgeState = {
+    eventConnected: null,
+    baseUrl: '',
+  };
+
+  function isRemoteBridgeConnected() {
+    if (!isRemoteWeb) return true;
+    if (typeof remoteBridgeState.eventConnected === 'boolean') {
+      return remoteBridgeState.eventConnected;
+    }
+    return Boolean(
+      hostPort.capabilities?.hasRemoteHostBridge || hostPort.capabilities?.hasLocalLoopback,
+    );
+  }
+
+  function getRemoteBridgeState() {
+    return {
+      connected: isRemoteBridgeConnected(),
+      baseUrl: remoteBridgeState.baseUrl,
+    };
+  }
 
   const CONVERSATION_VIEW_TESTIDS = new Set([
     'conversation-view',
@@ -73,6 +96,11 @@ export function startAddonStatusbar({
 
   function isApiConfigured() {
     return typeof api.isConfigured === 'function' ? Boolean(api.isConfigured()) : true;
+  }
+
+  function canPollSidecar() {
+    if (isRemoteWeb && !isRemoteBridgeConnected()) return false;
+    return isApiConfigured();
   }
 
   function applyThemeAndStyles() {
@@ -159,100 +187,6 @@ export function startAddonStatusbar({
     }, delay);
   }
 
-  async function persistRemoteConnection(payload) {
-    if (hostPort.storage && typeof hostPort.storage.set === 'function') {
-      await hostPort.storage.set(REMOTE_STORAGE_KEY, payload);
-      return { ok: true };
-    }
-    if (typeof hostPort.saveSettings === 'function') {
-      return await hostPort.saveSettings(payload);
-    }
-    return { ok: true };
-  }
-
-  async function clearRemoteConnectionStorage() {
-    if (hostPort.storage && typeof hostPort.storage.delete === 'function') {
-      await hostPort.storage.delete(REMOTE_STORAGE_KEY);
-      return;
-    }
-    if (typeof hostPort.saveSettings === 'function') {
-      await hostPort.saveSettings({
-        remoteBaseUrl: '',
-        remoteToken: '',
-        locale: i18n.getLocale(),
-      });
-    }
-  }
-
-  async function handleRemoteConnectionSave({ baseUrl, token }) {
-    if (!isRemoteWeb || typeof api.configure !== 'function') {
-      return { ok: false, code: 'ERR_REMOTE_UNAVAILABLE' };
-    }
-    const cleanToken = typeof token === 'string' ? token.trim() : '';
-    try {
-      api.configure({ baseUrl, token: cleanToken });
-    } catch (err) {
-      const msg = err?.message || '';
-      if (msg === 'ERR_INVALID_ENDPOINT_URL' || msg === 'ERR_INVALID_LOOPBACK_BASE_URL') {
-        return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
-      }
-      if (msg === 'ERR_INVALID_SIDECAR_TOKEN') {
-        return { ok: false, code: 'ERR_INVALID_SIDECAR_TOKEN' };
-      }
-      return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL', message: msg };
-    }
-
-    const normalizedUrl = typeof api.getBaseUrl === 'function' ? api.getBaseUrl() : baseUrl;
-    try {
-      const saveRes = await persistRemoteConnection({
-        remoteBaseUrl: normalizedUrl,
-        remoteToken: cleanToken,
-        locale: i18n.getLocale(),
-      });
-      if (saveRes && saveRes.ok === false) {
-        if (typeof api.clearConnection === 'function') api.clearConnection();
-        return {
-          ok: false,
-          code: 'ERR_SAVE_SETTINGS_FAILED',
-          reason: saveRes.reason || 'ERR_SETTINGS_SAVE_FAILED',
-        };
-      }
-    } catch (saveErr) {
-      if (typeof api.clearConnection === 'function') api.clearConnection();
-      return {
-        ok: false,
-        code: 'ERR_SAVE_SETTINGS_FAILED',
-        reason: saveErr?.message || 'ERR_SETTINGS_SAVE_FAILED',
-      };
-    }
-
-    try {
-      const settings = await api.post('/api/settings/get', {});
-      applySettingsPayload(settings);
-      pollQuotaAndSettings();
-      pollSessionsAndSnapshots();
-      return { ok: true, baseUrl: normalizedUrl };
-    } catch (connErr) {
-      return {
-        ok: false,
-        status: connErr?.status,
-        code: connErr?.code || 'ERR_UNREACHABLE',
-        message: connErr?.message || 'Unable to reach Sidecar',
-      };
-    }
-  }
-
-  async function handleRemoteConnectionClear() {
-    if (typeof api.clearConnection === 'function') {
-      api.clearConnection();
-    }
-    if (isRemoteWeb) {
-      try {
-        await clearRemoteConnectionStorage();
-      } catch {}
-    }
-  }
-
   const controller = createBarControllerFn({
     api,
     i18n,
@@ -262,6 +196,7 @@ export function startAddonStatusbar({
     hostPort,
     sharedState,
     isRemoteWeb,
+    getRemoteBridgeState,
     onSettingsChanged(updated) {
       applySettingsPayload(updated);
       controller.render();
@@ -270,79 +205,75 @@ export function startAddonStatusbar({
       burstUntil = Date.now() + MAX_BURST_MS;
       scheduleSnapshotPoll();
     },
-    onRemoteConnectionSave: isRemoteWeb ? handleRemoteConnectionSave : null,
-    onRemoteConnectionClear: isRemoteWeb ? handleRemoteConnectionClear : null,
   });
 
-  function applyRemoteConnectionData(data, { triggerPoll = true } = {}) {
-    if (disposed || !isRemoteWeb) return;
-    if (!data || typeof data !== 'object') {
+  function applyHostSettingsBridgeSnapshot(snap, { triggerPoll = true } = {}) {
+    if (disposed) return;
+    if (!snap || typeof snap !== 'object') return;
+    if (isRemoteWeb && snap.persistence === 'packed-initial') return;
+    const data = snap.data && typeof snap.data === 'object' ? snap.data : null;
+    if (snap.status !== 'ok' || !data) return;
+
+    if (
+      data.mode === 'active' &&
+      typeof data.baseUrl === 'string' &&
+      typeof data.token === 'string' &&
+      typeof api.configure === 'function'
+    ) {
+      try {
+        const changed = api.configure({ baseUrl: data.baseUrl, token: data.token });
+        if (changed && triggerPoll && canPollSidecar()) {
+          pollQuotaAndSettings();
+          pollSessionsAndSnapshots();
+        }
+      } catch {}
+    } else if (data.mode === 'standby' && !hasStaticInitialConnection) {
       if (typeof api.clearConnection === 'function') {
         const cleared = api.clearConnection();
         if (cleared && typeof controller.resetConnectionState === 'function') {
           controller.resetConnectionState();
         }
       }
-      controller.render();
-      return;
-    }
-    if (data.locale === 'ko' || data.locale === 'en') {
-      i18n.setLocale(data.locale);
-    }
-    const nextUrl = typeof data.remoteBaseUrl === 'string' ? data.remoteBaseUrl.trim() : '';
-    const nextToken = typeof data.remoteToken === 'string' ? data.remoteToken.trim() : '';
-    if (nextUrl && nextToken.length >= 16 && typeof api.configure === 'function') {
-      try {
-        const changed = api.configure({ baseUrl: nextUrl, token: nextToken });
-        if (changed && triggerPoll) {
-          pollQuotaAndSettings();
-          pollSessionsAndSnapshots();
-        }
-      } catch {}
-    } else if (typeof api.clearConnection === 'function') {
-      const cleared = api.clearConnection();
-      if (cleared && typeof controller.resetConnectionState === 'function') {
-        controller.resetConnectionState();
-      }
     }
     controller.render();
   }
 
-  function applyHostSettingsBridgeSnapshot(snap, { triggerPoll = true } = {}) {
-    if (disposed) return;
-    if (!snap || typeof snap !== 'object') return;
-    const data = snap.data && typeof snap.data === 'object' ? snap.data : null;
+  function handleRemoteBridgeChanged(payload) {
+    if (disposed || !isRemoteWeb) return;
+    const hasExplicitFlag = payload && typeof payload.connected === 'boolean';
+    remoteBridgeState.eventConnected = hasExplicitFlag
+      ? payload.connected
+      : Boolean(
+          hostPort.capabilities?.hasRemoteHostBridge || hostPort.capabilities?.hasLocalLoopback,
+        );
+    remoteBridgeState.baseUrl =
+      payload && typeof payload.baseUrl === 'string' ? payload.baseUrl.trim() : '';
 
-    if (isRemoteWeb) {
-      if (snap.persistence === 'packed-initial') return;
-      if (snap.status !== 'ok' || !data) return;
-      applyRemoteConnectionData(data, { triggerPoll });
-      return;
-    }
-
-    if (snap.status === 'ok' && data) {
-      if (
-        data.mode === 'active' &&
-        typeof data.baseUrl === 'string' &&
-        typeof data.token === 'string' &&
-        typeof api.configure === 'function'
-      ) {
+    if (isRemoteBridgeConnected()) {
+      if (typeof hostPort.getSettings === 'function') {
         try {
-          const changed = api.configure({ baseUrl: data.baseUrl, token: data.token });
-          if (changed && triggerPoll) {
-            pollQuotaAndSettings();
-            pollSessionsAndSnapshots();
-          }
+          applyHostSettingsBridgeSnapshot(hostPort.getSettings(), { triggerPoll: false });
         } catch {}
-      } else if (data.mode === 'standby' && !hasStaticInitialConnection) {
-        if (typeof api.clearConnection === 'function') {
-          const cleared = api.clearConnection();
-          if (cleared && typeof controller.resetConnectionState === 'function') {
-            controller.resetConnectionState();
-          }
-        }
       }
-      controller.render();
+      if (typeof controller.resetConnectionState === 'function') {
+        controller.resetConnectionState();
+      }
+      if (canPollSidecar()) {
+        pollQuotaAndSettings();
+        pollSessionsAndSnapshots();
+      } else {
+        controller.render();
+      }
+    } else {
+      api.abortAll();
+      if (typeof api.clearConnection === 'function') {
+        api.clearConnection();
+      }
+      if (typeof controller.resetConnectionState === 'function') {
+        controller.resetConnectionState();
+      } else {
+        controller.render();
+      }
     }
   }
 
@@ -551,7 +482,7 @@ export function startAddonStatusbar({
       domActivityTimer = null;
       if (disposed) return;
       mountToActiveBox();
-      if (isApiConfigured()) {
+      if (canPollSidecar()) {
         controller.refreshSnapshot();
       }
     }, DOM_DEBOUNCE_MS);
@@ -574,7 +505,7 @@ export function startAddonStatusbar({
   }
 
   async function refreshQuotaNow({ forceRefresh = false } = {}) {
-    if (disposed || !isApiConfigured() || quotaInFlight) return;
+    if (disposed || !canPollSidecar() || quotaInFlight) return;
     quotaInFlight = true;
     lastQuotaRefreshAt = Date.now();
     try {
@@ -589,7 +520,7 @@ export function startAddonStatusbar({
   async function pollSessionsAndSnapshots() {
     if (disposed) return;
     mountToActiveBox();
-    if (!isApiConfigured()) {
+    if (!canPollSidecar()) {
       controller.render();
       return;
     }
@@ -626,7 +557,7 @@ export function startAddonStatusbar({
   }
 
   async function pollQuotaAndSettings() {
-    if (disposed || !isApiConfigured()) return;
+    if (disposed || !canPollSidecar()) return;
     try {
       const settings = await api.post('/api/settings/get', {}, hostPort.lifecycleSignal || undefined);
       applySettingsPayload(settings);
@@ -696,14 +627,14 @@ export function startAddonStatusbar({
     }
   };
   const onQuotaFocusOrVisible = () => {
-    if (disposed || !isApiConfigured()) return;
+    if (disposed || !canPollSidecar()) return;
     if (doc && doc.hidden === true) return;
     const now = Date.now();
     if (now - lastQuotaRefreshAt < QUOTA_FOCUS_THROTTLE_MS) return;
     refreshQuotaNow({ forceRefresh: true });
   };
   const onQuotaClick = () => {
-    if (disposed || !isApiConfigured()) return;
+    if (disposed || !canPollSidecar()) return;
     refreshQuotaNow({ forceRefresh: true });
   };
 
@@ -743,7 +674,7 @@ export function startAddonStatusbar({
       }
       if (sawCascadeAttr) {
         mountToActiveBox();
-        if (isApiConfigured()) controller.refreshSnapshot();
+        if (canPollSidecar()) controller.refreshSnapshot();
       } else if (sawExternalChange) {
         mountToActiveBox();
         triggerImmediateActivityRefresh();
@@ -793,7 +724,7 @@ export function startAddonStatusbar({
         id: 'refresh-quota',
         label: `${i18n.t().settingsTitle}: ${i18n.t().reloadNow}`,
         run() {
-          if (!disposed && isApiConfigured()) {
+          if (!disposed && canPollSidecar()) {
             refreshQuotaNow({ forceRefresh: true });
           }
         },
@@ -802,7 +733,7 @@ export function startAddonStatusbar({
         id: 'compact-now',
         label: `${i18n.t().settingsTitle}: /compact`,
         run() {
-          if (!disposed && isApiConfigured() && typeof controller.triggerCompact === 'function') {
+          if (!disposed && canPollSidecar() && typeof controller.triggerCompact === 'function') {
             controller.triggerCompact();
           }
         },
@@ -820,26 +751,17 @@ export function startAddonStatusbar({
     }
   }
 
-  // Remote Web: restore browser-local Sidecar connection via `ctx.storage`
-  if (isRemoteWeb && hostPort.storage && typeof hostPort.storage.get === 'function') {
-    Promise.resolve(hostPort.storage.get(REMOTE_STORAGE_KEY))
-      .then((saved) => {
-        if (!disposed && saved && typeof saved === 'object') {
-          applyRemoteConnectionData(saved, { triggerPoll: true });
-        }
-      })
-      .catch(() => {});
-    if (typeof hostPort.storage.onDidChange === 'function') {
-      try {
-        unsubscribeStorage = hostPort.storage.onDidChange((ev) => {
-          if (disposed || !ev || ev.key !== REMOTE_STORAGE_KEY) return;
-          applyRemoteConnectionData(ev.newValue || null, { triggerPoll: true });
-        });
-      } catch {}
-    }
+  // Subscribe to Native Host v3.1.1 central Remote Host Bridge transitions on Remote Web
+  if (isRemoteWeb && hostPort.events && typeof hostPort.events.on === 'function') {
+    try {
+      const unsub = hostPort.events.on('host:remote-bridge-changed', handleRemoteBridgeChanged);
+      if (typeof unsub === 'function') {
+        unsubscribeRemoteBridge = unsub;
+      }
+    } catch {}
   }
 
-  // Optional host settingsBridge subscription (Desktop live Sidecar credentials once exposed by host Gap #1)
+  // Host settingsBridge subscription (Desktop + Remote Web via Native Host v3.1.1 central Host Bridge)
   if (typeof hostPort.getSettings === 'function') {
     try {
       applyHostSettingsBridgeSnapshot(hostPort.getSettings(), { triggerPoll: false });
@@ -875,11 +797,11 @@ export function startAddonStatusbar({
       } catch {}
       unsubscribeTheme = null;
     }
-    if (typeof unsubscribeStorage === 'function') {
+    if (typeof unsubscribeRemoteBridge === 'function') {
       try {
-        unsubscribeStorage();
+        unsubscribeRemoteBridge();
       } catch {}
-      unsubscribeStorage = null;
+      unsubscribeRemoteBridge = null;
     }
     if (statusbarServiceHandle && typeof statusbarServiceHandle.dispose === 'function') {
       try {
@@ -917,7 +839,7 @@ export function startAddonStatusbar({
   hostPort.onDispose(dispose);
 
   mountToActiveBox();
-  if (isApiConfigured()) {
+  if (canPollSidecar()) {
     pollQuotaAndSettings();
     pollSessionsAndSnapshots();
   } else {

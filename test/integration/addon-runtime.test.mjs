@@ -244,7 +244,7 @@ function findNodeById(tree, id) {
   return null;
 }
 
-function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', netHandler = null, dockEl = null, settingsBridge = null } = {}) {
+function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', remoteBridgeConnected = false, netHandler = null, dockEl = null, settingsBridge = null } = {}) {
   const pluginId = 'antigravity-statusbar';
   const allowedSlotId = 'antigravity-statusbar.root';
   const slots = new Map();
@@ -256,9 +256,11 @@ function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', netHa
   const modals = [];
   const commands = new Map();
   const services = new Map();
+  const eventListeners = new Map();
   const storageMap = new Map();
   const storageListeners = new Set();
   const mountLog = [];
+  let bridgeConnectedFlag = surface === 'remote-web' && Boolean(remoteBridgeConnected);
   let settingsPage = null;
   let disposed = false;
   const abortCtrl = new AbortController();
@@ -276,7 +278,12 @@ function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', netHa
       surface,
       layoutMode: 'desktop',
       capabilities: Object.freeze({
-        hasLocalLoopback: surface === 'desktop' && typeof netHandler === 'function',
+        get hasLocalLoopback() {
+          return (surface === 'desktop' && typeof netHandler === 'function') || (surface === 'remote-web' && bridgeConnectedFlag);
+        },
+        get hasRemoteHostBridge() {
+          return surface === 'remote-web' && bridgeConnectedFlag;
+        },
         hasNetHttps: false,
         hasConfigBridge: false,
         hasSettingsBridge: Boolean(settingsBridge),
@@ -438,6 +445,19 @@ function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', netHa
         return Object.freeze({ dispose() { services.delete(name); } });
       },
     }),
+    events: Object.freeze({
+      on(topic, handler) {
+        if (!eventListeners.has(topic)) eventListeners.set(topic, new Set());
+        eventListeners.get(topic).add(handler);
+        return () => eventListeners.get(topic)?.delete(handler);
+      },
+      emit(topic, payload) {
+        const set = eventListeners.get(topic);
+        if (!set) return 0;
+        for (const fn of Array.from(set)) fn(payload, { topic, sourcePluginId: '__host__' });
+        return set.size;
+      },
+    }),
     ...(typeof netHandler === 'function'
       ? {
           net: Object.freeze({
@@ -490,6 +510,10 @@ function createMockAddonContextV3(doc, MockElement, { surface = 'desktop', netHa
     services,
     storageMap,
     mountLog,
+    setRemoteBridgeConnected(next, baseUrl = '') {
+      bridgeConnectedFlag = Boolean(next);
+      ctx.events.emit('host:remote-bridge-changed', { connected: bridgeConnectedFlag, baseUrl: baseUrl || null });
+    },
     getSettingsPage: () => settingsPage,
     isDisposed: () => disposed,
   };
@@ -652,7 +676,8 @@ test('TC-ADDON-06, TC-ADDON-07 & TC-ADDON-08: bundled v3 renderer uses AddonCont
     const settingsPage = host.getSettingsPage();
     assert.ok(settingsPage);
     settingsPage.open();
-    assert.equal(findNodeById(settingsPage.tree, 'set-remote-sec'), null, 'Desktop settings must omit Remote Sidecar Connection');
+    assert.equal(findNodeById(settingsPage.tree, 'set-remote-bridge-sec'), null, 'Desktop settings must omit Remote Host Bridge section');
+    assert.equal(findNodeById(settingsPage.tree, 'set-remote-url'), null);
 
     failNextAutoCompact = true;
     settingsPage.spec.onChange({ field: 'autoCompact', value: false });
@@ -713,7 +738,7 @@ test('TC-ADDON-08: v3 standby stub mounts via AddonContextV3 with zero credentia
   assert.equal(host.styles.size, 0);
 });
 
-test('TC-ADDON-10b (v3.0.0): Remote Web static bundle falls back to host status-bar dock, uses ctx.storage for credentials, and registers unified settings & commands', async () => {
+test('TC-ADDON-10b (v3.1.1): Remote Web static bundle falls back to host dock, shows read-only Host Bridge guidance when offline, and transparently routes loopback via ctx.net.fetch + host:remote-bridge-changed', async () => {
   const staticSource = renderAddonRendererBundle();
   assert.equal(staticSource, renderAddonStaticBundle());
   assert.equal(/http:\/\/127\.0\.0\.1:\d+/.test(staticSource), false);
@@ -723,9 +748,56 @@ test('TC-ADDON-10b (v3.0.0): Remote Web static bundle falls back to host status-
   const remoteDock = new MockElement('div', doc);
   doc.body.appendChild(remoteDock);
 
-  const host = createMockAddonContextV3(doc, MockElement, { surface: 'remote-web', dockEl: remoteDock });
-  const remoteToken = 'remote-web-user-token-32-charsok';
-  const fetchLog = [];
+  const netLog = [];
+  let currentSettingsSnap = null;
+  const settingsSubs = new Set();
+  const settingsBridge = {
+    getSnapshot: () => currentSettingsSnap,
+    onDidChange(cb) {
+      settingsSubs.add(cb);
+      return () => settingsSubs.delete(cb);
+    },
+    async save(next) {
+      currentSettingsSnap = { status: 'ok', data: next };
+      for (const cb of settingsSubs) cb(currentSettingsSnap);
+      return { ok: true, snapshot: currentSettingsSnap };
+    },
+  };
+
+  const host = createMockAddonContextV3(doc, MockElement, {
+    surface: 'remote-web',
+    remoteBridgeConnected: false,
+    dockEl: remoteDock,
+    settingsBridge,
+    netHandler: async (url, init) => {
+      netLog.push({ url, token: init?.headers?.['x-statusbar-token'] });
+      if (!host.ctx.env.capabilities.hasRemoteHostBridge) {
+        return { ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+      }
+      const pathname = new URL(url).pathname;
+      if (pathname === '/api/settings/get') {
+        return { ok: true, status: 200, bodyText: JSON.stringify({ locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }) };
+      }
+      if (pathname === '/api/quota') {
+        return { ok: true, status: 200, bodyText: JSON.stringify({ available: false, groups: [], stale: false }) };
+      }
+      if (pathname === '/api/sessions') {
+        return { ok: true, status: 200, bodyText: JSON.stringify({ sessions: [{ sessionId: 'sess-remote-1' }] }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        bodyText: JSON.stringify({
+          sessionId: 'sess-remote-1',
+          usedTokens: 75000,
+          effectiveLimit: 250000,
+          maxContextTokens: 512000,
+          usagePercent: 30,
+          compaction: { inProgress: false, lastError: null },
+        }),
+      };
+    },
+  });
 
   vm.runInNewContext(`(function(addonHost){\n${staticSource}\n})(addonHost);`, {
     window: { innerWidth: 1280, innerHeight: 800, location: { reload() {} } },
@@ -737,61 +809,44 @@ test('TC-ADDON-10b (v3.0.0): Remote Web static bundle falls back to host status-
     clearTimeout,
     setInterval,
     clearInterval,
-    fetch: async (url, init) => {
-      fetchLog.push({ url, token: init.headers['x-statusbar-token'] });
-      const pathname = new URL(url).pathname;
-      if (pathname === '/api/settings/get') {
-        return { ok: true, status: 200, async json() { return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }; } };
-      }
-      if (pathname === '/api/quota') {
-        return { ok: true, status: 200, async json() { return { available: false, groups: [], stale: false }; } };
-      }
-      if (pathname === '/api/sessions') {
-        return { ok: true, status: 200, async json() { return { sessions: [{ sessionId: 'sess-remote-1' }] }; } };
-      }
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            sessionId: 'sess-remote-1',
-            usedTokens: 75000,
-            effectiveLimit: 250000,
-            maxContextTokens: 512000,
-            usagePercent: 30,
-            compaction: { inProgress: false, lastError: null },
-          };
-        },
-      };
-    },
   });
 
   try {
     await flushMicrotasks();
-    assert.equal(fetchLog.length, 0);
+    assert.equal(netLog.length, 0, 'Offline Host Bridge must issue zero Sidecar calls');
     const rootRec = host.slots.get('antigravity-statusbar.root');
     assert.equal(rootRec.container, remoteDock);
     assert.equal(rootRec.rootEl.querySelector('.agy-inline-statusbar').classList.contains('agy-remote-dock'), true);
     assert.equal(host.commands.has('open-settings'), true);
 
-    // Click bar -> opens unified settings page with Remote Sidecar Connection section
+    // Click bar while offline -> opens Settings with read-only Host Bridge guidance and ZERO URL/token inputs
     rootRec.rootEl.querySelector('.agy-inline-metric-btn').click();
     const settingsPage = host.getSettingsPage();
     assert.equal(settingsPage.openFlag, true);
-    assert.ok(findNodeById(settingsPage.tree, 'set-remote-sec'));
+    assert.ok(findNodeById(settingsPage.tree, 'set-remote-bridge-sec'));
+    assert.equal(findNodeById(settingsPage.tree, 'set-remote-url'), null);
+    assert.equal(findNodeById(settingsPage.tree, 'set-remote-token'), null);
+    assert.ok(findNodeById(settingsPage.tree, 'set-remote-bridge-status').text.includes('Host Bridge'));
 
-    settingsPage.spec.onChange({ field: 'remoteUrl', value: 'https://my-sidecar.example.com:8443' });
-    settingsPage.spec.onChange({ field: 'remoteToken', value: remoteToken });
-    settingsPage.spec.onAction({ actionId: 'remote-connect' });
+    // Native Host pairs Remote Bridge -> pushes settingsBridge snapshot + emits host:remote-bridge-changed
+    await settingsBridge.save({
+      mode: 'active',
+      baseUrl: 'http://127.0.0.1:43210',
+      token: TEST_TOKEN,
+    });
+    host.setRemoteBridgeConnected(true, 'http://127.0.0.1:19384');
     await flushMicrotasks();
 
-    assert.equal(host.storageMap.get('remoteConnection')?.remoteBaseUrl, 'https://my-sidecar.example.com:8443');
-    assert.ok(fetchLog.some((r) => r.url === 'https://my-sidecar.example.com:8443/api/settings/get' && r.token === remoteToken));
+    assert.equal(host.storageMap.size, 0, 'Plugin must never store remote URL/token in ctx.storage');
+    assert.ok(netLog.some((r) => r.url === 'http://127.0.0.1:43210/api/snapshot' && r.token === TEST_TOKEN));
     assert.ok(rootRec.rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('75.0K'));
+    assert.ok(findNodeById(settingsPage.tree, 'set-remote-bridge-badge').text.includes('연결됨'));
 
-    settingsPage.spec.onAction({ actionId: 'remote-disconnect' });
+    // Native Host disconnects Remote Bridge -> clears snapshot & shows Host Bridge offline guidance
+    host.setRemoteBridgeConnected(false, '');
     await flushMicrotasks();
-    assert.equal(host.storageMap.has('remoteConnection'), false);
+    assert.ok(rootRec.rootEl.querySelector('.agy-inline-metric-btn').textContent.includes('Host Bridge'));
+    assert.ok(findNodeById(settingsPage.tree, 'set-remote-bridge-badge').text.includes('미연결'));
   } finally {
     host.ctx.lifecycle.dispose();
   }

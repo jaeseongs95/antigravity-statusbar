@@ -133,6 +133,7 @@ export function createBarView({ doc, i18n }) {
     connected,
     configured = true,
     isRemoteWeb = false,
+    remoteBridgeConnected = true,
     compacting,
     hasSession,
     compactPrompt,
@@ -141,7 +142,8 @@ export function createBarView({ doc, i18n }) {
     const tr = i18n.t();
     const isBackendCompacting = Boolean(snap?.compaction?.inProgress);
     const isCompactingNow = Boolean(compacting || isBackendCompacting);
-    compactBtn.disabled = isCompactingNow || !hasSession || !configured;
+    const effectiveConfigured = Boolean(configured && (!isRemoteWeb || remoteBridgeConnected));
+    compactBtn.disabled = isCompactingNow || !hasSession || !effectiveConfigured;
     setText(compactBtn, isCompactingNow ? tr.compacting : tr.compact);
     compactBtn.title = compactPrompt ? `/compact ${compactPrompt}` : '/compact';
     settingsBtn.setAttribute('aria-label', tr.settingsTitle);
@@ -166,8 +168,10 @@ export function createBarView({ doc, i18n }) {
     }
 
     if (!snap) {
-      if (!configured) {
-        setText(ctxTextEl, isRemoteWeb ? tr.remoteSetupNeeded : tr.standby);
+      if (isRemoteWeb && !remoteBridgeConnected) {
+        setText(ctxTextEl, tr.remoteSetupNeeded);
+      } else if (!configured) {
+        setText(ctxTextEl, tr.standby);
       } else {
         setText(ctxTextEl, connected ? `${tr.ctx} --` : tr.connecting);
       }

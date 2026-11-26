@@ -679,11 +679,12 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
     await waitFor("window.__e2eShadows.popover.querySelector('[data-ag-node-id=\"ctx-feedback\"]')?.textContent?.includes('저장')");
     assert.deepEqual(settingsUpdates[0], { sessionLimit: { sessionId: 'sess-e2e-1', limit: 32_000 } });
 
-    // 5. Tier-1 Desktop Settings Page must NEVER render Remote Sidecar Connection
+    // 5. Tier-1 Desktop Settings Page must NEVER render Remote Host Bridge or plugin-owned Remote Sidecar inputs
     await evalExpr("window.__e2eShadows.popover.querySelector('[data-ag-node-id=\"ctx-open-settings-btn\"]').click()");
     await waitFor("Boolean(window.__e2eShadows.settings)");
     const desktopSettingsText = await evalExpr("window.__e2eShadows.settings.textContent");
     assert.equal(desktopSettingsText.includes('원격 Sidecar 연결'), false);
+    assert.equal(desktopSettingsText.includes('원격 호스트 브리지'), false);
 
     // 6. Tier-2 Global Limits Modal: Delete button retains focus across 2+ live poll ticks via ID in-place patching
     await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-open-global-btn\"]').click()");

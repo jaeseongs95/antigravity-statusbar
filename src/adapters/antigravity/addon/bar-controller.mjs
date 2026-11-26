@@ -19,10 +19,9 @@ export function createBarController({
   hostPort,
   sharedState,
   isRemoteWeb = false,
+  getRemoteBridgeState = null,
   onSettingsChanged,
   onBurstRequested,
-  onRemoteConnectionSave = null,
-  onRemoteConnectionClear = null,
   presets,
 }) {
   const PRESETS =
@@ -74,9 +73,6 @@ export function createBarController({
       feedbackIsErr: false,
     },
     settingsDraft: {
-      remoteUrl: '',
-      remoteUrlDirty: false,
-      remoteToken: '',
       compactPrompt: '',
       promptDirty: false,
       syncedPromptVal: null,
@@ -89,8 +85,28 @@ export function createBarController({
     return typeof api.isConfigured === 'function' ? Boolean(api.isConfigured()) : true;
   }
 
-  function getApiBaseUrl() {
-    return typeof api.getBaseUrl === 'function' ? api.getBaseUrl() : '';
+  function readRemoteBridgeState() {
+    if (!isRemoteWeb) {
+      return { connected: true, baseUrl: '' };
+    }
+    const baseState =
+      typeof getRemoteBridgeState === 'function'
+        ? getRemoteBridgeState()
+        : {
+            connected: Boolean(
+              hostPort?.capabilities?.hasRemoteHostBridge || hostPort?.capabilities?.hasLocalLoopback,
+            ),
+            baseUrl: '',
+          };
+    const errDisconnected = state.lastConnectionError?.code === 'ERR_REMOTE_HOST_NOT_CONNECTED';
+    return {
+      connected: Boolean(baseState?.connected) && !errDisconnected,
+      baseUrl: typeof baseState?.baseUrl === 'string' ? baseState.baseUrl.trim() : '',
+    };
+  }
+
+  function isRemoteBridgeConnected() {
+    return readRemoteBridgeState().connected;
   }
 
   function emitToast(message, variant = 'info', durationMs = 3500) {
@@ -322,114 +338,50 @@ export function createBarController({
       state.settingsDraft.compactPrompt = sharedState.compactPrompt;
       state.settingsDraft.promptDirty = false;
     }
-    if (isRemoteWeb && (force || !state.settingsDraft.remoteUrlDirty)) {
-      state.settingsDraft.remoteUrl = getApiBaseUrl();
-      state.settingsDraft.remoteUrlDirty = false;
-    }
   }
 
-  function extractHostFromUrl(rawUrl) {
-    try {
-      return new URL(String(rawUrl || '').trim()).hostname || '';
-    } catch {
-      return '';
-    }
-  }
-
-  function classifyRemoteNetError(rawCode, rawUrl) {
-    const code = typeof rawCode === 'string' ? rawCode.trim() : '';
-    if (!code) return null;
-    if (code === 'ERR_NET_USER_HTTPS_HOST_NOT_APPROVED') {
-      return { kind: 'approval_required', host: extractHostFromUrl(rawUrl) || 'host' };
-    }
-    if (code.startsWith('ERR_NET_HOST_NOT_ALLOWED:')) {
-      const host = code.slice('ERR_NET_HOST_NOT_ALLOWED:'.length).trim() || extractHostFromUrl(rawUrl) || 'host';
-      return { kind: 'approval_required', host };
-    }
-    if (code === 'ERR_NET_NON_STANDARD_HTTPS_PORT_FORBIDDEN') {
-      return { kind: 'port_443_only', host: extractHostFromUrl(rawUrl) || '' };
-    }
-    if (code === 'ERR_NET_LOOPBACK_NOT_SUPPORTED' || code.startsWith('ERR_NET_HOST_FORBIDDEN:')) {
-      return { kind: 'host_forbidden', host: extractHostFromUrl(rawUrl) || '' };
-    }
-    return null;
-  }
-
-  function buildRemoteStatusSummary() {
+  function buildRemoteBridgeSummary() {
     const tr = i18n.t();
-    const configured = isApiConfigured();
-    const currentUrl = getApiBaseUrl();
-    if (!configured) {
+    const bridgeState = readRemoteBridgeState();
+    if (!bridgeState.connected) {
       return {
-        text: tr.remoteDisconnected,
-        isErr: false,
-        variant: 'info',
-        badgeText: tr.remoteApprovalBadgeUnconfigured,
-        badgeVariant: '',
+        text: tr.remoteBridgeGuideDisconnected,
+        variant: 'warning',
+        badgeText: tr.remoteBridgeBadgeOffline,
+        badgeVariant: 'warning',
       };
     }
-    if (api.isConnected()) {
+    if (!isApiConfigured()) {
       return {
-        text: i18n.formatTemplate(tr.remoteConnected, { url: currentUrl }),
-        isErr: false,
+        text: tr.remoteBridgeStatusStandby,
         variant: 'info',
-        badgeText: tr.remoteApprovalBadgeApproved,
+        badgeText: tr.remoteBridgeBadgeStandby,
+        badgeVariant: 'warning',
+      };
+    }
+    if (api.isConnected() || (state.snapshot !== null && !state.lastConnectionError)) {
+      return {
+        text: bridgeState.baseUrl
+          ? i18n.formatTemplate(tr.remoteBridgeStatusConnectedWithHost, { url: bridgeState.baseUrl })
+          : tr.remoteBridgeStatusConnected,
+        variant: 'info',
+        badgeText: tr.remoteBridgeBadgeConnected,
         badgeVariant: 'success',
       };
     }
     if (state.lastConnectionError) {
-      const netErr = classifyRemoteNetError(state.lastConnectionError.code, currentUrl);
-      if (netErr && netErr.kind === 'approval_required') {
-        return {
-          text: i18n.formatTemplate(tr.remoteApprovalRequired, { host: netErr.host }),
-          isErr: true,
-          variant: 'warning',
-          badgeText: tr.remoteApprovalBadgePending,
-          badgeVariant: 'warning',
-        };
-      }
-      if (netErr && netErr.kind === 'port_443_only') {
-        return {
-          text: tr.remoteHttpsPort443Only,
-          isErr: true,
-          variant: 'warning',
-          badgeText: tr.remoteApprovalBadgePending,
-          badgeVariant: 'warning',
-        };
-      }
-      if (netErr && netErr.kind === 'host_forbidden') {
-        return {
-          text: tr.remoteHostForbidden,
-          isErr: true,
-          variant: 'danger',
-          badgeText: tr.remoteApprovalBadgePending,
-          badgeVariant: 'danger',
-        };
-      }
-      const status = state.lastConnectionError.status;
-      if (status === 401 || status === 403) {
-        return {
-          text: i18n.formatTemplate(tr.remoteAuthFailed, { status }),
-          isErr: true,
-          variant: 'danger',
-          badgeText: tr.remoteApprovalBadgePending,
-          badgeVariant: 'danger',
-        };
-      }
       return {
-        text: tr.remoteUnreachable,
-        isErr: true,
+        text: tr.remoteBridgeStatusUnreachable,
         variant: 'danger',
-        badgeText: tr.remoteApprovalBadgeUnconfigured,
+        badgeText: tr.remoteBridgeBadgeStandby,
         badgeVariant: 'danger',
       };
     }
     return {
       text: tr.connecting,
-      isErr: false,
       variant: 'info',
-      badgeText: tr.remoteApprovalBadgeUnconfigured,
-      badgeVariant: '',
+      badgeText: tr.remoteBridgeBadgeConnected,
+      badgeVariant: 'success',
     };
   }
 
@@ -514,16 +466,13 @@ export function createBarController({
   }
 
   function buildCurrentSettingsPageSpec() {
-    const remoteStatus = buildRemoteStatusSummary();
+    const remoteBridge = buildRemoteBridgeSummary();
     return uiSchemas.buildSettingsPageSpec({
       isRemoteWeb,
-      remoteUrl: state.settingsDraft.remoteUrl,
-      remoteToken: state.settingsDraft.remoteToken,
-      remoteStatusText: remoteStatus.text,
-      remoteStatusErr: remoteStatus.isErr,
-      remoteStatusVariant: remoteStatus.variant,
-      remoteApprovalBadgeText: remoteStatus.badgeText,
-      remoteApprovalBadgeVariant: remoteStatus.badgeVariant,
+      remoteBridgeStatusText: remoteBridge.text,
+      remoteBridgeStatusVariant: remoteBridge.variant,
+      remoteBridgeBadgeText: remoteBridge.badgeText,
+      remoteBridgeBadgeVariant: remoteBridge.badgeVariant,
       globalSummaryText: buildGlobalLimitsSummary(),
       autoCompact: sharedState.autoCompactEnabled,
       compactPrompt: state.settingsDraft.compactPrompt,
@@ -778,13 +727,6 @@ export function createBarController({
           updateSettingsPageInPlace();
         } else if (field === 'locale') {
           applyLocale(String(value || 'ko'));
-        } else if (field === 'remoteUrl') {
-          state.settingsDraft.remoteUrlDirty = true;
-          state.settingsDraft.remoteUrl = String(value ?? '');
-          state.settingsDraft.feedback = '';
-        } else if (field === 'remoteToken') {
-          state.settingsDraft.remoteToken = String(value ?? '');
-          state.settingsDraft.feedback = '';
         }
       },
       onAction({ actionId, payload }) {
@@ -799,10 +741,6 @@ export function createBarController({
           handleToggleAddon(payload.id, payload.enabled, Boolean(payload.runtime));
         } else if (actionId === 'remove-addon' && payload) {
           handleRemoveAddon(payload.id, Boolean(payload.runtime));
-        } else if (actionId === 'remote-connect') {
-          handleRemoteConnect();
-        } else if (actionId === 'remote-disconnect') {
-          handleRemoteDisconnect();
         }
       },
       onClose() {
@@ -934,18 +872,24 @@ export function createBarController({
     renderAddons();
 
     const configured = isApiConfigured();
+    const remoteBridgeConnected = isRemoteBridgeConnected();
     const isSubagentView = Boolean(snap?.isSubagent || isIsolatedSubagentView(state.viewEl));
     barView.renderSnapshot({
       snap,
       connected: api.isConnected(),
       configured,
       isRemoteWeb,
+      remoteBridgeConnected,
       compacting: state.compacting,
       hasSession: Boolean(getSessionId()),
       compactPrompt: sharedState.compactPrompt,
       isSubagent: isSubagentView,
     });
-    if (configured && (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected()))) {
+    if (
+      configured &&
+      (!isRemoteWeb || remoteBridgeConnected) &&
+      (state.consecutiveSnapshotFailures >= 2 || (snap && !api.isConnected()))
+    ) {
       barView.setReconnecting();
     }
     if (snap) {
@@ -978,7 +922,7 @@ export function createBarController({
 
   async function refreshSnapshot({ waitForFresh = false } = {}) {
     if (state.disposed) return;
-    if (!isApiConfigured()) {
+    if (!isApiConfigured() || (isRemoteWeb && !isRemoteBridgeConnected())) {
       if (state.snapshot !== null) {
         state.snapshot = null;
         render();
@@ -1045,11 +989,16 @@ export function createBarController({
         if (state.disposed || err?.name === 'AbortError' || err?.message === 'aborted') return;
         state.consecutiveSnapshotFailures += 1;
         state.lastConnectionError = err;
-        if (!state.snapshot || state.consecutiveSnapshotFailures >= 2 || !api.isConnected()) {
-          barView.setReconnecting();
-        }
-        if (isRemoteWeb && state.settingsPageOpen) {
-          updateSettingsPageInPlace();
+        if (isRemoteWeb && err?.code === 'ERR_REMOTE_HOST_NOT_CONNECTED') {
+          state.snapshot = null;
+          render();
+        } else {
+          if (!state.snapshot || state.consecutiveSnapshotFailures >= 2 || !api.isConnected()) {
+            barView.setReconnecting();
+          }
+          if (isRemoteWeb && state.settingsPageOpen) {
+            updateSettingsPageInPlace();
+          }
         }
       } finally {
         if (reqEpoch === state.epoch) {
@@ -1275,77 +1224,8 @@ export function createBarController({
     } catch {}
   }
 
-  async function handleRemoteConnect() {
-    if (!isRemoteWeb || typeof onRemoteConnectionSave !== 'function') return;
-    const tr = i18n.t();
-    const baseUrl = String(state.settingsDraft.remoteUrl || '').trim();
-    const token = String(state.settingsDraft.remoteToken || '').trim();
-    try {
-      const result = await onRemoteConnectionSave({ baseUrl, token });
-      state.settingsDraft.remoteUrlDirty = false;
-      if (result && result.ok) {
-        state.consecutiveSnapshotFailures = 0;
-        state.lastConnectionError = null;
-        state.settingsDraft.remoteToken = '';
-        state.settingsDraft.remoteUrl = result.baseUrl || baseUrl;
-        setSettingsFeedback(
-          i18n.formatTemplate(tr.remoteConnected, { url: result.baseUrl || baseUrl }),
-          false,
-        );
-      } else if (result && result.code === 'ERR_INVALID_ENDPOINT_URL') {
-        setSettingsFeedback(tr.remoteInvalidUrl, true);
-      } else if (result && result.code === 'ERR_INVALID_SIDECAR_TOKEN') {
-        setSettingsFeedback(tr.remoteInvalidToken, true);
-      } else if (result && (result.status === 401 || result.status === 403)) {
-        state.lastConnectionError = { status: result.status, code: result.code };
-        setSettingsFeedback(i18n.formatTemplate(tr.remoteAuthFailed, { status: result.status }), true);
-      } else if (result && result.code === 'ERR_SAVE_SETTINGS_FAILED') {
-        setSettingsFeedback(
-          i18n.formatTemplate(tr.remoteSaveFailed, { reason: result.reason || 'Error' }),
-          true,
-        );
-      } else {
-        const netErr = classifyRemoteNetError(result?.code, baseUrl);
-        state.lastConnectionError = {
-          status: result?.status,
-          code: result?.code || 'ERR_UNREACHABLE',
-          message: result?.message || 'unreachable',
-        };
-        if (netErr && netErr.kind === 'approval_required') {
-          setSettingsFeedback(i18n.formatTemplate(tr.remoteApprovalRequired, { host: netErr.host }), true);
-        } else if (netErr && netErr.kind === 'port_443_only') {
-          setSettingsFeedback(tr.remoteHttpsPort443Only, true);
-        } else if (netErr && netErr.kind === 'host_forbidden') {
-          setSettingsFeedback(tr.remoteHostForbidden, true);
-        } else {
-          setSettingsFeedback(tr.remoteUnreachable, true);
-        }
-      }
-      render();
-    } catch (err) {
-      state.lastConnectionError = err;
-      setSettingsFeedback(err?.message || tr.remoteUnreachable, true);
-      render();
-    }
-  }
-
-  async function handleRemoteDisconnect() {
-    if (!isRemoteWeb || typeof onRemoteConnectionClear !== 'function') return;
-    const tr = i18n.t();
-    try {
-      await onRemoteConnectionClear();
-      state.settingsDraft.remoteUrlDirty = false;
-      state.settingsDraft.remoteUrl = '';
-      state.settingsDraft.remoteToken = '';
-      resetConnectionState();
-      setSettingsFeedback(tr.remoteDisconnectedSaved, false);
-    } catch (err) {
-      setSettingsFeedback(err?.message || 'Error', true);
-    }
-  }
-
   barView.ctxBtn.addEventListener('click', () => {
-    if (isRemoteWeb && !isApiConfigured()) {
+    if (isRemoteWeb && (!isRemoteBridgeConnected() || !isApiConfigured())) {
       openSettings();
       return;
     }

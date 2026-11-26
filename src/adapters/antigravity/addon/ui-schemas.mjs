@@ -441,13 +441,10 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
 
   function buildSettingsPageSpec({
     isRemoteWeb = false,
-    remoteUrl = '',
-    remoteToken = '',
-    remoteStatusText = '',
-    remoteStatusErr = false,
-    remoteStatusVariant = '',
-    remoteApprovalBadgeText = '',
-    remoteApprovalBadgeVariant = '',
+    remoteBridgeStatusText = '',
+    remoteBridgeStatusVariant = 'info',
+    remoteBridgeBadgeText = '',
+    remoteBridgeBadgeVariant = '',
     globalSummaryText = '',
     autoCompact = true,
     compactPrompt = '',
@@ -460,79 +457,36 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
     const promptLen = String(compactPrompt || '').length;
     const sections = [];
 
-    // Remote Sidecar Connection section is strictly Remote Web ONLY (never attached on Desktop!)
+    // Remote Web ONLY: read-only Native Host Remote Bridge status & guidance (zero plugin-owned URL/token inputs)
     if (isRemoteWeb) {
-      const effectiveStatusVariant =
-        remoteStatusVariant || (remoteStatusErr ? 'danger' : 'info');
-      const remoteChildren = [
-        { type: 'text', id: 'set-remote-hint', text: tr.remoteConnHint, tone: 'muted' },
-      ];
-      if (remoteApprovalBadgeText) {
+      const bridgeChildren = [];
+      if (remoteBridgeBadgeText) {
         const badgeNode = {
           type: 'badge',
-          id: 'set-remote-approval-badge',
-          text: remoteApprovalBadgeText,
+          id: 'set-remote-bridge-badge',
+          text: remoteBridgeBadgeText,
         };
-        if (remoteApprovalBadgeVariant) {
-          badgeNode.variant = remoteApprovalBadgeVariant;
+        if (remoteBridgeBadgeVariant) {
+          badgeNode.variant = remoteBridgeBadgeVariant;
         }
-        remoteChildren.push({
+        bridgeChildren.push({
           type: 'row',
-          id: 'set-remote-status-row',
+          id: 'set-remote-bridge-badge-row',
           children: [badgeNode],
         });
       }
-      remoteChildren.push(
-        {
-          type: 'alert',
-          id: 'set-remote-status',
-          text: remoteStatusText || tr.remoteDisconnected,
-          variant: effectiveStatusVariant,
-        },
-        {
-          type: 'input',
-          id: 'set-remote-url',
-          label: 'Sidecar URL',
-          field: 'remoteUrl',
-          inputType: 'text',
-          placeholder: tr.remoteUrlPlaceholder,
-          submitActionId: 'remote-connect',
-        },
-        {
-          type: 'input',
-          id: 'set-remote-token',
-          label: 'X-Statusbar-Token',
-          field: 'remoteToken',
-          inputType: 'password',
-          placeholder: tr.remoteTokenPlaceholder,
-          submitActionId: 'remote-connect',
-        },
-        {
-          type: 'row',
-          id: 'set-remote-actions',
-          children: [
-            {
-              type: 'button',
-              id: 'set-remote-connect-btn',
-              label: tr.remoteConnectBtn,
-              variant: 'primary',
-              actionId: 'remote-connect',
-            },
-            {
-              type: 'button',
-              id: 'set-remote-disconnect-btn',
-              label: tr.remoteDisconnectBtn,
-              actionId: 'remote-disconnect',
-            },
-          ],
-        },
-      );
+      bridgeChildren.push({
+        type: 'alert',
+        id: 'set-remote-bridge-status',
+        text: remoteBridgeStatusText || tr.remoteBridgeGuideDisconnected,
+        variant: remoteBridgeStatusVariant || 'warning',
+      });
       sections.push({
         type: 'section',
-        id: 'set-remote-sec',
-        title: tr.remoteConnTitle,
+        id: 'set-remote-bridge-sec',
+        title: tr.remoteBridgeTitle,
         visibleWhen: { field: 'isRemoteWeb', eq: true },
-        children: remoteChildren,
+        children: bridgeChildren,
       });
     }
 
@@ -703,8 +657,6 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
 
     const state = {
       isRemoteWeb: Boolean(isRemoteWeb),
-      remoteUrl: String(remoteUrl || ''),
-      remoteToken: String(remoteToken || ''),
       autoCompact: Boolean(autoCompact),
       compactPrompt: String(compactPrompt || ''),
       locale: locale === 'en' ? 'en' : 'ko',

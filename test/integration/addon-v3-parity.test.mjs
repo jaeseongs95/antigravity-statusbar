@@ -266,12 +266,14 @@ test('TC-V3-PARITY-01 (Desktop): @antigravity-addons/sdk createTestHost({ surfac
     peerItemHandle.dispose();
     assert.equal(queryDeep(host.doc.body, '[data-status-plugin-id="peer-translator"]'), null);
 
-    // 3. Tier-1 Unified Settings Page registered & Desktop hides Remote Sidecar Connection
+    // 3. Tier-1 Unified Settings Page registered & Desktop hides Remote Host Bridge section
     const pages = host.getSettingsPages();
     assert.ok(pages.some((p) => p.pluginId === 'antigravity-statusbar' && p.id === 'settings'));
     const settingsHandle = mountedApp.runtime.openSettings();
     assert.ok(settingsHandle, 'openSettings must open Tier-1 registered settings page');
-    assert.equal(settingsHandle.getElementById('set-remote-sec'), null, 'Desktop settings page must NOT render Remote Sidecar Connection');
+    assert.equal(settingsHandle.getElementById('set-remote-bridge-sec'), null, 'Desktop settings page must NOT render Remote Host Bridge section');
+    assert.equal(settingsHandle.getElementById('set-remote-url'), null);
+    assert.equal(settingsHandle.getElementById('set-remote-token'), null);
     const globalSummaryEl = settingsHandle.getElementById('set-global-summary');
     assert.ok(globalSummaryEl, 'Desktop settings page must show live global limits summary');
     assert.ok(globalSummaryEl.textContent.includes('200.0K'));
@@ -327,7 +329,7 @@ test('TC-V3-PARITY-01 (Desktop): @antigravity-addons/sdk createTestHost({ surfac
   }
 });
 
-test('TC-V3-PARITY-02 (Remote Web): @antigravity-addons/sdk createTestHost({ surface: "remote-web" }) verifies userApprovedHttps unapproved/approved UX, ctx.net.fetch, dock fallback, host.statusbar, and ctx.storage persistence', async (t) => {
+test('TC-V3-PARITY-02 (Remote Web, Host Bridge Disconnected): @antigravity-addons/sdk v3.1.1 createTestHost({ surface: "remote-web", remoteBridgeConnected: false }) renders read-only Host Bridge guidance with zero URL/token inputs and zero fetches', async (t) => {
   const sdk = loadAddonsSdk();
   if (!sdk || typeof sdk.createTestHost !== 'function') {
     if (process.env.REQUIRE_ADDONS_SDK === '1') {
@@ -339,35 +341,121 @@ test('TC-V3-PARITY-02 (Remote Web): @antigravity-addons/sdk createTestHost({ sur
 
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
   const netCalls = [];
-  const approvedHosts = new Set();
   const host = sdk.createTestHost({
     surface: 'remote-web',
+    remoteBridgeConnected: false,
     viewport: { width: 390, height: 844 },
     locale: 'ko',
     themeMode: 'light',
+    netHandler: (_pluginId, url) => {
+      netCalls.push(url);
+      return { ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
+    },
+  });
+
+  let mountedApp = null;
+  const ctx = await host.mountPlugin(manifest, (pluginCtx) => {
+    mountedApp = setupStatusbarV3(pluginCtx, {
+      doc: host.doc,
+      win: host.win,
+      pollConfig: { normalPollMs: 60_000, quotaPollMs: 60_000 },
+    });
+  });
+
+  try {
+    await flush(40);
+
+    // 1. Remote Web v3.1.1 offline capabilities & zero network calls
+    assert.equal(ctx.env.surface, 'remote-web');
+    assert.equal(ctx.env.capabilities.hasRemoteHostBridge, false);
+    assert.equal(ctx.env.capabilities.hasLocalLoopback, false);
+    assert.equal(ctx.env.capabilities.hasNetHttps, false);
+    assert.equal(netCalls.length, 0, 'Disconnected Remote Web Host Bridge must issue zero Sidecar calls');
+
+    // 2. Settings page shows read-only Host Bridge guidance and ZERO URL/token inputs
+    const settingsHandle = mountedApp.runtime.openSettings();
+    assert.ok(settingsHandle);
+    const bridgeSec = settingsHandle.getElementById('set-remote-bridge-sec');
+    assert.ok(bridgeSec, 'Remote Web settings page must show read-only Remote Host Bridge section');
+    assert.equal(bridgeSec.hidden, false);
+    assert.equal(settingsHandle.getElementById('set-remote-url'), null, 'Plugin-owned Sidecar URL input must be removed');
+    assert.equal(settingsHandle.getElementById('set-remote-token'), null, 'Plugin-owned X-Statusbar-Token input must be removed');
+    assert.equal(settingsHandle.getElementById('set-remote-connect-btn'), null);
+    assert.equal(settingsHandle.getElementById('set-remote-disconnect-btn'), null);
+
+    const badgeEl = settingsHandle.getElementById('set-remote-bridge-badge');
+    const statusEl = settingsHandle.getElementById('set-remote-bridge-status');
+    assert.ok(badgeEl && badgeEl.textContent.includes('Host Bridge 미연결'));
+    assert.ok(statusEl && statusEl.textContent.includes('Addons → Host Bridge'));
+    settingsHandle.close();
+
+    // 3. host.statusbar delegation still works on Remote Web while offline
+    const peerManifest = {
+      schemaVersion: 3,
+      apiVersion: 3,
+      pluginId: 'remote-peer-offline',
+      displayName: 'Remote Peer Offline',
+      version: '1.0.0',
+      trustLevel: 'restricted',
+      capabilities: ['renderer'],
+      entry: { rendererScript: 'index.js', mainHookScript: null },
+      permissions: { ui: { statusItems: true } },
+    };
+    await host.mountPlugin(peerManifest, (peerCtx) => {
+      peerCtx.ui.registerStatusItem({ id: 'ping', label: 'Ping', badge: 'OK' });
+    });
+    assert.equal(host.doc.querySelector('[data-addon-host-fallback-statusbar="1"]'), null);
+    assert.ok(queryDeep(host.doc.body, '[data-status-plugin-id="remote-peer-offline"]'));
+
+    host.disposePlugin('antigravity-statusbar');
+    assert.equal(ctx.lifecycle.signal.aborted, true);
+  } finally {
+    host.disposePlugin('antigravity-statusbar');
+  }
+});
+
+test('TC-V3-PARITY-03 (Remote Web, Host Bridge Connected): @antigravity-addons/sdk v3.1.1 createTestHost({ surface: "remote-web", remoteBridgeConnected: true }) routes localLoopback transparently via ctx.net.fetch + ctx.settingsBridge and reacts to host:remote-bridge-changed & ERR_REMOTE_HOST_NOT_CONNECTED', async (t) => {
+  const sdk = loadAddonsSdk();
+  if (!sdk || typeof sdk.createTestHost !== 'function') {
+    if (process.env.REQUIRE_ADDONS_SDK === '1') {
+      assert.fail('REQUIRE_ADDONS_SDK=1 set, but @antigravity-addons/sdk could not be loaded');
+    }
+    t.skip('@antigravity-addons/sdk sibling repo is not present on this CI runner');
+    return;
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
+  const netCalls = [];
+  let simulateBridgeDropped = false;
+  const host = sdk.createTestHost({
+    surface: 'remote-web',
+    remoteBridgeConnected: true,
+    viewport: { width: 390, height: 844 },
+    locale: 'ko',
+    themeMode: 'light',
+    initialSettings: {
+      'antigravity-statusbar': {
+        status: 'ok',
+        data: {
+          mode: 'active',
+          baseUrl: 'http://127.0.0.1:43210',
+          token: TEST_TOKEN,
+        },
+      },
+    },
     netHandler: (_pluginId, url, init) => {
       const parsed = new URL(url);
-      netCalls.push({ url, host: parsed.hostname, port: parsed.port || '443', token: init?.headers?.['x-statusbar-token'] });
-      if (parsed.protocol !== 'https:') {
-        return { ok: false, reason: 'ERR_NET_LOOPBACK_NOT_SUPPORTED' };
+      netCalls.push({ url, pathname: parsed.pathname, token: init?.headers?.['x-statusbar-token'] });
+      if (simulateBridgeDropped) {
+        return { ok: false, reason: 'ERR_REMOTE_HOST_NOT_CONNECTED' };
       }
-      if (parsed.port && parsed.port !== '443') {
-        return { ok: false, reason: 'ERR_NET_NON_STANDARD_HTTPS_PORT_FORBIDDEN' };
-      }
-      if (approvedHosts.size === 0) {
-        return { ok: false, reason: 'ERR_NET_USER_HTTPS_HOST_NOT_APPROVED' };
-      }
-      if (!approvedHosts.has(parsed.hostname)) {
-        return { ok: false, reason: `ERR_NET_HOST_NOT_ALLOWED:${parsed.hostname}` };
-      }
-      const pathname = parsed.pathname;
-      if (pathname === '/api/settings/get') {
+      if (parsed.pathname === '/api/settings/get') {
         return { ok: true, status: 200, bodyText: JSON.stringify({ locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] }) };
       }
-      if (pathname === '/api/quota') {
+      if (parsed.pathname === '/api/quota') {
         return { ok: true, status: 200, bodyText: JSON.stringify({ available: false, groups: [], stale: false }) };
       }
-      if (pathname === '/api/sessions') {
+      if (parsed.pathname === '/api/sessions') {
         return { ok: true, status: 200, bodyText: JSON.stringify({ sessions: [{ sessionId: 'sess-remote-sdk' }] }) };
       }
       return {
@@ -385,7 +473,6 @@ test('TC-V3-PARITY-02 (Remote Web): @antigravity-addons/sdk createTestHost({ sur
     },
   });
 
-  // No agent-input-box on Remote Web -> mounts into host status-bar dock fallback
   let mountedApp = null;
   const ctx = await host.mountPlugin(manifest, (pluginCtx) => {
     mountedApp = setupStatusbarV3(pluginCtx, {
@@ -396,94 +483,57 @@ test('TC-V3-PARITY-02 (Remote Web): @antigravity-addons/sdk createTestHost({ sur
   });
 
   try {
-    await flush(40);
+    await flush(50);
 
-    // 1. Remote Web surface & v3.0.3 userApprovedHttps capabilities (zero localLoopback, ctx.net.fetch active)
+    // 1. Remote Web v3.1.1 connected capabilities mirror Desktop localLoopback + settingsBridge transparently
     assert.equal(ctx.env.surface, 'remote-web');
-    assert.equal(ctx.env.capabilities.hasLocalLoopback, false);
-    assert.equal(ctx.env.capabilities.hasNetHttps, true, 'userApprovedHttps: true must enable ctx.env.capabilities.hasNetHttps on Remote Web');
-    assert.equal(typeof ctx.net?.fetch, 'function', 'Remote Web must expose ctx.net.fetch for userApprovedHttps');
-    assert.equal(netCalls.length, 0, 'Unconfigured Remote Web must issue zero fetches');
+    assert.equal(ctx.env.capabilities.hasRemoteHostBridge, true);
+    assert.equal(ctx.env.capabilities.hasLocalLoopback, true);
+    assert.equal(ctx.env.capabilities.hasNetHttps, false);
+    assert.equal(typeof ctx.net?.fetch, 'function');
+    assert.ok(
+      netCalls.some((c) => c.url === 'http://127.0.0.1:43210/api/snapshot' && c.token === TEST_TOKEN),
+      'Remote Web with connected Host Bridge must route Sidecar loopback calls via ctx.net.fetch identically to Desktop',
+    );
+    assert.equal((await ctx.storage.keys()).length, 0, 'Plugin must NOT store any remote credentials in ctx.storage');
 
-    // 2. Remote Web Settings Page includes Remote Sidecar Connection section + clear unapproved/approved UX
+    // 2. Settings page displays read-only connected status with ZERO URL/token inputs
     const settingsHandle = mountedApp.runtime.openSettings();
     assert.ok(settingsHandle);
-    const remoteSec = settingsHandle.getElementById('set-remote-sec');
-    assert.ok(remoteSec, 'Remote Web settings page must render Remote Sidecar Connection section');
-    assert.equal(remoteSec.hidden, false);
+    assert.equal(settingsHandle.getElementById('set-remote-url'), null);
+    assert.equal(settingsHandle.getElementById('set-remote-token'), null);
+    const badgeEl = settingsHandle.getElementById('set-remote-bridge-badge');
+    const statusEl = settingsHandle.getElementById('set-remote-bridge-status');
+    assert.ok(badgeEl && badgeEl.textContent.includes('Host Bridge 연결됨'));
+    assert.ok(statusEl && statusEl.textContent.includes('Native Host 원격 브리지'));
 
-    const badgeEl = settingsHandle.getElementById('set-remote-approval-badge');
-    const statusEl = settingsHandle.getElementById('set-remote-status');
-    assert.ok(badgeEl && badgeEl.textContent.includes('미연결'));
+    // 3. host:remote-bridge-changed disconnect event immediately transitions UI to offline guidance
+    ctx.events.emit('host:remote-bridge-changed', { connected: false, baseUrl: null });
+    await flush(30);
+    assert.ok(badgeEl.textContent.includes('Host Bridge 미연결'));
+    assert.ok(statusEl.textContent.includes('Addons → Host Bridge'));
 
-    const urlNode = settingsHandle.getElementById('set-remote-url');
-    const tokenNode = settingsHandle.getElementById('set-remote-token');
-    const urlInput = String(urlNode?.tagName || '').toLowerCase() === 'input' ? urlNode : urlNode?.querySelector('input');
-    const tokenInput = String(tokenNode?.tagName || '').toLowerCase() === 'input' ? tokenNode : tokenNode?.querySelector('input');
-    const connectBtn = settingsHandle.getElementById('set-remote-connect-btn');
+    // 4. host:remote-bridge-changed reconnect event immediately resumes Sidecar polling & updates badge/URL
+    const callsBeforeReconnect = netCalls.length;
+    ctx.events.emit('host:remote-bridge-changed', { connected: true, baseUrl: 'http://127.0.0.1:19384' });
+    await flush(50);
+    assert.ok(netCalls.length > callsBeforeReconnect, 'Reconnecting Host Bridge must immediately resume Sidecar polling');
+    assert.ok(badgeEl.textContent.includes('Host Bridge 연결됨'));
+    assert.ok(statusEl.textContent.includes('http://127.0.0.1:19384'));
 
-    // 2a. Unapproved HTTPS host -> clear userApprovedHttps approval guidance
-    urlInput.value = 'https://remote-sidecar.example.com';
-    urlInput.dispatchEvent({ type: 'input', isTrusted: true });
-    tokenInput.value = TEST_TOKEN;
-    tokenInput.dispatchEvent({ type: 'input', isTrusted: true });
-    connectBtn.click({ isTrusted: true });
-    await flush(60);
-
-    assert.ok(badgeEl.textContent.includes('HTTPS 승인 필요'), `Expected approval-required badge, got: ${badgeEl.textContent}`);
-    assert.ok(statusEl.textContent.includes('HTTPS 도메인 미승인'), `Expected unapproved host guidance, got: ${statusEl.textContent}`);
-    assert.ok(statusEl.textContent.includes('Allowed HTTPS Hosts (User Consent)'));
-
-    // 2b. Non-standard HTTPS port -> clear port 443 guidance
-    urlInput.value = 'https://remote-sidecar.example.com:8443';
-    urlInput.dispatchEvent({ type: 'input', isTrusted: true });
-    connectBtn.click({ isTrusted: true });
-    await flush(60);
-    assert.ok(statusEl.textContent.includes('443'), `Expected port 443 guidance, got: ${statusEl.textContent}`);
-
-    // 2c. User approves host in Remote Web Drawer -> Connect succeeds via ctx.net.fetch & persists in ctx.storage
-    approvedHosts.add('remote-sidecar.example.com');
-    urlInput.value = 'https://remote-sidecar.example.com';
-    urlInput.dispatchEvent({ type: 'input', isTrusted: true });
-    tokenInput.value = TEST_TOKEN;
-    tokenInput.dispatchEvent({ type: 'input', isTrusted: true });
-    connectBtn.click({ isTrusted: true });
-    await flush(60);
-
-    const savedConn = await ctx.storage.get('remoteConnection');
-    assert.equal(savedConn?.remoteBaseUrl, 'https://remote-sidecar.example.com');
-    assert.equal(savedConn?.remoteToken, TEST_TOKEN);
-    assert.ok(netCalls.some((c) => c.url === 'https://remote-sidecar.example.com/api/settings/get'));
-    assert.ok(badgeEl.textContent.includes('HTTPS 승인됨 · 연결됨'), `Expected approved badge, got: ${badgeEl.textContent}`);
-    assert.ok(statusEl.textContent.includes('호스트 HTTPS 승인 확인'), `Expected approved connected message, got: ${statusEl.textContent}`);
-
-    // Disconnect deletes ctx.storage record and resets badge cleanly
-    const disconnectBtn = settingsHandle.getElementById('set-remote-disconnect-btn');
-    disconnectBtn.click({ isTrusted: true });
-    await flush(40);
-    assert.equal(await ctx.storage.get('remoteConnection'), undefined);
-    assert.ok(badgeEl.textContent.includes('미연결'));
+    // 5. Runtime ERR_REMOTE_HOST_NOT_CONNECTED from ctx.net.fetch drops cleanly back to offline guidance
+    simulateBridgeDropped = true;
+    await ctx.settingsBridge.save({
+      mode: 'active',
+      baseUrl: 'http://127.0.0.1:43211',
+      token: TEST_TOKEN,
+    });
+    await flush(50);
+    assert.ok(badgeEl.textContent.includes('Host Bridge 미연결'));
+    assert.ok(statusEl.textContent.includes('Addons → Host Bridge'));
     settingsHandle.close();
 
-    // 3. host.statusbar delegation works identically on Remote Web
-    const peerManifest = {
-      schemaVersion: 3,
-      apiVersion: 3,
-      pluginId: 'remote-peer',
-      displayName: 'Remote Peer',
-      version: '1.0.0',
-      trustLevel: 'restricted',
-      capabilities: ['renderer'],
-      entry: { rendererScript: 'index.js', mainHookScript: null },
-      permissions: { ui: { statusItems: true } },
-    };
-    await host.mountPlugin(peerManifest, (peerCtx) => {
-      peerCtx.ui.registerStatusItem({ id: 'ping', label: 'Ping', badge: '12ms' });
-    });
-    assert.equal(host.doc.querySelector('[data-addon-host-fallback-statusbar="1"]'), null);
-    assert.ok(queryDeep(host.doc.body, '[data-status-plugin-id="remote-peer"]'));
-
-    // 4. Clean disposal
+    // 6. Clean disposal
     host.disposePlugin('antigravity-statusbar');
     assert.equal(ctx.lifecycle.signal.aborted, true);
   } finally {
