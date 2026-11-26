@@ -1,5 +1,5 @@
 /**
- * Segregated SOLID port contracts (ISP / DIP) for AddonManifest.v2 statusbar modules.
+ * Segregated SOLID port contracts (ISP / DIP) for AddonManifest.v3 statusbar modules.
  *
  * Each assertion function is self-contained (zero outer closures) so it can be imported
  * directly in Node unit tests and deterministically assembled into the renderer bundle.
@@ -15,7 +15,19 @@ export function assertRendererHostPort(port) {
       throw new Error(`ERR_INVALID_RENDERER_HOST_PORT:missing_${required[i]}`);
     }
   }
-  const optionalMethods = ['openModal', 'openPopover', 'getSettings', 'onSettingsChange', 'saveSettings'];
+  const optionalMethods = [
+    'showToast',
+    'openPopup',
+    'openModal',
+    'openPanel',
+    'registerCommand',
+    'registerSettingsPage',
+    'addManagedListener',
+    'netFetch',
+    'getSettings',
+    'onSettingsChange',
+    'saveSettings',
+  ];
   for (let i = 0; i < optionalMethods.length; i += 1) {
     const key = optionalMethods[i];
     if (port[key] !== undefined && port[key] !== null && typeof port[key] !== 'function') {
@@ -25,14 +37,14 @@ export function assertRendererHostPort(port) {
   return port;
 }
 
-export function assertPortalHostPort(port) {
+export function assertOverlayHostPort(port) {
   if (!port || typeof port !== 'object') {
-    throw new Error('ERR_INVALID_PORTAL_HOST_PORT');
+    throw new Error('ERR_INVALID_OVERLAY_HOST_PORT');
   }
-  const required = ['openModal', 'openPopover'];
+  const required = ['openPopup', 'openModal'];
   for (let i = 0; i < required.length; i += 1) {
     if (typeof port[required[i]] !== 'function') {
-      throw new Error(`ERR_INVALID_PORTAL_HOST_PORT:missing_${required[i]}`);
+      throw new Error(`ERR_INVALID_OVERLAY_HOST_PORT:missing_${required[i]}`);
     }
   }
   return port;
@@ -72,14 +84,16 @@ export function assertAddonRegistryPort(port) {
     'isRuntimeDisabled',
     'applyPersistedSettings',
     'removeRuntime',
+    'getSortedDelegatedItems',
+    'statusbarService',
     'clear',
     'publicApi',
   ];
   for (let i = 0; i < required.length; i += 1) {
     const key = required[i];
-    if (key === 'publicApi') {
-      if (!port.publicApi || typeof port.publicApi !== 'object') {
-        throw new Error('ERR_INVALID_ADDON_REGISTRY_PORT:missing_publicApi');
+    if (key === 'publicApi' || key === 'statusbarService') {
+      if (!port[key] || typeof port[key] !== 'object') {
+        throw new Error(`ERR_INVALID_ADDON_REGISTRY_PORT:missing_${key}`);
       }
     } else if (typeof port[key] !== 'function') {
       throw new Error(`ERR_INVALID_ADDON_REGISTRY_PORT:missing_${key}`);

@@ -15,6 +15,7 @@ export function createInlineI18n(initialLocale = 'ko') {
       quota5h: '5h Limit',
       quotaWeekly: 'Weekly',
       quotaOther: 'Quota',
+      quotaReset: 'Reset',
       softLimit: 'Limit Reached',
       autoCompacting: 'Auto-compacting…',
       autoCompactDeferred: 'Compact pending',
@@ -35,6 +36,7 @@ export function createInlineI18n(initialLocale = 'ko') {
       limitHint: 'Overrides global limits for this session only. Auto-compacts when reached.',
       globalLimitBtn: 'Global…',
       globalLimitSettingsBtn: 'Open Global Context Limits…',
+      globalLimitsSummary: 'Default: {defaultVal} · Per-model overrides: {modelCount}',
       globalModalTitle: 'Global Context Limits',
       priorityHint: 'Priority: This session > Per-model global > All-models default > Host default',
       sessionOverrideWarning: 'This session has its own limit ({val}), overriding global settings.',
@@ -86,21 +88,16 @@ export function createInlineI18n(initialLocale = 'ko') {
       delBtn: 'Remove',
       cmdSent: 'Sent',
       cmdFail: 'Failed',
-      remoteSetupNeeded: 'Statusbar: Connect Sidecar',
-      remoteConnTitle: 'Remote Sidecar Connection',
-      remoteConnHint: 'Same PC: http://localhost:<port> (set STATUSBAR_SIDECAR_PORT for fixed port). External device: HTTPS endpoint. Saved in browser only (never in remote bundle).',
-      remoteUrlPlaceholder: 'http://localhost:<port> or https://...',
-      remoteTokenPlaceholder: 'X-Statusbar-Token (16+ chars)',
-      remoteConnectBtn: 'Connect',
-      remoteDisconnectBtn: 'Disconnect',
-      remoteConnected: 'Connected ({url})',
-      remoteDisconnected: 'Not connected',
-      remoteDisconnectedSaved: 'Disconnected and cleared browser credentials.',
-      remoteInvalidUrl: 'Enter a valid http://localhost:<port> or https:// URL (no embedded credentials or query).',
-      remoteInvalidToken: 'Enter a token of at least 16 characters.',
-      remoteAuthFailed: 'Auth failed (HTTP {status}). Check X-Statusbar-Token.',
-      remoteUnreachable: 'Cannot reach Sidecar (check Sidecar status, PNA permission, or page CSP connect-src).',
-      remoteSaveFailed: 'Failed to save browser settings ({reason}).',
+      remoteSetupNeeded: 'Statusbar: Host Bridge Offline',
+      remoteBridgeTitle: 'Remote Host Bridge',
+      remoteBridgeBadgeConnected: 'Host Bridge Connected',
+      remoteBridgeBadgeStandby: 'Host Bridge Connected · Sidecar Standby',
+      remoteBridgeBadgeOffline: 'Host Bridge Offline',
+      remoteBridgeGuideDisconnected: 'Open Addons → Host Bridge in the bottom-right drawer to connect your desktop host.',
+      remoteBridgeStatusConnected: 'Connected to the desktop Sidecar via the Native Host Remote Bridge.',
+      remoteBridgeStatusConnectedWithHost: 'Connected to the desktop Sidecar via Native Host Remote Bridge ({url}).',
+      remoteBridgeStatusStandby: 'Host Bridge is connected, but the desktop Sidecar is not ready yet. Launch Antigravity on your desktop.',
+      remoteBridgeStatusUnreachable: 'Unable to reach the desktop Sidecar via Host Bridge. Check that the desktop Sidecar is running.',
     },
     ko: {
       connecting: '상태바: 연결 중…',
@@ -113,6 +110,7 @@ export function createInlineI18n(initialLocale = 'ko') {
       quota5h: '5시간 한도',
       quotaWeekly: '주간한도',
       quotaOther: '할당량',
+      quotaReset: '초기화',
       softLimit: '한도 도달',
       autoCompacting: '자동 컴팩션 중…',
       autoCompactDeferred: '압축 대기',
@@ -133,6 +131,7 @@ export function createInlineI18n(initialLocale = 'ko') {
       limitHint: '이 세션에만 우선 적용되며, 한도 도달 시 자동 /compact를 실행합니다.',
       globalLimitBtn: '전역 설정…',
       globalLimitSettingsBtn: '전역 컨텍스트 한도 창 열기…',
+      globalLimitsSummary: '일괄 기본값: {defaultVal} · 모델별 개별 설정: {modelCount}개',
       globalModalTitle: '전역 컨텍스트 한도 설정',
       priorityHint: '우선순위: 현재 세션 > 모델별 전역 > 일괄 전역 > 호스트 기본값',
       sessionOverrideWarning: '현재 세션 개별 한도({val})가 전역 설정보다 우선 적용 중입니다.',
@@ -184,21 +183,16 @@ export function createInlineI18n(initialLocale = 'ko') {
       delBtn: '삭제',
       cmdSent: '전송됨',
       cmdFail: '전송 실패',
-      remoteSetupNeeded: '상태바: 원격 연결 설정',
-      remoteConnTitle: '원격 Sidecar 연결',
-      remoteConnHint: '같은 PC는 http://localhost:<포트>(고정 포트는 STATUSBAR_SIDECAR_PORT), 외부 기기는 HTTPS 주소를 입력하세요. 브라우저에만 저장되며 원격 번들에 포함되지 않습니다.',
-      remoteUrlPlaceholder: 'http://localhost:<포트> 또는 https://...',
-      remoteTokenPlaceholder: 'X-Statusbar-Token (16자 이상)',
-      remoteConnectBtn: '연결',
-      remoteDisconnectBtn: '연결 해제',
-      remoteConnected: '연결됨 ({url})',
-      remoteDisconnected: '연결되지 않음',
-      remoteDisconnectedSaved: '연결을 해제하고 브라우저 자격 증명을 삭제했습니다.',
-      remoteInvalidUrl: '유효한 http://localhost:<포트> 또는 https:// 주소를 입력하세요 (자격 증명·쿼리 불가).',
-      remoteInvalidToken: '16자 이상의 토큰을 입력하세요.',
-      remoteAuthFailed: '인증 실패 (HTTP {status}). X-Statusbar-Token을 확인하세요.',
-      remoteUnreachable: 'Sidecar에 연결할 수 없습니다 (Sidecar 실행 여부, PNA 권한 또는 페이지 CSP connect-src 확인).',
-      remoteSaveFailed: '브라우저 설정 저장 실패 ({reason}).',
+      remoteSetupNeeded: '상태바: Host Bridge 미연결',
+      remoteBridgeTitle: '원격 호스트 브리지',
+      remoteBridgeBadgeConnected: 'Host Bridge 연결됨',
+      remoteBridgeBadgeStandby: 'Host Bridge 연결됨 · Sidecar 대기',
+      remoteBridgeBadgeOffline: 'Host Bridge 미연결',
+      remoteBridgeGuideDisconnected: '원격 웹 우측 하단 Addons → Host Bridge 탭에서 데스크톱 호스트를 연결하세요.',
+      remoteBridgeStatusConnected: 'Native Host 원격 브리지를 통해 데스크톱 Sidecar에 연결되었습니다.',
+      remoteBridgeStatusConnectedWithHost: 'Native Host 원격 브리지({url})를 통해 데스크톱 Sidecar에 연결되었습니다.',
+      remoteBridgeStatusStandby: 'Host Bridge는 연결되었으나 데스크톱 Sidecar가 아직 준비되지 않았습니다. 데스크톱에서 Antigravity를 실행하세요.',
+      remoteBridgeStatusUnreachable: 'Host Bridge를 통해 데스크톱 Sidecar에 연결할 수 없습니다. 데스크톱 Sidecar 실행 상태를 확인하세요.',
     },
   };
 
@@ -252,6 +246,36 @@ export function createInlineI18n(initialLocale = 'ko') {
     return rawLabel;
   }
 
+  function parseValidTimestamp(raw) {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const ms = Date.parse(trimmed);
+    if (!Number.isFinite(ms)) return null;
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return null;
+    return d;
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function formatLocalTimeHHMM(raw) {
+    const d = parseValidTimestamp(raw);
+    if (!d) return '';
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function formatLocalDateTime(raw) {
+    if (typeof raw !== 'string') return '';
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    const d = parseValidTimestamp(trimmed);
+    if (!d) return trimmed;
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
   return Object.freeze({
     getLocale,
     setLocale,
@@ -259,5 +283,7 @@ export function createInlineI18n(initialLocale = 'ko') {
     formatTokens,
     formatTemplate,
     localizeBreakdownLabel,
+    formatLocalTimeHHMM,
+    formatLocalDateTime,
   });
 }

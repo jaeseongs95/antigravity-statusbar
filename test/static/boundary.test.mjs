@@ -76,7 +76,6 @@ test('src/ui has zero vendor references, zero innerHTML, zero ../core imports, a
     }
 
     if (file.endsWith('.html')) {
-      // No inline <script> bodies or inline <style> tags or on*= event attributes
       assert.equal(/<script(?![^>]*\bsrc=)[^>]*>/i.test(content), false, `Inline <script> in ${rel}`);
       assert.equal(/<style\b/i.test(content), false, `Inline <style> in ${rel}`);
       assert.equal(/\son[a-z]+\s*=/i.test(content), false, `Inline event handler in ${rel}`);
@@ -114,7 +113,7 @@ test('no runtime source code touches app.asar, hooks.json, SetMendelFlagOverride
   }
 });
 
-test('TC-ADDON-06: addon renderer modules never create <style> tags directly, use innerHTML, or expose addonHost/token on window', () => {
+test('TC-ADDON-06: addon renderer modules obey v3 API-First invariants (zero HTML sinks, zero raw <style>, zero hostProfileId, zero GM_xmlhttpRequest, zero manual overlay positioning)', () => {
   const addonDir = path.join(REPO_ROOT, 'src', 'adapters', 'antigravity', 'addon');
   const files = walkFiles(addonDir);
   assert.ok(files.length >= 10, `Expected SOLID addon modules in ${addonDir}, got ${files.length}`);
@@ -127,6 +126,16 @@ test('TC-ADDON-06: addon renderer modules never create <style> tags directly, us
     /createElement\s*\(\s*['"]style['"]\s*\)/,
     /document\.head\.appendChild/,
     /window\.__agyStatusbarInline/,
+    /\bGM_xmlhttpRequest\b/,
+    /\bGM\.xmlHttpRequest\b/,
+    /\bpositionPopoverPortal\b/,
+    /\bapplyModalPortalLayout\b/,
+    /\.hostProfileId\b/,
+    /['"]set-remote-url['"]/,
+    /['"]set-remote-token['"]/,
+    /['"]remote-connect['"]/,
+    /['"]remote-disconnect['"]/,
+    /\buserApprovedHttps\b/,
   ];
 
   for (const file of files) {
@@ -136,7 +145,7 @@ test('TC-ADDON-06: addon renderer modules never create <style> tags directly, us
       assert.equal(
         pattern.test(content),
         false,
-        `Forbidden AddonManifest.v1 pattern ${pattern} matched in ${rel}`,
+        `Forbidden v3 pattern ${pattern} matched in ${rel}`,
       );
     }
   }
@@ -148,49 +157,69 @@ test('json-settings-store.mjs has zero direct process.env reads (F10)', () => {
   assert.equal(/process\.env/.test(content), false, 'json-settings-store.mjs must inject dataDir');
 });
 
-test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v2.json declare official schemas', () => {
+test('plugin.json, sidecars/statusbar/sidecar.json, and addon-manifest.v3.json declare official v3 schemas', () => {
   const pluginManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'plugin.json'), 'utf8'));
   const sidecarManifest = JSON.parse(
     fs.readFileSync(path.join(REPO_ROOT, 'sidecars', 'statusbar', 'sidecar.json'), 'utf8'),
   );
   const addonManifest = JSON.parse(
-    fs.readFileSync(path.join(REPO_ROOT, 'addon-manifest.v2.json'), 'utf8'),
+    fs.readFileSync(path.join(REPO_ROOT, 'addon-manifest.v3.json'), 'utf8'),
   );
   assert.equal(pluginManifest.name, 'antigravity-statusbar');
-  assert.equal(pluginManifest.version, '3.2.0');
+  assert.equal(pluginManifest.version, '3.3.0');
   assert.equal(sidecarManifest.has_web_ui, false);
   assert.equal(sidecarManifest.ui_config, undefined);
 
-  assert.equal(addonManifest.schemaVersion, 2);
+  assert.equal(addonManifest.schemaVersion, 3);
+  assert.equal(addonManifest.apiVersion, 3);
   assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-  assert.equal(addonManifest.version, '3.2.0');
+  assert.equal(addonManifest.version, '3.3.0');
   assert.equal(addonManifest.trustLevel, 'trusted');
-  assert.equal(addonManifest.compatibility?.hostProfile, 'antigravity-desktop');
-  assert.deepEqual(addonManifest.compatibility?.hostProfiles, [
-    'antigravity-desktop',
-    'antigravity-remote-web',
-  ]);
-  assert.equal(addonManifest.compatibility?.excludeHostProfiles, undefined);
-  assert.equal(addonManifest.compatibility?.minHostVersion, '2.3.0');
+  assert.deepEqual(addonManifest.compatibility?.surfaces, ['desktop', 'remote-web']);
+  assert.equal(addonManifest.compatibility?.minHostVersion, '3.1.1');
   assert.deepEqual(addonManifest.capabilities, ['renderer']);
   assert.equal(addonManifest.entry?.rendererScript, 'runtime/statusbar-renderer.js');
   assert.equal(addonManifest.entry?.mainHookScript, null);
+  assert.deepEqual(addonManifest.permissions, {
+    ui: {
+      toasts: true,
+      dialogs: false,
+      overlays: true,
+      commands: true,
+      statusItems: false,
+      settingsPages: true,
+      canvas: true,
+    },
+    services: {
+      provide: [
+        {
+          name: 'host.statusbar',
+          allowedCallers: ['*'],
+        },
+      ],
+    },
+    net: {
+      localLoopback: ['antigravity-sidecar'],
+    },
+    dom: {
+      documentTransform: false,
+      anchors: ['status-bar'],
+    },
+  });
   assert.deepEqual(addonManifest.settingsBridge, {
     fileName: 'antigravity-statusbar-runtime.json',
     maxBytes: 16384,
   });
   assert.equal(addonManifest.configBridge, undefined);
-  assert.equal(addonManifest.uiSlots.length, 3);
-  assert.ok(addonManifest.uiSlots.every((s) => s.shadow === true));
-  const statusBarSlot = addonManifest.uiSlots.find((s) => s.slot === 'status-bar');
-  assert.equal(statusBarSlot?.exclusive, true);
-  assert.equal(statusBarSlot?.anchor, 'status-bar');
-  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'overlay')?.exclusive, false);
-  assert.equal(addonManifest.uiSlots.find((s) => s.slot === 'modal')?.exclusive, false);
+  assert.equal(addonManifest.uiSlots.length, 1, 'v3 manifest must declare only the status-bar Tier-3 slot (no manual overlay/modal slots)');
+  assert.equal(addonManifest.uiSlots[0].slot, 'status-bar');
+  assert.equal(addonManifest.uiSlots[0].exclusive, true);
+  assert.equal(addonManifest.uiSlots[0].anchor, 'status-bar');
+  assert.equal(addonManifest.uiSlots[0].shadow, true);
   assert.equal(addonManifest.loadOrder, 50);
 });
 
-test('STATUSBAR_STYLES complies with addon-host v2.0.0 strict owner-CSS security rules', async () => {
+test('STATUSBAR_STYLES complies with addon-host v3 strict owner-CSS security rules', async () => {
   const { STATUSBAR_STYLES } = await import('../../src/adapters/antigravity/addon/styles.mjs');
   const allowedAtRules = new Set([
     '@media',
@@ -209,8 +238,9 @@ test('STATUSBAR_STYLES complies with addon-host v2.0.0 strict owner-CSS security
   assert.equal(/:\s*has\s*\(/i.test(STATUSBAR_STYLES), false, ':has() is forbidden in owner CSS');
   assert.equal(/&[^;{}]*[+~]/.test(STATUSBAR_STYLES), false, 'Nested sibling selector forbidden');
   assert.equal(/<\s*\/\s*style/i.test(STATUSBAR_STYLES), false, 'Closing style tag forbidden');
+  assert.equal(STATUSBAR_STYLES.includes('.agy-inline-popover'), false, 'Manual popover CSS must be removed in v3');
+  assert.equal(STATUSBAR_STYLES.includes('.agy-inline-modal'), false, 'Manual modal CSS must be removed in v3');
 
-  // Verify balanced {}, (), []
   const stack = [];
   let quote = null;
   for (let i = 0; i < STATUSBAR_STYLES.length; i += 1) {

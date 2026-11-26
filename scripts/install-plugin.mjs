@@ -15,7 +15,7 @@ import {
 const PLUGIN_NAME = 'antigravity-statusbar';
 const INCLUDE_ENTRIES = [
   'plugin.json',
-  'addon-manifest.v2.json',
+  'addon-manifest.v3.json',
   'package.json',
   'package-lock.json',
   'sidecars',

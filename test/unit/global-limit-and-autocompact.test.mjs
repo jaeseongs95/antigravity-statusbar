@@ -8,9 +8,8 @@ import test from 'node:test';
 import { createAddonRegistry } from '../../src/adapters/antigravity/addon/addon-bridge.mjs';
 import { createBarController } from '../../src/adapters/antigravity/addon/bar-controller.mjs';
 import { createBarView } from '../../src/adapters/antigravity/addon/bar-view.mjs';
-import { createGlobalLimitModalView } from '../../src/adapters/antigravity/addon/global-limit-modal-view.mjs';
 import { createInlineI18n } from '../../src/adapters/antigravity/addon/i18n.mjs';
-import { createPopoverView } from '../../src/adapters/antigravity/addon/popover-view.mjs';
+import { createDeclarativeUiSchemas } from '../../src/adapters/antigravity/addon/ui-schemas.mjs';
 import { createSidecarServer } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 import { createJsonSettingsStore } from '../../src/adapters/storage/json-settings-store.mjs';
 import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
@@ -422,10 +421,49 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
   const { doc, El } = createMockDom();
   const i18n = createInlineI18n('ko');
   const barView = createBarView({ doc, i18n });
-  const popoverView = createPopoverView({ doc, i18n });
-  const globalModalView = createGlobalLimitModalView({ doc, i18n });
+  const uiSchemas = createDeclarativeUiSchemas({ i18n });
 
-  let snapshotQueue = [];
+  const findNode = (tree, id) => {
+    if (!tree || typeof tree !== 'object') return null;
+    if (tree.id === id) return tree;
+    for (const ch of tree.children || []) {
+      const f = findNode(ch, id);
+      if (f) return f;
+    }
+    return null;
+  };
+  let activePopup = null;
+  let activeModal = null;
+  const hostPort = {
+    showToast() {},
+    openPopup(opts) {
+      const rec = {
+        opts,
+        tree: opts.tree,
+        state: { ...(opts.state || {}) },
+        closed: false,
+        update(t, s) { rec.tree = t; rec.state = { ...(s || {}) }; },
+        close() { rec.closed = true; activePopup = null; if (opts.onClose) opts.onClose(); },
+      };
+      activePopup = rec;
+      return rec;
+    },
+    openModal(opts) {
+      const rec = {
+        opts,
+        tree: opts.tree,
+        state: { ...(opts.state || {}) },
+        closed: false,
+        update(t, s) { rec.tree = t; rec.state = { ...(s || {}) }; },
+        close() { rec.closed = true; activeModal = null; if (opts.onClose) opts.onClose(); },
+      };
+      activeModal = rec;
+      return rec;
+    },
+    registerSettingsPage() { return { open() {}, update() {}, dispose() {} }; },
+  };
+
+  const snapshotQueue = [];
   const updatePayloads = [];
   let currentMaxTokens = 512_000;
   let currentAutoErr = null;
@@ -490,13 +528,12 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
 
   const addons = createAddonRegistry({ api, onChange() {} });
   const ctrl = createBarController({
-    doc,
     api,
     i18n,
     addons,
     barView,
-    popoverView,
-    globalModalView,
+    uiSchemas,
+    hostPort,
     sharedState,
     onSettingsChanged() {},
     onBurstRequested() {},
@@ -509,62 +546,55 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
 
   // G-1: Typing value BEFORE switching scope preserves the value instead of wiping it
   barView.ctxBtn.click();
-  popoverView.customInput.value = '180000';
-  popoverView.customInput.dispatchEvent({ type: 'input', target: popoverView.customInput });
-  popoverView.scopeSelect.value = 'default';
-  popoverView.scopeSelect.dispatchEvent({ type: 'change', target: popoverView.scopeSelect });
-  assert.equal(popoverView.customInput.value, '180000', 'G-1: Switching scope with dirty input must preserve value');
+  assert.ok(activePopup);
+  activePopup.opts.onChange({ field: 'customLimit', value: '180000' });
+  activePopup.opts.onChange({ field: 'scope', value: 'default' });
+  assert.equal(activePopup.state.customLimit, '180000', 'G-1: Switching scope with dirty input must preserve value');
 
-  // Open Global Context Limit Modal from popover
-  popoverView.openGlobalModalBtn.click();
-  assert.equal(globalModalView.backdropEl.classList.contains('hidden'), false);
-  assert.equal(popoverView.popEl.classList.contains('hidden'), true);
-
-  // Session override warning banner is visible because sess-m has 256K override
-  const overrideBanner = globalModalView.dialogEl.querySelector('.agy-inline-override-banner');
-  assert.equal(overrideBanner.classList.contains('hidden'), false);
+  // Open Global Context Limit Modal from Tier-2 popup -> closes popup & opens Tier-2 modal
+  const prevPopup = activePopup;
+  activePopup.opts.onAction({ actionId: 'open-global-limits' });
+  assert.equal(prevPopup.closed, true);
+  assert.ok(activeModal);
+  assert.equal(activeModal.state.hasSessionOverride, true);
 
   // Save all-models global default (200K) -> warns that current session override (256K) masks it
-  globalModalView.defaultInput.value = '200000';
-  globalModalView.defaultApplyBtn.click();
+  activeModal.opts.onChange({ field: 'defaultLimitInput', value: '200000' });
+  activeModal.opts.onAction({ actionId: 'save-default-limit' });
   await flush();
   assert.deepEqual(updatePayloads[updatePayloads.length - 1], { defaultCustomLimit: 200_000 });
-  const modalFb = globalModalView.dialogEl.querySelector('.agy-inline-pop-feedback').textContent;
+  const modalFb = findNode(activeModal.tree, 'gm-feedback').text;
   assert.ok(modalFb.includes('256.0K'), 'Modal feedback must inform user when current session override masks global default');
 
   // Use current model button populates modelNameInput, then save per-model global limit
-  globalModalView.useCurrentModelBtn.click();
-  assert.equal(globalModalView.modelNameInput.value, 'Gemini 4 Neon (High)');
-  globalModalView.modelLimitInput.value = '192000';
-  globalModalView.modelSaveBtn.click();
+  activeModal.opts.onAction({ actionId: 'use-current-model' });
+  assert.equal(activeModal.state.modelNameInput, 'Gemini 4 Neon (High)');
+  activeModal.opts.onChange({ field: 'modelLimitInput', value: '192000' });
+  activeModal.opts.onAction({ actionId: 'save-model-limit' });
   await flush();
   assert.deepEqual(updatePayloads[updatePayloads.length - 1], {
     modelLimit: { model: 'Gemini 4 Neon (High)', limit: 192_000 },
   });
 
-  // Clear current session override in one click -> banner hides!
-  globalModalView.clearSessionLimitBtn.click();
+  // Clear current session override in one click -> override alert hides!
+  activeModal.opts.onAction({ actionId: 'clear-session-limit' });
   await flush();
   assert.deepEqual(updatePayloads[updatePayloads.length - 1], {
     sessionLimit: { sessionId: 'sess-m', limit: null },
   });
-  assert.equal(overrideBanner.classList.contains('hidden'), true);
-
-  // Escape closes modal and returns focus to visible bar settings button (ISS-10)
-  doc.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {} });
-  assert.equal(globalModalView.backdropEl.classList.contains('hidden'), true);
-  assert.equal(doc.activeElement, barView.settingsBtn);
+  assert.equal(activeModal.state.hasSessionOverride, false);
+  activeModal.close();
 
   // G-1: Concurrent in-flight snapshot does NOT cause handleApplyLimit to inspect stale maxContextTokens
+  barView.ctxBtn.click();
   const deferredPoll = { defer: true, resolve: null };
   snapshotQueue.push(deferredPoll);
-  const bgPollPromise = ctrl.refreshSnapshot(); // now inFlight === true
-  currentMaxTokens = 128_000; // backend now reports 128K host max on the NEXT fresh poll
-  popoverView.scopeSelect.value = 'session';
-  popoverView.customInput.value = '200000';
-  popoverView.applyBtn.click();
+  const bgPollPromise = ctrl.refreshSnapshot();
+  currentMaxTokens = 128_000;
+  activePopup.opts.onChange({ field: 'scope', value: 'session' });
+  activePopup.opts.onChange({ field: 'customLimit', value: '200000' });
+  activePopup.opts.onAction({ actionId: 'apply-limit' });
   await flush(10);
-  // Complete the stale in-flight poll (with old 512K); fresh follow-up poll will fetch 128K
   deferredPoll.resolve({
     sessionId: 'sess-m',
     modelName: 'Gemini 4 Neon (High)',
@@ -575,7 +605,7 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
   });
   await bgPollPromise;
   await flush();
-  const clampedFb = popoverView.popEl.querySelector('.agy-inline-pop-feedback').textContent;
+  const clampedFb = findNode(activePopup.tree, 'ctx-feedback').text;
   assert.ok(clampedFb.includes('128.0K'), `Expected fresh 128.0K clamped toast, got: ${clampedFb}`);
 
   // A-3: Auto-compact failure surfaces in statusbar note

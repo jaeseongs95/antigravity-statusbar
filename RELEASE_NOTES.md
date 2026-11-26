@@ -1,3 +1,63 @@
+# Release Notes — `v3.3.0` (2026-11-26)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.3.0` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.3.0` completes the migration to **`AddonManifest.v3` + `AddonContextV3` API-First architecture** aligned with [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) **`v3.1.1+`**, provides the well-known **`host.statusbar`** delegation service for peer plugins, replaces plugin-owned remote Sidecar URL/token inputs and browser credential storage with the **Native Host `v3.1.1` centralized Remote Host Bridge**, and delivers localized 5h quota `HH:mm` reset times, expired-quota auto-refresh, and subagent model pill + focus pinning.
+
+### 2. Key Changes
+- **`AddonManifest.v3` + `AddonContextV3` API-First Migration (`addon-manifest.v3.json`, `ui-schemas.mjs`, `bar-controller.mjs`, `addon-host-adapter.mjs`, `bootstrap.mjs`, `styles.mjs`)**:
+  - Replaces `addon-manifest.v2.json` with least-privilege `addon-manifest.v3.json` (`schemaVersion: 3`, `apiVersion: 3`, `compatibility.minHostVersion: "3.1.1"`, `permissions.net: { localLoopback: ["antigravity-sidecar"] }`, `settingsBridge`, and `permissions.services.provide: [{ name: "host.statusbar", allowedCallers: ["*"] }]`).
+  - Removes manual popover/modal DOM views (`popover-view.mjs`, `global-limit-modal-view.mjs`), manual overlay coordinate math, and raw `hostProfileId` inspection.
+  - Migrates Context Popup (`ctx.ui.openPopup`), Global Context Limits Modal (`ctx.ui.openModal`), and Desktop/Remote Web Unified Settings (`ctx.ui.registerSettingsPage` — inline Shadow DOM in Desktop Settings) to Tier-1/2 declarative schemas with ID-based in-place patching and `<=640px` mobile bottom-sheet layout.
+  - Registers Tier-1 commands (`open-settings`, `open-global-limits`, `refresh-quota`, `compact-now`) and provides `host.statusbar` (`registerItem`/`updateItem`/`removeItem`) so peer plugins' `ctx.ui.registerStatusItem(...)` render inside the statusbar.
+- **Native Host `v3.1.1` Centralized Remote Host Bridge (`addon-host-adapter.mjs`, `api-client.mjs`, `bootstrap.mjs`, `bar-controller.mjs`, `ui-schemas.mjs`, `i18n.mjs`)**:
+  - Removes the plugin-owned "Remote Sidecar Connection" URL/`X-Statusbar-Token` input UI, `ctx.storage` credential persistence, `userApprovedHttps`, and direct remote HTTPS code paths.
+  - Unifies Desktop and Remote Web on `ctx.net.fetch` (`localLoopback`) + `ctx.settingsBridge`, uses dynamic getters for `ctx.env.capabilities.hasRemoteHostBridge` / `hasLocalLoopback`, and subscribes to `ctx.events.on('host:remote-bridge-changed', ...)` for live connect/disconnect transitions.
+  - Displays a read-only Host Bridge status badge and concise guidance (*"Open Addons → Host Bridge in the bottom-right drawer to connect your desktop host"*) on Remote Web when disconnected or receiving `ERR_REMOTE_HOST_NOT_CONNECTED`.
+- **Quota Reset Time & Subagent UX Enhancements (`bar-view.mjs`, `bootstrap.mjs`, `ls-transport.mjs`, `telemetry-mapper.mjs`, `sidecar-entry.mjs`)**:
+  - Shows localized `HH:mm` 5h quota reset time inline and full local timestamps in tooltips; bypasses the 15s quota cache automatically when a bucket `resetTime` has elapsed or on focus/visibility/click `forceRefresh`.
+  - Adds a subagent model pill (`isSubagent`) and pins active subagent/main views accurately on click and focus transitions.
+
+### 3. Verification
+- `node d:\gemini\개발자\work\antigravity-addons\bin\addon-host.js --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `minHostVersion: "3.1.1"`, `skippedCapabilities: []`).
+- `@antigravity-addons/sdk v3.1.1` parity tests (`test/integration/addon-v3-parity.test.mjs`): **PASS 3/3** (Desktop, Remote Web `remoteBridgeConnected: false`, Remote Web `remoteBridgeConnected: true`).
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, real Headless Chromium Shadow DOM E2E, and installer dry-run **100% PASS**.
+
+---
+
+## [한국어] `v3.3.0` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.3.0`은 [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) **`v3.1.1+`** 에 맞춰 **`AddonManifest.v3` + `AddonContextV3` API-First 구조**로 전면 전환하고, 다른 플러그인의 상태바 항목을 수용하는 **`host.statusbar` 서비스**를 제공하며, 플러그인 독자 원격 Sidecar URL/토큰 입력 UI와 저장소를 제거하고 **Native Host `v3.1.1` 중앙 관리형 통합 원격 브리지**로 단순화한 마이너 릴리즈입니다. 함께 5시간 한도 로컬 `HH:mm` 초기화 시각 표시, 만료 한도 자동 갱신, 서브에이전트 모델 배지 및 포커스 고정 기능을 포함합니다.
+
+### 2. 주요 변경 사항
+- **`AddonManifest.v3` + `AddonContextV3` API-First 전환 (`addon-manifest.v3.json`, `ui-schemas.mjs`, `bar-controller.mjs`, `addon-host-adapter.mjs`, `bootstrap.mjs`, `styles.mjs`)**:
+  - `addon-manifest.v2.json`을 최소 권한 `addon-manifest.v3.json`(`schemaVersion: 3`, `apiVersion: 3`, `compatibility.minHostVersion: "3.1.1"`, `permissions.net: { localLoopback: ["antigravity-sidecar"] }`, `settingsBridge`, `permissions.services.provide: [{ name: "host.statusbar", allowedCallers: ["*"] }]`)으로 교체했습니다.
+  - 수동 팝오버/모달 DOM 뷰(`popover-view.mjs`, `global-limit-modal-view.mjs`), 수동 좌표 배치 코드, 원시 `hostProfileId` 분기를 제거했습니다.
+  - 컨텍스트 상세 팝업(`ctx.ui.openPopup`), 전역 한도 모달(`ctx.ui.openModal`), 데스크톱·원격 웹 통합 설정 페이지(`ctx.ui.registerSettingsPage` — Desktop Settings 인라인 본문 렌더링 지원)를 Tier-1/2 선언형 스키마와 ID 인플레이스 패치, 모바일(`<=640px`) 바텀시트 자동 전환으로 구현했습니다.
+  - Tier-1 명령(`open-settings`, `open-global-limits`, `refresh-quota`, `compact-now`)을 등록하고 `host.statusbar`(`registerItem`/`updateItem`/`removeItem`) 서비스를 제공해 타 플러그인의 `ctx.ui.registerStatusItem(...)` 호출을 상태바에 통합 렌더링합니다.
+- **Native Host `v3.1.1` 중앙 관리형 통합 원격 브리지 전환 (`addon-host-adapter.mjs`, `api-client.mjs`, `bootstrap.mjs`, `bar-controller.mjs`, `ui-schemas.mjs`, `i18n.mjs`)**:
+  - 상태바 설정 화면의 플러그인 독자 "원격 Sidecar 연결"(URL + `X-Statusbar-Token`) 입력 UI, `ctx.storage` 자격 증명 저장소, `userApprovedHttps` 및 독자 원격 HTTPS 직결 경로를 모두 제거했습니다.
+  - 데스크톱과 원격 웹 모두 동일한 `ctx.net.fetch`(`localLoopback`) + `ctx.settingsBridge` 단일 경로로 통합하고, `ctx.env.capabilities.hasRemoteHostBridge`/`hasLocalLoopback` 동적 getter와 `ctx.events.on('host:remote-bridge-changed', ...)` 구독으로 연결·해제 즉시 상태를 갱신합니다.
+  - 원격 웹 미연결 또는 `ERR_REMOTE_HOST_NOT_CONNECTED` 상태에서는 입력 폼 대신 읽기 전용 배지와 *"원격 웹 우측 하단 Addons → Host Bridge 탭에서 데스크톱 호스트를 연결하세요."* 안내만 표시합니다.
+- **할당량 초기화 시각 및 서브에이전트 UX 개선 (`bar-view.mjs`, `bootstrap.mjs`, `ls-transport.mjs`, `telemetry-mapper.mjs`, `sidecar-entry.mjs`)**:
+  - 5시간 한도 옆에 로컬 `HH:mm` 초기화 시각을 표시하고 툴팁에 로컬 전체 일시를 제공하며, 초기화 시각 경과·창 포커스 복귀·클릭 시 15초 캐시를 우회해 즉시 강제 갱신합니다.
+  - 서브에이전트 대화 뷰에 모델 배지를 표시하고 클릭·포커스 전환 시 대상 세션을 안정적으로 고정합니다.
+
+### 3. 검증 근거
+- `addon-host --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `minHostVersion: "3.1.1"`, `skippedCapabilities: []`).
+- `@antigravity-addons/sdk v3.1.1` 패리티 테스트(`test/integration/addon-v3-parity.test.mjs`): **PASS 3/3** (Desktop, Remote Web `remoteBridgeConnected: false`, Remote Web `remoteBridgeConnected: true`).
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, 실제 Headless Chromium Shadow DOM E2E 및 설치 드라이런 전 항목 **100% PASS**.
+
+---
+
 # Release Notes — `v3.2.0` (2026-11-25)
 
 > **Document Policy / 문서 작성 기준**

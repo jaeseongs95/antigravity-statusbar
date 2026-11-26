@@ -653,6 +653,7 @@ export function createStatusbarService({
         sessionId,
         title: telemetry.title ?? '',
         status: telemetry.status ?? 'unknown',
+        isSubagent: Boolean(telemetry.isSubagent),
         modelName: telemetry.modelName ?? null,
         stepCount: telemetry.stepCount ?? null,
         usedTokens: telemetry.usedTokens ?? null,
@@ -690,8 +691,11 @@ export function createStatusbarService({
       };
     },
 
-    async getQuotaSummary() {
-      const quota = await telemetryPort.getQuotaSummary();
+    async getQuotaSummary(opts = {}) {
+      const forceRefresh = Boolean(opts && opts.forceRefresh);
+      const quota = await telemetryPort.getQuotaSummary(
+        forceRefresh ? { forceRefresh: true } : undefined,
+      );
       return {
         available: Boolean(quota && quota.available),
         groups: Array.isArray(quota?.groups) ? quota.groups : [],

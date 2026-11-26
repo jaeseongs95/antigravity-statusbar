@@ -1,14 +1,17 @@
 /**
- * AddonManifest.v2 lifecycle bootstrap & slot/portal coordinator (SRP / DIP).
+ * AddonManifest.v3 / AddonContextV3 lifecycle bootstrap & host integration coordinator (SRP / DIP).
  *
- * Strictly uses `RendererHostPort` (mountSlot / unmountSlot / injectStyle / removeStyle / onDispose
- * plus optional v2 openPopover / openModal portals and trusted settingsBridge methods).
- * Never injects raw style tags directly and never exposes `addonHost` or Sidecar credentials on `window`.
- *
- * Supports both `antigravity-desktop` (live Sidecar credentials delivered via host `settingsBridge`
- * while keeping `runtime/statusbar-renderer.js` 100% static & immutable) and `antigravity-remote-web`
- * (browser-local connection settings persisted via `addonHost.saveSettings`, ignoring `packed-initial`
- * snapshots, with automatic fallback to the host `status-bar` anchor / dock when `agent-input-box` is absent).
+ * API-First Architecture:
+ * - Branches strictly on `hostPort.surface === 'remote-web'` (NEVER raw `hostProfileId`).
+ * - Uses Native Host v3.1.1 centralized Remote Host Bridge on Remote Web (`hasRemoteHostBridge`,
+ *   `hasLocalLoopback`, `host:remote-bridge-changed`, `ctx.settingsBridge`, `ctx.net.fetch`),
+ *   identical to Desktop's `localLoopback` + `settingsBridge` path (zero plugin-owned remote URL/token storage).
+ * - Provides well-known service `host.statusbar` (`allowedCallers: ["*"]`) via `ctx.services.provide`
+ *   so other plugins calling `ctx.ui.registerStatusItem(...)` render seamlessly on this statusbar.
+ * - Registers Tier-1 commands (`open-settings`, `open-global-limits`, `refresh-quota`, `compact-now`)
+ *   and Tier-1 unified settings page across both Desktop and Remote Web.
+ * - Syncs `ctx.theme` (`getTokenCss()` + `onDidChange`) into the Tier-3 statusbar canvas style.
+ * - Uses `ctx.lifecycle.signal` (`AbortSignal`), `addManagedListener`, and `onDispose` for cleanup.
  */
 
 export function startAddonStatusbar({
@@ -17,8 +20,7 @@ export function startAddonStatusbar({
   i18n,
   addons,
   createBarViewFn,
-  createPopoverViewFn,
-  createGlobalLimitModalViewFn = null,
+  createDeclarativeUiSchemasFn,
   createBarControllerFn,
   doc,
   win,
@@ -27,10 +29,12 @@ export function startAddonStatusbar({
   pollConfig = {},
   hasStaticInitialConnection = false,
 }) {
-  const isRemoteWeb = Boolean(hostPort && hostPort.hostProfileId === 'antigravity-remote-web');
+  const isRemoteWeb = Boolean(hostPort && hostPort.surface === 'remote-web');
   const NORMAL_POLL_MS = pollConfig.normalPollMs || 1000;
   const BURST_POLL_MS = pollConfig.burstPollMs || 400;
   const QUOTA_POLL_MS = pollConfig.quotaPollMs || 15000;
+  const QUOTA_EXPIRED_RETRY_MS = pollConfig.quotaExpiredRetryMs || 5000;
+  const QUOTA_FOCUS_THROTTLE_MS = pollConfig.quotaFocusThrottleMs || 3000;
   const MAX_BURST_MS = pollConfig.maxBurstMs || 20000;
   const DOM_DEBOUNCE_MS = pollConfig.domDebounceMs || 150;
 
@@ -39,11 +43,40 @@ export function startAddonStatusbar({
   let snapshotPollTimer = null;
   let quotaPollTimer = null;
   let domActivityTimer = null;
+  let quotaInFlight = false;
+  let lastQuotaRefreshAt = 0;
+  let lastExpiredQuotaRetryAt = 0;
   let observer = null;
   let unsubscribeSettings = null;
+  let unsubscribeTheme = null;
+  let unsubscribeRemoteBridge = null;
+  let statusbarServiceHandle = null;
+  const hostDisposables = [];
   let currentSlotEl = null;
   let activeBoxEl = null;
   let preferredBoxEl = null;
+
+  const remoteBridgeState = {
+    eventConnected: null,
+    baseUrl: '',
+  };
+
+  function isRemoteBridgeConnected() {
+    if (!isRemoteWeb) return true;
+    if (typeof remoteBridgeState.eventConnected === 'boolean') {
+      return remoteBridgeState.eventConnected;
+    }
+    return Boolean(
+      hostPort.capabilities?.hasRemoteHostBridge || hostPort.capabilities?.hasLocalLoopback,
+    );
+  }
+
+  function getRemoteBridgeState() {
+    return {
+      connected: isRemoteBridgeConnected(),
+      baseUrl: remoteBridgeState.baseUrl,
+    };
+  }
 
   const CONVERSATION_VIEW_TESTIDS = new Set([
     'conversation-view',
@@ -65,46 +98,54 @@ export function startAddonStatusbar({
     return typeof api.isConfigured === 'function' ? Boolean(api.isConfigured()) : true;
   }
 
-  const isV2Host = hostPort.schemaVersion === 2;
-  if (isV2Host && hostPort.slotId) {
-    hostPort.injectStyle(styleId, cssText || '', { slotId: hostPort.slotId });
-  } else {
-    hostPort.injectStyle(styleId, cssText || '');
+  function canPollSidecar() {
+    if (isRemoteWeb && !isRemoteBridgeConnected()) return false;
+    return isApiConfigured();
   }
 
-  const portalHost =
-    typeof hostPort.openPopover === 'function' || typeof hostPort.openModal === 'function'
-      ? Object.freeze({
-          openPopover:
-            typeof hostPort.openPopover === 'function'
-              ? (opts) => hostPort.openPopover(opts)
-              : undefined,
-          openModal:
-            typeof hostPort.openModal === 'function'
-              ? (opts) => hostPort.openModal(opts)
-              : undefined,
-          syncStyle(kind) {
-            const targetSlotId =
-              kind === 'popover'
-                ? hostPort.popoverSlotId
-                : kind === 'modal'
-                  ? hostPort.modalSlotId
-                  : hostPort.slotId;
-            if (targetSlotId) {
-              hostPort.injectStyle(`${styleId}:${kind}`, cssText || '', {
-                slotId: targetSlotId,
-              });
-            }
-          },
-        })
-      : null;
+  function applyThemeAndStyles() {
+    if (disposed) return;
+    let tokenCss = '';
+    if (hostPort.theme && typeof hostPort.theme.getTokenCss === 'function') {
+      try {
+        tokenCss = String(hostPort.theme.getTokenCss() || '');
+      } catch {}
+    }
+    const combinedCss = tokenCss ? `${tokenCss}\n${cssText || ''}` : cssText || '';
+    if (hostPort.slotId) {
+      hostPort.injectStyle(styleId, combinedCss, { slotId: hostPort.slotId });
+    } else {
+      hostPort.injectStyle(styleId, combinedCss);
+    }
+  }
+
+  // Respect host i18n locale on initial boot before Sidecar settings override it
+  if (hostPort.hostI18n && typeof hostPort.hostI18n.getLocale === 'function') {
+    try {
+      const hostLoc = String(hostPort.hostI18n.getLocale() || '').toLowerCase();
+      if (hostLoc.startsWith('en')) i18n.setLocale('en');
+      else if (hostLoc.startsWith('ko')) i18n.setLocale('ko');
+    } catch {}
+  }
+
+  applyThemeAndStyles();
+  if (hostPort.theme && typeof hostPort.theme.onDidChange === 'function') {
+    try {
+      unsubscribeTheme = hostPort.theme.onDidChange(() => applyThemeAndStyles());
+    } catch {}
+  }
+
+  // Provide well-known service `host.statusbar` so other plugins' `ctx.ui.registerStatusItem()` render here
+  if (hostPort.services && typeof hostPort.services.provide === 'function' && addons.statusbarService) {
+    try {
+      statusbarServiceHandle = hostPort.services.provide('host.statusbar', addons.statusbarService, {
+        allowedCallers: ['*'],
+      });
+    } catch {}
+  }
 
   const barView = createBarViewFn({ doc, i18n });
-  const popoverView = createPopoverViewFn({ doc, i18n, isRemoteWeb });
-  const globalModalView =
-    typeof createGlobalLimitModalViewFn === 'function'
-      ? createGlobalLimitModalViewFn({ doc, i18n })
-      : null;
+  const uiSchemas = createDeclarativeUiSchemasFn({ i18n });
 
   function applySettingsPayload(settings) {
     if (!settings || typeof settings !== 'object') return;
@@ -146,93 +187,16 @@ export function startAddonStatusbar({
     }, delay);
   }
 
-  async function handleRemoteConnectionSave({ baseUrl, token }) {
-    if (!isRemoteWeb || typeof api.configure !== 'function') {
-      return { ok: false, code: 'ERR_REMOTE_UNAVAILABLE' };
-    }
-    const cleanToken = typeof token === 'string' ? token.trim() : '';
-    try {
-      api.configure({ baseUrl, token: cleanToken });
-    } catch (err) {
-      const msg = err?.message || '';
-      if (msg === 'ERR_INVALID_ENDPOINT_URL' || msg === 'ERR_INVALID_LOOPBACK_BASE_URL') {
-        return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL' };
-      }
-      if (msg === 'ERR_INVALID_SIDECAR_TOKEN') {
-        return { ok: false, code: 'ERR_INVALID_SIDECAR_TOKEN' };
-      }
-      return { ok: false, code: 'ERR_INVALID_ENDPOINT_URL', message: msg };
-    }
-
-    const normalizedUrl = typeof api.getBaseUrl === 'function' ? api.getBaseUrl() : baseUrl;
-    if (typeof hostPort.saveSettings === 'function') {
-      try {
-        const saveRes = await hostPort.saveSettings({
-          remoteBaseUrl: normalizedUrl,
-          remoteToken: cleanToken,
-          locale: i18n.getLocale(),
-        });
-        if (saveRes && saveRes.ok === false) {
-          if (typeof api.clearConnection === 'function') api.clearConnection();
-          return {
-            ok: false,
-            code: 'ERR_SAVE_SETTINGS_FAILED',
-            reason: saveRes.reason || 'ERR_SETTINGS_SAVE_FAILED',
-          };
-        }
-      } catch (saveErr) {
-        if (typeof api.clearConnection === 'function') api.clearConnection();
-        return {
-          ok: false,
-          code: 'ERR_SAVE_SETTINGS_FAILED',
-          reason: saveErr?.message || 'ERR_SETTINGS_SAVE_FAILED',
-        };
-      }
-    }
-
-    try {
-      const settings = await api.post('/api/settings/get', {});
-      applySettingsPayload(settings);
-      pollQuotaAndSettings();
-      pollSessionsAndSnapshots();
-      return { ok: true, baseUrl: normalizedUrl };
-    } catch (connErr) {
-      return {
-        ok: false,
-        status: connErr?.status,
-        code: connErr?.code || 'ERR_UNREACHABLE',
-        message: connErr?.message || 'Unable to reach Sidecar',
-      };
-    }
-  }
-
-  async function handleRemoteConnectionClear() {
-    if (typeof api.clearConnection === 'function') {
-      api.clearConnection();
-    }
-    if (isRemoteWeb && typeof hostPort.saveSettings === 'function') {
-      try {
-        await hostPort.saveSettings({
-          remoteBaseUrl: '',
-          remoteToken: '',
-          locale: i18n.getLocale(),
-        });
-      } catch {}
-    }
-  }
-
   const controller = createBarControllerFn({
-    doc,
-    win,
     api,
     i18n,
     addons,
     barView,
-    popoverView,
-    globalModalView,
-    portalHost,
+    uiSchemas,
+    hostPort,
     sharedState,
     isRemoteWeb,
+    getRemoteBridgeState,
     onSettingsChanged(updated) {
       applySettingsPayload(updated);
       controller.render();
@@ -241,70 +205,75 @@ export function startAddonStatusbar({
       burstUntil = Date.now() + MAX_BURST_MS;
       scheduleSnapshotPoll();
     },
-    onRemoteConnectionSave: isRemoteWeb ? handleRemoteConnectionSave : null,
-    onRemoteConnectionClear: isRemoteWeb ? handleRemoteConnectionClear : null,
   });
 
   function applyHostSettingsBridgeSnapshot(snap, { triggerPoll = true } = {}) {
     if (disposed) return;
     if (!snap || typeof snap !== 'object') return;
+    if (isRemoteWeb && snap.persistence === 'packed-initial') return;
     const data = snap.data && typeof snap.data === 'object' ? snap.data : null;
+    if (snap.status !== 'ok' || !data) return;
 
-    if (isRemoteWeb) {
-      // Defense-in-depth: never accept Desktop credentials accidentally packed via --include-settings-snapshots
-      if (snap.persistence === 'packed-initial') {
-        return;
-      }
-      if (snap.status !== 'ok' || !data) {
-        return;
-      }
-      if (data.locale === 'ko' || data.locale === 'en') {
-        i18n.setLocale(data.locale);
-      }
-      const nextUrl = typeof data.remoteBaseUrl === 'string' ? data.remoteBaseUrl.trim() : '';
-      const nextToken = typeof data.remoteToken === 'string' ? data.remoteToken.trim() : '';
-      if (nextUrl && nextToken.length >= 16 && typeof api.configure === 'function') {
-        try {
-          const changed = api.configure({ baseUrl: nextUrl, token: nextToken });
-          if (changed && triggerPoll) {
-            pollQuotaAndSettings();
-            pollSessionsAndSnapshots();
-          }
-        } catch {}
-      } else if (typeof api.clearConnection === 'function') {
+    if (
+      data.mode === 'active' &&
+      typeof data.baseUrl === 'string' &&
+      typeof data.token === 'string' &&
+      typeof api.configure === 'function'
+    ) {
+      try {
+        const changed = api.configure({ baseUrl: data.baseUrl, token: data.token });
+        if (changed && triggerPoll && canPollSidecar()) {
+          pollQuotaAndSettings();
+          pollSessionsAndSnapshots();
+        }
+      } catch {}
+    } else if (data.mode === 'standby' && !hasStaticInitialConnection) {
+      if (typeof api.clearConnection === 'function') {
         const cleared = api.clearConnection();
         if (cleared && typeof controller.resetConnectionState === 'function') {
           controller.resetConnectionState();
         }
       }
-      controller.render();
-      return;
     }
+    controller.render();
+  }
 
-    // Desktop profile: consume live Sidecar connection published by Sidecar into HOST_DATA_DIR
-    if (snap.status === 'ok' && data) {
-      if (
-        data.mode === 'active' &&
-        typeof data.baseUrl === 'string' &&
-        typeof data.token === 'string' &&
-        typeof api.configure === 'function'
-      ) {
+  function handleRemoteBridgeChanged(payload) {
+    if (disposed || !isRemoteWeb) return;
+    const hasExplicitFlag = payload && typeof payload.connected === 'boolean';
+    remoteBridgeState.eventConnected = hasExplicitFlag
+      ? payload.connected
+      : Boolean(
+          hostPort.capabilities?.hasRemoteHostBridge || hostPort.capabilities?.hasLocalLoopback,
+        );
+    remoteBridgeState.baseUrl =
+      payload && typeof payload.baseUrl === 'string' ? payload.baseUrl.trim() : '';
+
+    if (isRemoteBridgeConnected()) {
+      if (typeof hostPort.getSettings === 'function') {
         try {
-          const changed = api.configure({ baseUrl: data.baseUrl, token: data.token });
-          if (changed && triggerPoll) {
-            pollQuotaAndSettings();
-            pollSessionsAndSnapshots();
-          }
+          applyHostSettingsBridgeSnapshot(hostPort.getSettings(), { triggerPoll: false });
         } catch {}
-      } else if (data.mode === 'standby' && !hasStaticInitialConnection) {
-        if (typeof api.clearConnection === 'function') {
-          const cleared = api.clearConnection();
-          if (cleared && typeof controller.resetConnectionState === 'function') {
-            controller.resetConnectionState();
-          }
-        }
       }
-      controller.render();
+      if (typeof controller.resetConnectionState === 'function') {
+        controller.resetConnectionState();
+      }
+      if (canPollSidecar()) {
+        pollQuotaAndSettings();
+        pollSessionsAndSnapshots();
+      } else {
+        controller.render();
+      }
+    } else {
+      api.abortAll();
+      if (typeof api.clearConnection === 'function') {
+        api.clearConnection();
+      }
+      if (typeof controller.resetConnectionState === 'function') {
+        controller.resetConnectionState();
+      } else {
+        controller.render();
+      }
     }
   }
 
@@ -390,7 +359,6 @@ export function startAddonStatusbar({
     const viewEl = findClosestConversationView(boxEl);
     if (viewEl) return viewEl;
 
-    // Sibling / wrapper pane layout: walk upward only while within a single input-box pane
     let cur = boxEl.parentElement;
     while (cur && cur.nodeType === 1 && cur !== doc.body) {
       const paneBoxes =
@@ -422,12 +390,24 @@ export function startAddonStatusbar({
     return null;
   }
 
+  function isNodeInDocument(node) {
+    if (!node) return false;
+    if (typeof doc.contains === 'function') return doc.contains(node);
+    if (doc.documentElement && typeof doc.documentElement.contains === 'function') {
+      return doc.documentElement.contains(node);
+    }
+    if (doc.body && typeof doc.body.contains === 'function') {
+      return doc.body.contains(node);
+    }
+    return node.isConnected !== false;
+  }
+
   function findActiveInputBox() {
     const boxes = Array.from(doc.querySelectorAll('[data-testid="agent-input-box"]'));
     if (boxes.length === 0) return null;
 
     if (preferredBoxEl) {
-      if (doc.contains(preferredBoxEl) && boxes.includes(preferredBoxEl) && isElementVisible(preferredBoxEl)) {
+      if (isNodeInDocument(preferredBoxEl) && boxes.includes(preferredBoxEl) && isElementVisible(preferredBoxEl)) {
         return preferredBoxEl;
       }
       preferredBoxEl = null;
@@ -449,7 +429,7 @@ export function startAddonStatusbar({
       }
     }
 
-    if (activeBoxEl && doc.contains(activeBoxEl) && boxes.includes(activeBoxEl)) {
+    if (activeBoxEl && isNodeInDocument(activeBoxEl) && boxes.includes(activeBoxEl)) {
       if (isElementVisible(activeBoxEl)) return activeBoxEl;
     }
 
@@ -502,22 +482,59 @@ export function startAddonStatusbar({
       domActivityTimer = null;
       if (disposed) return;
       mountToActiveBox();
-      if (isApiConfigured()) {
+      if (canPollSidecar()) {
         controller.refreshSnapshot();
       }
     }, DOM_DEBOUNCE_MS);
   }
 
+  function hasExpiredQuotaBucket(quotaState, now) {
+    if (!quotaState || !quotaState.available || !Array.isArray(quotaState.groups)) return false;
+    for (const g of quotaState.groups) {
+      const buckets = Array.isArray(g?.buckets) ? g.buckets : [];
+      for (const b of buckets) {
+        if (typeof b?.remainingPercent !== 'number' || b.remainingPercent >= 100) continue;
+        if (typeof b?.resetTime !== 'string' || !b.resetTime.trim()) continue;
+        const resetMs = Date.parse(b.resetTime.trim());
+        if (Number.isFinite(resetMs) && resetMs <= now) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async function refreshQuotaNow({ forceRefresh = false } = {}) {
+    if (disposed || !canPollSidecar() || quotaInFlight) return;
+    quotaInFlight = true;
+    lastQuotaRefreshAt = Date.now();
+    try {
+      const payload = forceRefresh ? { forceRefresh: true } : {};
+      sharedState.quotaState = await api.post('/api/quota', payload, hostPort.lifecycleSignal || undefined);
+      controller.render();
+    } catch {} finally {
+      quotaInFlight = false;
+    }
+  }
+
   async function pollSessionsAndSnapshots() {
     if (disposed) return;
     mountToActiveBox();
-    if (!isApiConfigured()) {
+    if (!canPollSidecar()) {
       controller.render();
       return;
     }
+    const now = Date.now();
+    if (
+      hasExpiredQuotaBucket(sharedState.quotaState, now) &&
+      now - lastExpiredQuotaRetryAt >= QUOTA_EXPIRED_RETRY_MS
+    ) {
+      lastExpiredQuotaRetryAt = now;
+      refreshQuotaNow({ forceRefresh: true });
+    }
     const snapshotPromise = controller.refreshSnapshot();
     const sessionsPromise = api
-      .post('/api/sessions', {})
+      .post('/api/sessions', {}, hostPort.lifecycleSignal || undefined)
       .then((sessRes) => {
         if (Array.isArray(sessRes?.sessions) && sessRes.sessions.length > 0) {
           const preferredSession =
@@ -540,16 +557,14 @@ export function startAddonStatusbar({
   }
 
   async function pollQuotaAndSettings() {
-    if (disposed || !isApiConfigured()) return;
+    if (disposed || !canPollSidecar()) return;
     try {
-      const settings = await api.post('/api/settings/get', {});
+      const settings = await api.post('/api/settings/get', {}, hostPort.lifecycleSignal || undefined);
       applySettingsPayload(settings);
       controller.render();
     } catch {}
-    try {
-      sharedState.quotaState = await api.post('/api/quota', {});
-      controller.render();
-    } catch {}
+    const shouldForce = hasExpiredQuotaBucket(sharedState.quotaState, Date.now());
+    await refreshQuotaNow({ forceRefresh: shouldForce });
   }
 
   function isOwnNode(node) {
@@ -611,8 +626,39 @@ export function startAddonStatusbar({
       mountToActiveBox();
     }
   };
-  doc.addEventListener('focusin', onFocusIn);
-  doc.addEventListener('pointerdown', onPointerDown);
+  const onQuotaFocusOrVisible = () => {
+    if (disposed || !canPollSidecar()) return;
+    if (doc && doc.hidden === true) return;
+    const now = Date.now();
+    if (now - lastQuotaRefreshAt < QUOTA_FOCUS_THROTTLE_MS) return;
+    refreshQuotaNow({ forceRefresh: true });
+  };
+  const onQuotaClick = () => {
+    if (disposed || !canPollSidecar()) return;
+    refreshQuotaNow({ forceRefresh: true });
+  };
+
+  function bindManaged(target, type, listener) {
+    if (!target || typeof target.addEventListener !== 'function') return;
+    if (typeof hostPort.addManagedListener === 'function') {
+      const unsub = hostPort.addManagedListener(target, type, listener);
+      if (typeof unsub === 'function') hostDisposables.push(unsub);
+    } else {
+      target.addEventListener(type, listener);
+      hostDisposables.push(() => {
+        if (typeof target.removeEventListener === 'function') {
+          target.removeEventListener(type, listener);
+        }
+      });
+    }
+  }
+
+  bindManaged(doc, 'focusin', onFocusIn);
+  bindManaged(doc, 'pointerdown', onPointerDown);
+  bindManaged(doc, 'visibilitychange', onQuotaFocusOrVisible);
+  if (win) bindManaged(win, 'focus', onQuotaFocusOrVisible);
+  if (barView.quota5hEl) bindManaged(barView.quota5hEl, 'click', onQuotaClick);
+  if (barView.quotaEl) bindManaged(barView.quotaEl, 'click', onQuotaClick);
 
   if (typeof MutationObserver !== 'undefined' && doc.body) {
     observer = new MutationObserver((mutations) => {
@@ -628,7 +674,7 @@ export function startAddonStatusbar({
       }
       if (sawCascadeAttr) {
         mountToActiveBox();
-        if (isApiConfigured()) controller.refreshSnapshot();
+        if (canPollSidecar()) controller.refreshSnapshot();
       } else if (sawExternalChange) {
         mountToActiveBox();
         triggerImmediateActivityRefresh();
@@ -642,8 +688,6 @@ export function startAddonStatusbar({
     });
   }
 
-  // Expose ONLY the frozen, credential-free StatusbarAddon.v1 registry in Isolated World 998
-  // P1: Define non-writable so peer scripts cannot overwrite `window.statusbarAddons`
   if (win && typeof win === 'object') {
     try {
       Object.defineProperty(win, 'statusbarAddons', {
@@ -659,6 +703,65 @@ export function startAddonStatusbar({
     }
   }
 
+  // Register Tier-1 commands across both Desktop and Remote Web
+  if (typeof hostPort.registerCommand === 'function') {
+    const commands = [
+      {
+        id: 'open-settings',
+        label: `${i18n.t().settingsTitle}: ${i18n.t().tabSettings}`,
+        run() {
+          if (!disposed) controller.openSettings();
+        },
+      },
+      {
+        id: 'open-global-limits',
+        label: `${i18n.t().settingsTitle}: ${i18n.t().globalLimitBtn}`,
+        run() {
+          if (!disposed) controller.openGlobalLimits();
+        },
+      },
+      {
+        id: 'refresh-quota',
+        label: `${i18n.t().settingsTitle}: ${i18n.t().reloadNow}`,
+        run() {
+          if (!disposed && canPollSidecar()) {
+            refreshQuotaNow({ forceRefresh: true });
+          }
+        },
+      },
+      {
+        id: 'compact-now',
+        label: `${i18n.t().settingsTitle}: /compact`,
+        run() {
+          if (!disposed && canPollSidecar() && typeof controller.triggerCompact === 'function') {
+            controller.triggerCompact();
+          }
+        },
+      },
+    ];
+    for (const cmd of commands) {
+      try {
+        const reg = hostPort.registerCommand(cmd.id, { label: cmd.label, run: cmd.run });
+        if (reg && typeof reg.dispose === 'function') {
+          hostDisposables.push(() => reg.dispose());
+        } else if (reg && typeof reg.unregister === 'function') {
+          hostDisposables.push(() => reg.unregister());
+        }
+      } catch {}
+    }
+  }
+
+  // Subscribe to Native Host v3.1.1 central Remote Host Bridge transitions on Remote Web
+  if (isRemoteWeb && hostPort.events && typeof hostPort.events.on === 'function') {
+    try {
+      const unsub = hostPort.events.on('host:remote-bridge-changed', handleRemoteBridgeChanged);
+      if (typeof unsub === 'function') {
+        unsubscribeRemoteBridge = unsub;
+      }
+    } catch {}
+  }
+
+  // Host settingsBridge subscription (Desktop + Remote Web via Native Host v3.1.1 central Host Bridge)
   if (typeof hostPort.getSettings === 'function') {
     try {
       applyHostSettingsBridgeSnapshot(hostPort.getSettings(), { triggerPoll: false });
@@ -688,8 +791,30 @@ export function startAddonStatusbar({
       } catch {}
       unsubscribeSettings = null;
     }
-    doc.removeEventListener('focusin', onFocusIn);
-    doc.removeEventListener('pointerdown', onPointerDown);
+    if (typeof unsubscribeTheme === 'function') {
+      try {
+        unsubscribeTheme();
+      } catch {}
+      unsubscribeTheme = null;
+    }
+    if (typeof unsubscribeRemoteBridge === 'function') {
+      try {
+        unsubscribeRemoteBridge();
+      } catch {}
+      unsubscribeRemoteBridge = null;
+    }
+    if (statusbarServiceHandle && typeof statusbarServiceHandle.dispose === 'function') {
+      try {
+        statusbarServiceHandle.dispose();
+      } catch {}
+      statusbarServiceHandle = null;
+    }
+    while (hostDisposables.length > 0) {
+      const fn = hostDisposables.pop();
+      try {
+        fn();
+      } catch {}
+    }
     api.abortAll();
     controller.destroy();
     addons.clear();
@@ -706,18 +831,15 @@ export function startAddonStatusbar({
     try {
       hostPort.removeStyle(styleId);
     } catch {}
-    try {
-      hostPort.removeStyle(`${styleId}:popover`);
-    } catch {}
-    try {
-      hostPort.removeStyle(`${styleId}:modal`);
-    } catch {}
   }
 
+  if (hostPort.lifecycleSignal && typeof hostPort.lifecycleSignal.addEventListener === 'function') {
+    hostPort.lifecycleSignal.addEventListener('abort', dispose, { once: true });
+  }
   hostPort.onDispose(dispose);
 
   mountToActiveBox();
-  if (isApiConfigured()) {
+  if (canPollSidecar()) {
     pollQuotaAndSettings();
     pollSessionsAndSnapshots();
   } else {
@@ -729,12 +851,15 @@ export function startAddonStatusbar({
   return Object.freeze({
     render: controller.render,
     mountToActiveBox,
+    openContextPopup: controller.openContextPopup,
+    openSettings: controller.openSettings,
+    openGlobalLimits: controller.openGlobalLimits,
     dispose,
   });
 }
 
 /**
- * Credential-free standby renderer shown when the Sidecar has not yet published
+ * Credential-free standby renderer shown on Desktop when the Sidecar has not yet published
  * its runtime credentials before `dom-ready`/`did-finish-load` or after shutdown.
  */
 export function startStandbyStatusbar({
@@ -745,7 +870,7 @@ export function startStandbyStatusbar({
   cssText,
   styleId = 'statusbar-main',
 }) {
-  if (hostPort && hostPort.hostProfileId === 'antigravity-remote-web') {
+  if (hostPort && hostPort.surface === 'remote-web') {
     return Object.freeze({
       mountIfFound() {
         return false;
@@ -758,10 +883,17 @@ export function startStandbyStatusbar({
   let observer = null;
   let currentSlotEl = null;
 
-  if (hostPort.schemaVersion === 2 && hostPort.slotId) {
-    hostPort.injectStyle(styleId, cssText || '', { slotId: hostPort.slotId });
+  let tokenCss = '';
+  if (hostPort.theme && typeof hostPort.theme.getTokenCss === 'function') {
+    try {
+      tokenCss = String(hostPort.theme.getTokenCss() || '');
+    } catch {}
+  }
+  const combinedCss = tokenCss ? `${tokenCss}\n${cssText || ''}` : cssText || '';
+  if (hostPort.slotId) {
+    hostPort.injectStyle(styleId, combinedCss, { slotId: hostPort.slotId });
   } else {
-    hostPort.injectStyle(styleId, cssText || '');
+    hostPort.injectStyle(styleId, combinedCss);
   }
 
   const barEl = doc.createElement('div');
@@ -815,7 +947,9 @@ export function startStandbyStatusbar({
         currentSlotEl &&
           (currentSlotEl.isConnected !== undefined
             ? currentSlotEl.isConnected
-            : doc.contains(currentSlotEl)),
+            : typeof doc.contains === 'function'
+              ? doc.contains(currentSlotEl)
+              : Boolean(doc.body && typeof doc.body.contains === 'function' && doc.body.contains(currentSlotEl))),
       );
       if (!connected) {
         mountIfFound();

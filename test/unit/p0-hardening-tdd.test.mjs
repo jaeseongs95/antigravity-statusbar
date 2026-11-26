@@ -1152,7 +1152,15 @@ test('TC-P0-10 (ISS-10 & ISS-14 & ISS-13): 24h bucket label accuracy, 99.7% roun
     false,
     `24h bucket must not be labeled 주간한도, got "${view.quotaEl.textContent}"`,
   );
-  assert.ok(view.quotaEl.title.includes('2026-11-24'), 'Quota tooltip should include resetTime');
+  assert.ok(
+    view.quotaEl.title.includes(i18n.formatLocalDateTime('2026-11-24T00:00:00Z')),
+    `Quota tooltip should include localized resetTime, got "${view.quotaEl.title}"`,
+  );
+  assert.equal(
+    view.quotaEl.title.includes('2026-11-24T00:00:00Z'),
+    false,
+    'Quota tooltip must not show raw UTC ISO timestamp',
+  );
 
   // P1 ISS-13: Persisted custom button tooltip includes executed command
   view.renderAddonButtons({

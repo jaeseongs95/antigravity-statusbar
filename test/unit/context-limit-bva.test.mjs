@@ -9,7 +9,7 @@ import { createAddonRegistry } from '../../src/adapters/antigravity/addon/addon-
 import { createBarController } from '../../src/adapters/antigravity/addon/bar-controller.mjs';
 import { createBarView } from '../../src/adapters/antigravity/addon/bar-view.mjs';
 import { createInlineI18n } from '../../src/adapters/antigravity/addon/i18n.mjs';
-import { createPopoverView } from '../../src/adapters/antigravity/addon/popover-view.mjs';
+import { createDeclarativeUiSchemas } from '../../src/adapters/antigravity/addon/ui-schemas.mjs';
 import { createSidecarServer } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 import { createJsonSettingsStore } from '../../src/adapters/storage/json-settings-store.mjs';
 import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
@@ -517,7 +517,34 @@ test('TC-BVA-07: bar-controller.mjs strict decimal-integer validation, comma for
   const { doc, El } = createBvaMockDom();
   const i18n = createInlineI18n('ko');
   const barView = createBarView({ doc, i18n });
-  const popoverView = createPopoverView({ doc, i18n });
+  const uiSchemas = createDeclarativeUiSchemas({ i18n });
+
+  const findNode = (tree, id) => {
+    if (!tree || typeof tree !== 'object') return null;
+    if (tree.id === id) return tree;
+    for (const ch of tree.children || []) {
+      const f = findNode(ch, id);
+      if (f) return f;
+    }
+    return null;
+  };
+  let activePopup = null;
+  const hostPort = {
+    showToast() {},
+    openPopup(opts) {
+      const rec = {
+        opts,
+        tree: opts.tree,
+        state: { ...(opts.state || {}) },
+        update(t, s) { rec.tree = t; rec.state = { ...(s || {}) }; },
+        close() { activePopup = null; if (opts.onClose) opts.onClose(); },
+      };
+      activePopup = rec;
+      return rec;
+    },
+    openModal() { return null; },
+    registerSettingsPage() { return { open() {}, update() {}, dispose() {} }; },
+  };
 
   const updates = [];
   const api = {
@@ -555,30 +582,34 @@ test('TC-BVA-07: bar-controller.mjs strict decimal-integer validation, comma for
     autoCompactEnabled: true,
     compactPrompt: '',
     defaultCustomLimit: null,
+    modelLimits: [],
     sessionLimits: new Map(),
     quotaState: null,
     fallbackSessionId: '',
   };
   const addons = createAddonRegistry({ api, onChange() {} });
   const ctrl = createBarController({
-    doc,
     api,
     i18n,
     addons,
     barView,
-    popoverView,
+    uiSchemas,
+    hostPort,
     sharedState,
     onSettingsChanged() {},
     onBurstRequested() {},
   });
 
+  barView.ctxBtn.click();
+  assert.ok(activePopup);
+
   // Missing active session in 'session' scope -> rejected without API call
-  popoverView.scopeSelect.value = 'session';
-  popoverView.customInput.value = '64000';
-  popoverView.applyBtn.click();
+  activePopup.opts.onChange({ field: 'scope', value: 'session' });
+  activePopup.opts.onChange({ field: 'customLimit', value: '64000' });
+  activePopup.opts.onAction({ actionId: 'apply-limit' });
   await flush();
   assert.equal(updates.length, 0);
-  assert.equal(popoverView.popEl.querySelector('.agy-inline-pop-feedback').textContent, i18n.t().noActiveSession);
+  assert.equal(findNode(activePopup.tree, 'ctx-feedback').text, i18n.t().noActiveSession);
 
   // Attach active session view
   const viewEl = new El('div', doc);
@@ -603,13 +634,13 @@ test('TC-BVA-07: bar-controller.mjs strict decimal-integer validation, comma for
     '0',
   ];
   for (const bad of invalidInputs) {
-    popoverView.customInput.value = bad;
-    popoverView.applyBtn.click();
+    activePopup.opts.onChange({ field: 'customLimit', value: bad });
+    activePopup.opts.onAction({ actionId: 'apply-limit' });
     await flush(5);
     assert.equal(updates.length, 0, `UI must reject invalid limit input "${bad}" without API call`);
     assert.equal(
-      popoverView.popEl.querySelector('.agy-inline-pop-feedback').classList.contains('err'),
-      true,
+      findNode(activePopup.tree, 'ctx-feedback').variant,
+      'danger',
       `Expected error feedback for "${bad}"`,
     );
   }
@@ -627,15 +658,15 @@ test('TC-BVA-07: bar-controller.mjs strict decimal-integer validation, comma for
   ];
   for (const [inputStr, expectedLimit] of validPairs) {
     const before = updates.length;
-    popoverView.customInput.value = inputStr;
-    popoverView.applyBtn.click();
+    activePopup.opts.onChange({ field: 'customLimit', value: inputStr });
+    activePopup.opts.onAction({ actionId: 'apply-limit' });
     await flush();
     assert.equal(updates.length, before + 1, `Expected API update for valid input "${inputStr}"`);
     assert.deepEqual(updates[updates.length - 1], {
       sessionLimit: { sessionId: 'sess-ui-bva', limit: expectedLimit },
     });
 
-    const fbText = popoverView.popEl.querySelector('.agy-inline-pop-feedback').textContent;
+    const fbText = findNode(activePopup.tree, 'ctx-feedback').text;
     if (expectedLimit === 512_000) {
       assert.equal(fbText, i18n.t().applied, 'Exact hostMax (512,000) must show normal saved toast');
     } else if (expectedLimit === 512_001) {

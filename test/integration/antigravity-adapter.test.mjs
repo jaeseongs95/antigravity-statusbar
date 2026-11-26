@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { installPlugin, parseArgs } from '../../scripts/install-plugin.mjs';
 import { createAntigravityCompactionAdapter, resolveSafeAgentApiExe } from '../../src/adapters/antigravity/compaction-adapter.mjs';
 import { createLsTransport, encodeConnectFrame, parseLoopbackLsAddress } from '../../src/adapters/antigravity/ls-transport.mjs';
-import { resolvePreferredSidecarPort, startSidecar } from '../../src/adapters/antigravity/sidecar-entry.mjs';
+import { createSidecarServer, resolvePreferredSidecarPort, startSidecar } from '../../src/adapters/antigravity/sidecar-entry.mjs';
 import {
   extractLatestUsageMetadata,
   extractTailCheckpoint,
@@ -19,6 +19,7 @@ import {
   mapSessionTelemetry,
   normalizeResetTime,
 } from '../../src/adapters/antigravity/telemetry-mapper.mjs';
+import { createStatusbarService } from '../../src/core/app/statusbar-service.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -870,24 +871,34 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.2.0');
+    assert.equal(manifest.version, '3.3.0');
     const addonManifest = JSON.parse(
-      await fs.readFile(path.join(destDir, 'addon-manifest.v2.json'), 'utf8'),
+      await fs.readFile(path.join(destDir, 'addon-manifest.v3.json'), 'utf8'),
     );
-    assert.equal(addonManifest.schemaVersion, 2);
+    assert.equal(addonManifest.schemaVersion, 3);
+    assert.equal(addonManifest.apiVersion, 3);
     assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-    assert.equal(addonManifest.version, '3.2.0');
+    assert.equal(addonManifest.version, '3.3.0');
     assert.equal(addonManifest.trustLevel, 'trusted');
+    assert.deepEqual(addonManifest.compatibility.surfaces, ['desktop', 'remote-web']);
     assert.deepEqual(addonManifest.compatibility.hostProfiles, [
       'antigravity-desktop',
       'antigravity-remote-web',
     ]);
     assert.equal(addonManifest.compatibility.excludeHostProfiles, undefined);
-    assert.equal(addonManifest.compatibility.minHostVersion, '2.3.0');
+    assert.equal(addonManifest.compatibility.minHostVersion, '3.1.1');
+    assert.deepEqual(addonManifest.permissions.net, {
+      localLoopback: ['antigravity-sidecar'],
+    });
+    assert.equal(addonManifest.permissions.storage, undefined);
+    assert.deepEqual(addonManifest.permissions.services, {
+      provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }],
+    });
     assert.deepEqual(addonManifest.settingsBridge, {
       fileName: 'antigravity-statusbar-runtime.json',
       maxBytes: 16384,
     });
+    assert.equal(addonManifest.uiSlots.length, 1);
     assert.equal(addonManifest.uiSlots[0].anchor, 'status-bar');
     assert.equal(addonManifest.entry.rendererScript, 'runtime/statusbar-renderer.js');
 
@@ -1012,5 +1023,204 @@ test('TC-ADDON-11 (v3.2.0): resolvePreferredSidecarPort validates [1024, 65535] 
     blocker.closeAllConnections?.();
     await new Promise((resolve) => blocker.close(resolve));
     await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TC-ADAPTER-SUBAGENT-MODEL (v3.3.0): mapSessionTelemetry and statusbar-service propagate isSubagent and fallback modelName cleanly', async () => {
+  const subMapped = mapSessionTelemetry({
+    requestedSessionId: 'sess-sub-1',
+    streamFrame: { update: { conversationId: 'sess-sub-1', status: 'CASCADE_RUN_STATUS_RUNNING' } },
+    trajectorySummary: {
+      summary: 'Subagent worker',
+      status: 'CASCADE_RUN_STATUS_RUNNING',
+      parentCascadeId: 'sess-main-1',
+      modelDisplayName: 'Gemini 4 Neon (High)',
+    },
+    generatorMetadata: [],
+  });
+  assert.equal(subMapped.isSubagent, true);
+  assert.equal(subMapped.modelName, 'Gemini 4 Neon (High)');
+
+  const mainMapped = mapSessionTelemetry({
+    requestedSessionId: 'sess-main-1',
+    streamFrame: { update: { conversationId: 'sess-main-1', status: 'CASCADE_RUN_STATUS_IDLE' } },
+    trajectorySummary: { summary: 'Main chat', status: 'CASCADE_RUN_STATUS_IDLE' },
+    generatorMetadata: [
+      {
+        stepIndices: [1],
+        chatModel: { modelDisplayName: 'Claude Opus 5.5' },
+      },
+    ],
+  });
+  assert.equal(mainMapped.isSubagent, false);
+  assert.equal(mainMapped.modelName, 'Claude Opus 5.5');
+
+  const service = createStatusbarService({
+    telemetryPort: {
+      listSessions: async () => [],
+      getSessionTelemetry: async (sid) => (sid === 'sess-sub-1' ? subMapped : mainMapped),
+      getQuotaSummary: async () => ({ available: false, groups: [], stale: false, fetchedAt: Date.now() }),
+    },
+    compactionPort: { compactSession: async () => ({ accepted: true, method: 'rpc' }) },
+    settingsPort: {
+      read: async () => ({
+        locale: 'ko',
+        autoCompact: true,
+        autoCompactWhileRunning: 'resume',
+        compactPrompt: '',
+        defaultCustomLimit: null,
+        modelLimits: new Map(),
+        sessions: new Map(),
+        customButtons: [],
+        disabledRuntimeAddonIds: [],
+      }),
+      update: async () => ({}),
+    },
+  });
+
+  const subSnap = await service.getSessionSnapshot('sess-sub-1');
+  assert.equal(subSnap.isSubagent, true);
+  assert.equal(subSnap.modelName, 'Gemini 4 Neon (High)');
+
+  const mainSnap = await service.getSessionSnapshot('sess-main-1');
+  assert.equal(mainSnap.isSubagent, false);
+  assert.equal(mainSnap.modelName, 'Claude Opus 5.5');
+});
+
+test('TC-ADAPTER-QUOTA-REFRESH (v3.3.0): ls-transport bypasses 15s quotaCache on expired resetTime or forceRefresh and /api/quota forwards forceRefresh', async () => {
+  let rpcCount = 0;
+  let nowMs = Date.parse('2026-11-25T08:00:00Z');
+  const resetAtIso = '2026-11-25T08:00:10Z';
+  const nextResetIso = '2026-11-25T13:00:00Z';
+
+  const mockLs = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (req.url?.includes('RetrieveUserQuotaSummary')) {
+        rpcCount += 1;
+        const payload =
+          rpcCount === 1
+            ? {
+                response: {
+                  groups: [
+                    {
+                      displayName: 'Gemini Models',
+                      buckets: [
+                        {
+                          window: '5h',
+                          remainingFraction: 0,
+                          resetTime: resetAtIso,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }
+            : {
+                response: {
+                  groups: [
+                    {
+                      displayName: 'Gemini Models',
+                      buckets: [
+                        {
+                          window: '5h',
+                          remainingFraction: 1,
+                          resetTime: nextResetIso,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+
+  await new Promise((resolve) => mockLs.listen(0, '127.0.0.1', resolve));
+  const lsPort = mockLs.address().port;
+
+  let sidecar = null;
+  try {
+    const transport = createLsTransport({
+      lsAddress: `127.0.0.1:${lsPort}`,
+      csrfToken: 'csrf-quota-refresh',
+      clock: () => nowMs,
+    });
+
+    // 1. Initial fetch populates cache with 0% bucket expiring at +10s
+    const r1 = await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 1);
+    assert.equal(r1.data.response.groups[0].buckets[0].remainingFraction, 0);
+
+    // 2. At +2s (before resetTime & within 15s TTL) -> served from cache
+    nowMs += 2_000;
+    const r2 = await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 1);
+    assert.equal(r2.data.response.groups[0].buckets[0].remainingFraction, 0);
+
+    // 3. At +11s (still within 15s TTL, but resetTime has passed and >=3s since last fetch) -> auto bypasses cache!
+    nowMs += 9_000;
+    const r3 = await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 2, 'Expired bucket resetTime must bypass 15s quotaCache');
+    assert.equal(r3.data.response.groups[0].buckets[0].remainingFraction, 1);
+
+    // 4. At +12s (fresh 100% bucket, future resetTime) -> served from cache
+    nowMs += 1_000;
+    await transport.getQuotaSummaryRaw();
+    assert.equal(rpcCount, 2);
+
+    // 5. Explicit forceRefresh: true bypasses cache immediately
+    nowMs += 500;
+    await transport.getQuotaSummaryRaw({ forceRefresh: true });
+    assert.equal(rpcCount, 3, 'forceRefresh: true must bypass 15s quotaCache');
+
+    // 6. Sidecar POST /api/quota forwards { forceRefresh: true } cleanly
+    const seenOpts = [];
+    const token = 'quota-refresh-test-token-32chars!';
+    sidecar = createSidecarServer({
+      token,
+      service: {
+        listSessions: async () => ({ sessions: [], fetchedAt: nowMs }),
+        getSessionSnapshot: async () => ({}),
+        getQuotaSummary: async (opts) => {
+          seenOpts.push(opts);
+          return { available: true, groups: [], stale: false, fetchedAt: nowMs };
+        },
+        getSettings: async () => ({}),
+        updateSettings: async () => ({}),
+        requestCompaction: async () => ({ accepted: true }),
+      },
+    });
+    const { url } = await sidecar.listen();
+    const resNormal = await fetch(`${url}/api/quota`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: url,
+        'x-statusbar-token': token,
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(resNormal.status, 200);
+    const resForce = await fetch(`${url}/api/quota`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: url,
+        'x-statusbar-token': token,
+      },
+      body: JSON.stringify({ forceRefresh: true }),
+    });
+    assert.equal(resForce.status, 200);
+    assert.deepEqual(seenOpts, [undefined, { forceRefresh: true }]);
+  } finally {
+    if (sidecar) await sidecar.close();
+    mockLs.closeAllConnections?.();
+    await new Promise((resolve) => mockLs.close(resolve));
   }
 });

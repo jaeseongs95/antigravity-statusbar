@@ -115,6 +115,16 @@ export function providerInputIncludesCache(apiProvider) {
   return false;
 }
 
+function isSubagentSummary(info) {
+  if (!info || typeof info !== 'object') return false;
+  return Boolean(
+    info.isSubagent === true ||
+      (typeof info.parentCascadeId === 'string' && info.parentCascadeId.trim()) ||
+      (typeof info.parentConversationId === 'string' && info.parentConversationId.trim()) ||
+      (typeof info.parentTrajectoryId === 'string' && info.parentTrajectoryId.trim()),
+  );
+}
+
 /**
  * Maps GetAllCascadeTrajectories response to sorted SessionSummary[].
  *
@@ -131,12 +141,7 @@ export function mapTrajectorySummaries(resp) {
     if (!info || typeof info !== 'object') continue;
     const lastModifiedTime = normalizeResetTime(info.lastModifiedTime) || '';
     const lastModifiedMs = lastModifiedTime ? Date.parse(lastModifiedTime) : 0;
-    const isSubagent = Boolean(
-      info.isSubagent === true ||
-        (typeof info.parentCascadeId === 'string' && info.parentCascadeId.trim()) ||
-        (typeof info.parentConversationId === 'string' && info.parentConversationId.trim()) ||
-        (typeof info.parentTrajectoryId === 'string' && info.parentTrajectoryId.trim()),
-    );
+    const isSubagent = isSubagentSummary(info);
     items.push({
       sessionId,
       title: typeof info.summary === 'string' ? info.summary : '',
@@ -602,11 +607,22 @@ export function mapSessionTelemetry({
         ? trajectorySummary.status.trim()
         : 'unknown';
 
+  const isSubagent = Boolean(isSubagentSummary(trajectorySummary) || isSubagentSummary(update));
+  const fallbackModelName =
+    (typeof update.modelDisplayName === 'string' && update.modelDisplayName.trim()) ||
+    (typeof update.modelName === 'string' && update.modelName.trim()) ||
+    (typeof update.model === 'string' && update.model.trim()) ||
+    (typeof trajectorySummary?.modelDisplayName === 'string' && trajectorySummary.modelDisplayName.trim()) ||
+    (typeof trajectorySummary?.modelName === 'string' && trajectorySummary.modelName.trim()) ||
+    (typeof trajectorySummary?.model === 'string' && trajectorySummary.model.trim()) ||
+    null;
+
   return {
     sessionId: reportedId,
     title: typeof trajectorySummary?.summary === 'string' ? trajectorySummary.summary : '',
     status,
-    modelName: latestUsage?.modelName ?? null,
+    isSubagent,
+    modelName: latestUsage?.modelName ?? fallbackModelName,
     stepCount:
       toNonNegativeIntOrNull(trajectorySummary?.stepCount) ??
       (lastStepIndex !== null ? lastStepIndex + 1 : null),
@@ -812,8 +828,8 @@ export function createAntigravityTelemetryAdapter(lsTransport) {
       return mapped;
     },
 
-    async getQuotaSummary() {
-      const raw = await lsTransport.getQuotaSummaryRaw();
+    async getQuotaSummary(opts = {}) {
+      const raw = await lsTransport.getQuotaSummaryRaw(opts);
       return mapQuotaSummary(raw);
     },
   };
