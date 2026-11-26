@@ -4,7 +4,7 @@
  * AddonManifest.v3 Networking & Security Invariants:
  * - Routes requests through `ctx.net.fetch` (`netFetchImpl`) whenever granted by the host
  *   (Desktop `permissions.net.localLoopback` or Remote Web `permissions.net.httpsHosts`).
- * - Removes non-standard direct `GM_xmlhttpRequest` probing; all userscript/host network
+ * - Eliminates non-standard userscript XHR probing; all host network
  *   privileges remain behind the host `ctx.net.fetch` broker.
  * - On Desktop (default), restricts requests strictly to loopback `http://127.0.0.1|localhost|[::1]:<port>`.
  * - On Remote Web (`allowRemoteHttps: true`), allows loopback HTTP or explicit `https://` endpoints
