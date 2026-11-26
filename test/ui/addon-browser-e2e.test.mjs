@@ -468,7 +468,7 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
 
       window.addonHost = {
         apiVersion: 3,
-        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.3.0', trustLevel: 'trusted' },
+        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.3.1', trustLevel: 'trusted' },
         env: { surface: 'desktop', layoutMode: 'desktop', capabilities: { hasLocalLoopback: false, hasNetHttps: false, hasSettingsBridge: false } },
         theme: { getMode: () => 'dark', getTokenCss: () => ':host { --ag-accent: #38bdf8; }', onDidChange: () => () => {} },
         i18n: { getLocale: () => 'ko', onDidChange: () => () => {} },

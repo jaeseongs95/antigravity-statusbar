@@ -1,7 +1,7 @@
 {
   "name": "antigravity-statusbar",
   "displayName": "Antigravity Statusbar",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "Official Antigravity AddonManifest.v3 API-First inline statusbar (host.statusbar provider + Native Host v3.1.1 Remote Bridge) and headless native sidecar displaying real-time session context usage, prompt cache hit rate, localized 5h & weekly account quota, subagent model pill, 4-tier soft context limits, guarded auto-compaction with auto-resume, token breakdown, and one-click compaction.",
   "author": "jaeseongs95",
   "license": "MIT",
