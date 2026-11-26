@@ -328,30 +328,122 @@ export function createBarController({
     }
   }
 
+  function extractHostFromUrl(rawUrl) {
+    try {
+      return new URL(String(rawUrl || '').trim()).hostname || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function classifyRemoteNetError(rawCode, rawUrl) {
+    const code = typeof rawCode === 'string' ? rawCode.trim() : '';
+    if (!code) return null;
+    if (code === 'ERR_NET_USER_HTTPS_HOST_NOT_APPROVED') {
+      return { kind: 'approval_required', host: extractHostFromUrl(rawUrl) || 'host' };
+    }
+    if (code.startsWith('ERR_NET_HOST_NOT_ALLOWED:')) {
+      const host = code.slice('ERR_NET_HOST_NOT_ALLOWED:'.length).trim() || extractHostFromUrl(rawUrl) || 'host';
+      return { kind: 'approval_required', host };
+    }
+    if (code === 'ERR_NET_NON_STANDARD_HTTPS_PORT_FORBIDDEN') {
+      return { kind: 'port_443_only', host: extractHostFromUrl(rawUrl) || '' };
+    }
+    if (code === 'ERR_NET_LOOPBACK_NOT_SUPPORTED' || code.startsWith('ERR_NET_HOST_FORBIDDEN:')) {
+      return { kind: 'host_forbidden', host: extractHostFromUrl(rawUrl) || '' };
+    }
+    return null;
+  }
+
   function buildRemoteStatusSummary() {
     const tr = i18n.t();
     const configured = isApiConfigured();
     const currentUrl = getApiBaseUrl();
     if (!configured) {
-      return { text: tr.remoteDisconnected, isErr: false };
+      return {
+        text: tr.remoteDisconnected,
+        isErr: false,
+        variant: 'info',
+        badgeText: tr.remoteApprovalBadgeUnconfigured,
+        badgeVariant: '',
+      };
     }
     if (api.isConnected()) {
       return {
         text: i18n.formatTemplate(tr.remoteConnected, { url: currentUrl }),
         isErr: false,
+        variant: 'info',
+        badgeText: tr.remoteApprovalBadgeApproved,
+        badgeVariant: 'success',
       };
     }
     if (state.lastConnectionError) {
+      const netErr = classifyRemoteNetError(state.lastConnectionError.code, currentUrl);
+      if (netErr && netErr.kind === 'approval_required') {
+        return {
+          text: i18n.formatTemplate(tr.remoteApprovalRequired, { host: netErr.host }),
+          isErr: true,
+          variant: 'warning',
+          badgeText: tr.remoteApprovalBadgePending,
+          badgeVariant: 'warning',
+        };
+      }
+      if (netErr && netErr.kind === 'port_443_only') {
+        return {
+          text: tr.remoteHttpsPort443Only,
+          isErr: true,
+          variant: 'warning',
+          badgeText: tr.remoteApprovalBadgePending,
+          badgeVariant: 'warning',
+        };
+      }
+      if (netErr && netErr.kind === 'host_forbidden') {
+        return {
+          text: tr.remoteHostForbidden,
+          isErr: true,
+          variant: 'danger',
+          badgeText: tr.remoteApprovalBadgePending,
+          badgeVariant: 'danger',
+        };
+      }
       const status = state.lastConnectionError.status;
       if (status === 401 || status === 403) {
         return {
           text: i18n.formatTemplate(tr.remoteAuthFailed, { status }),
           isErr: true,
+          variant: 'danger',
+          badgeText: tr.remoteApprovalBadgePending,
+          badgeVariant: 'danger',
         };
       }
-      return { text: tr.remoteUnreachable, isErr: true };
+      return {
+        text: tr.remoteUnreachable,
+        isErr: true,
+        variant: 'danger',
+        badgeText: tr.remoteApprovalBadgeUnconfigured,
+        badgeVariant: 'danger',
+      };
     }
-    return { text: tr.connecting, isErr: false };
+    return {
+      text: tr.connecting,
+      isErr: false,
+      variant: 'info',
+      badgeText: tr.remoteApprovalBadgeUnconfigured,
+      badgeVariant: '',
+    };
+  }
+
+  function buildGlobalLimitsSummary() {
+    const tr = i18n.t();
+    const defVal =
+      typeof sharedState.defaultCustomLimit === 'number'
+        ? i18n.formatTokens(sharedState.defaultCustomLimit)
+        : tr.hostDefault;
+    const modelCount = Array.isArray(sharedState.modelLimits) ? sharedState.modelLimits.length : 0;
+    return i18n.formatTemplate(tr.globalLimitsSummary, {
+      defaultVal: defVal,
+      modelCount,
+    });
   }
 
   function getCombinedAddonsForSettings() {
@@ -429,6 +521,10 @@ export function createBarController({
       remoteToken: state.settingsDraft.remoteToken,
       remoteStatusText: remoteStatus.text,
       remoteStatusErr: remoteStatus.isErr,
+      remoteStatusVariant: remoteStatus.variant,
+      remoteApprovalBadgeText: remoteStatus.badgeText,
+      remoteApprovalBadgeVariant: remoteStatus.badgeVariant,
+      globalSummaryText: buildGlobalLimitsSummary(),
       autoCompact: sharedState.autoCompactEnabled,
       compactPrompt: state.settingsDraft.compactPrompt,
       addonsList: getCombinedAddonsForSettings(),
@@ -664,6 +760,7 @@ export function createBarController({
       schema: initial.tree,
       state: initial.state,
       getSchema() {
+        state.settingsPageOpen = true;
         syncSettingsDraft(false);
         return buildCurrentSettingsPageSpec().tree;
       },
@@ -1200,7 +1297,7 @@ export function createBarController({
       } else if (result && result.code === 'ERR_INVALID_SIDECAR_TOKEN') {
         setSettingsFeedback(tr.remoteInvalidToken, true);
       } else if (result && (result.status === 401 || result.status === 403)) {
-        state.lastConnectionError = { status: result.status };
+        state.lastConnectionError = { status: result.status, code: result.code };
         setSettingsFeedback(i18n.formatTemplate(tr.remoteAuthFailed, { status: result.status }), true);
       } else if (result && result.code === 'ERR_SAVE_SETTINGS_FAILED') {
         setSettingsFeedback(
@@ -1208,8 +1305,21 @@ export function createBarController({
           true,
         );
       } else {
-        state.lastConnectionError = new Error(result?.message || 'unreachable');
-        setSettingsFeedback(tr.remoteUnreachable, true);
+        const netErr = classifyRemoteNetError(result?.code, baseUrl);
+        state.lastConnectionError = {
+          status: result?.status,
+          code: result?.code || 'ERR_UNREACHABLE',
+          message: result?.message || 'unreachable',
+        };
+        if (netErr && netErr.kind === 'approval_required') {
+          setSettingsFeedback(i18n.formatTemplate(tr.remoteApprovalRequired, { host: netErr.host }), true);
+        } else if (netErr && netErr.kind === 'port_443_only') {
+          setSettingsFeedback(tr.remoteHttpsPort443Only, true);
+        } else if (netErr && netErr.kind === 'host_forbidden') {
+          setSettingsFeedback(tr.remoteHostForbidden, true);
+        } else {
+          setSettingsFeedback(tr.remoteUnreachable, true);
+        }
       }
       render();
     } catch (err) {

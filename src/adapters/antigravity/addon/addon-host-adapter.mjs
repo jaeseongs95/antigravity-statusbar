@@ -146,7 +146,7 @@ export function createAddonHostAdapter(addonHost, slotSpec = 'antigravity-status
     adapter.netFetch = (url, init) => addonHost.net.fetch(url, init);
   }
 
-  // Forward optional v3 settingsBridge namespace once exposed by antigravity-addons (Host Gap #1)
+  // Forward antigravity-addons v3.0.3+ settingsBridge namespace (trusted plugins declaring settingsBridge)
   const sb = addonHost.settingsBridge;
   if (sb && typeof sb === 'object') {
     const getFn = typeof sb.getSnapshot === 'function' ? sb.getSnapshot : sb.getSettings;

@@ -445,6 +445,10 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
     remoteToken = '',
     remoteStatusText = '',
     remoteStatusErr = false,
+    remoteStatusVariant = '',
+    remoteApprovalBadgeText = '',
+    remoteApprovalBadgeVariant = '',
+    globalSummaryText = '',
     autoCompact = true,
     compactPrompt = '',
     addonsList = [],
@@ -458,73 +462,102 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
 
     // Remote Sidecar Connection section is strictly Remote Web ONLY (never attached on Desktop!)
     if (isRemoteWeb) {
+      const effectiveStatusVariant =
+        remoteStatusVariant || (remoteStatusErr ? 'danger' : 'info');
+      const remoteChildren = [
+        { type: 'text', id: 'set-remote-hint', text: tr.remoteConnHint, tone: 'muted' },
+      ];
+      if (remoteApprovalBadgeText) {
+        const badgeNode = {
+          type: 'badge',
+          id: 'set-remote-approval-badge',
+          text: remoteApprovalBadgeText,
+        };
+        if (remoteApprovalBadgeVariant) {
+          badgeNode.variant = remoteApprovalBadgeVariant;
+        }
+        remoteChildren.push({
+          type: 'row',
+          id: 'set-remote-status-row',
+          children: [badgeNode],
+        });
+      }
+      remoteChildren.push(
+        {
+          type: 'alert',
+          id: 'set-remote-status',
+          text: remoteStatusText || tr.remoteDisconnected,
+          variant: effectiveStatusVariant,
+        },
+        {
+          type: 'input',
+          id: 'set-remote-url',
+          label: 'Sidecar URL',
+          field: 'remoteUrl',
+          inputType: 'text',
+          placeholder: tr.remoteUrlPlaceholder,
+          submitActionId: 'remote-connect',
+        },
+        {
+          type: 'input',
+          id: 'set-remote-token',
+          label: 'X-Statusbar-Token',
+          field: 'remoteToken',
+          inputType: 'password',
+          placeholder: tr.remoteTokenPlaceholder,
+          submitActionId: 'remote-connect',
+        },
+        {
+          type: 'row',
+          id: 'set-remote-actions',
+          children: [
+            {
+              type: 'button',
+              id: 'set-remote-connect-btn',
+              label: tr.remoteConnectBtn,
+              variant: 'primary',
+              actionId: 'remote-connect',
+            },
+            {
+              type: 'button',
+              id: 'set-remote-disconnect-btn',
+              label: tr.remoteDisconnectBtn,
+              actionId: 'remote-disconnect',
+            },
+          ],
+        },
+      );
       sections.push({
         type: 'section',
         id: 'set-remote-sec',
         title: tr.remoteConnTitle,
         visibleWhen: { field: 'isRemoteWeb', eq: true },
-        children: [
-          { type: 'text', id: 'set-remote-hint', text: tr.remoteConnHint, tone: 'muted' },
-          {
-            type: 'alert',
-            id: 'set-remote-status',
-            text: remoteStatusText || tr.remoteDisconnected,
-            variant: remoteStatusErr ? 'danger' : 'info',
-          },
-          {
-            type: 'input',
-            id: 'set-remote-url',
-            label: 'Sidecar URL',
-            field: 'remoteUrl',
-            inputType: 'text',
-            placeholder: tr.remoteUrlPlaceholder,
-            submitActionId: 'remote-connect',
-          },
-          {
-            type: 'input',
-            id: 'set-remote-token',
-            label: 'X-Statusbar-Token',
-            field: 'remoteToken',
-            inputType: 'password',
-            placeholder: tr.remoteTokenPlaceholder,
-            submitActionId: 'remote-connect',
-          },
-          {
-            type: 'row',
-            id: 'set-remote-actions',
-            children: [
-              {
-                type: 'button',
-                id: 'set-remote-connect-btn',
-                label: tr.remoteConnectBtn,
-                variant: 'primary',
-                actionId: 'remote-connect',
-              },
-              {
-                type: 'button',
-                id: 'set-remote-disconnect-btn',
-                label: tr.remoteDisconnectBtn,
-                actionId: 'remote-disconnect',
-              },
-            ],
-          },
-        ],
+        children: remoteChildren,
       });
     }
+
+    const globalSecChildren = [
+      { type: 'text', id: 'set-global-hint', text: tr.priorityHint, tone: 'muted' },
+    ];
+    if (globalSummaryText) {
+      globalSecChildren.push({
+        type: 'text',
+        id: 'set-global-summary',
+        text: globalSummaryText,
+      });
+    }
+    globalSecChildren.push({
+      type: 'button',
+      id: 'set-open-global-btn',
+      label: tr.globalLimitSettingsBtn,
+      actionId: 'open-global-limits',
+    });
 
     sections.push({
       type: 'section',
       id: 'set-global-sec',
       title: tr.globalModalTitle,
-      children: [
-        { type: 'text', id: 'set-global-hint', text: tr.priorityHint, tone: 'muted' },
-        {
-          type: 'button',
-          id: 'set-open-global-btn',
-          label: tr.globalLimitSettingsBtn,
-          actionId: 'open-global-limits',
-        },
-      ],
+      children: globalSecChildren,
     });
 
     sections.push({

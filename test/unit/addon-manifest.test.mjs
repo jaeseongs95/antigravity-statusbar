@@ -77,6 +77,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
     provide: [{ name: 'host.statusbar', allowedCallers: ['*'] }],
   });
   assert.deepEqual(manifest.permissions?.net, {
+    userApprovedHttps: true,
     localLoopback: ['antigravity-sidecar'],
   });
   assert.deepEqual(manifest.permissions?.dom, {
@@ -87,7 +88,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
     surfaces: ['desktop', 'remote-web'],
     hostProfile: 'antigravity-desktop',
     hostProfiles: ['antigravity-desktop', 'antigravity-remote-web'],
-    minHostVersion: '3.0.0',
+    minHostVersion: '3.0.3',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {
