@@ -1,12 +1,12 @@
-# Antigravity Statusbar (v3.3.1)
+# Antigravity Statusbar (v3.4.0)
 
 Official **Antigravity Native Plugin (`AddonManifest.v3` API-First Trusted Statusbar + `host.statusbar` Provider + Native Host `v3.1.1` Remote Bridge + Headless Native Sidecar)** for monitoring real-time session context usage, prompt cache hit rate, localized 5h & weekly account quota, subagent model display, 4-tier soft context limits (`session > model > default > host`), guarded auto-compaction with auto-resume, token breakdown, and one-click `/compact`.
 
 [한국어 문서 (README.ko.md)](./README.ko.md)
 
-## Why v3.3.1 (`AddonManifest.v3` API-First + Native Host `v3.1.1+` / Extenra `v3.2.1` Polish)
+## Why v3.4.0 (`AddonManifest.v3` API-First + Extenra `v3.3.0` Segmented UI & Centralized i18n)
 
-**v3.3.1** runs on [Extenra](https://github.com/jaeseongs95/extenra) (formerly `antigravity-addons`) **`>= 3.1.1`** (`AddonManifest.v3` + `AddonContextV3`) with least-privilege `trustLevel: "trusted"` and polishes inline statusbar wrapping/deduplication, Settings form layout, in-place Global Context Limits navigation (zero modal-on-modal stacking), and button row alignment:
+**v3.4.0** targets [Extenra](https://github.com/jaeseongs95/extenra) (formerly `antigravity-addons`) **`>= 3.3.0`** (`AddonManifest.v3` + `AddonContextV3`) with least-privilege `trustLevel: "trusted"`, adopting the host Tier-2 `segmented` `[ 한국어 | EN ]` language toggle and real-time `ctx.i18n.onDidChange` global locale synchronization across Desktop Addon Manager and Remote Web:
 
 - **3-Tier API-First UI (Zero Manual Overlay DOM)**:
   - **Tier 1**: Unified Settings page (`ctx.ui.registerSettingsPage` — rendered inline inside Desktop Settings and in Remote Web), commands (`ctx.ui.registerCommand`), and notifications (`ctx.ui.showToast`).
@@ -31,7 +31,7 @@ Official **Antigravity Native Plugin (`AddonManifest.v3` API-First Trusted Statu
 
 ## Installation
 
-Requires [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) `>= 3.1.1` installed on Antigravity Desktop.
+Requires [Extenra](https://github.com/jaeseongs95/extenra) (formerly `antigravity-addons`) `>= 3.3.0` installed on Antigravity Desktop.
 
 ```bash
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git
