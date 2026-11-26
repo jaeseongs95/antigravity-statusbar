@@ -1,3 +1,55 @@
+# Release Notes — `v3.4.0` (2026-11-26)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.4.0` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.4.0` adopts **Extenra `v3.3.0`**'s framework-standard **Tier-2 `segmented` pill switch** (`[ 한국어 | EN ]`) and **centralized host global i18n (`ctx.i18n.onDidChange`)** synchronization across Desktop and Remote Web, raising `compatibility.minHostVersion` to `"3.3.0"`.
+
+### 2. Key Changes
+- **Tier-2 `segmented` Language Switch (`src/adapters/antigravity/addon/ui-schemas.mjs`)**:
+  - Replaces the Settings language `<select>` dropdown (`set-lang-select`) with Extenra `v3.3.0`'s framework-native `type: "segmented"` control (`[{ value: "ko", label: "한국어" }, { value: "en", label: "EN" }]`), matching the Addon Manager `.ah-lang-switch` pill design with `role="group"` and `aria-pressed` accessibility.
+- **Centralized Host Global i18n Synchronization (`src/adapters/antigravity/addon/bootstrap.mjs`)**:
+  - Subscribes to `ctx.i18n.onDidChange(cb)` (for both active and standby statusbar runtimes, cleanly unsubscribed on `dispose()`).
+  - Switching `[ 한국어 | EN ]` in Desktop **Addon Manager** or the Remote Web drawer header immediately updates the statusbar UI, syncs the Sidecar persisted locale when connected, and prevents stale 15-second settings polls from reverting the host-selected locale.
+- **Manifest Minimum Host Requirement (`addon-manifest.v3.json`)**:
+  - Updates `compatibility.minHostVersion` from `"3.1.1"` to `"3.3.0"` to guarantee support for the 17th Tier-2 primitive (`segmented`).
+
+### 3. Verification
+- `node scripts/build-renderer.mjs`: **PASS** (`153,312 bytes`, `sha256: 1f90fb2bf83c721c4c85137e175bc35ea6e55e309411c654336199e5081b9c00`).
+- `extenra --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `version: "3.4.0"`, `minHostVersion: "3.3.0"`).
+- `@extenra/sdk v3.3.0` parity tests (`REQUIRE_ADDONS_SDK=1`): **PASS 3/3** (including `.ag-segmented` rendering, click switching, and `host.setLocale('en' -> 'ko')` live broadcast).
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, real Headless Chromium Shadow DOM E2E, and installer dry-run **100% PASS**.
+
+---
+
+## [한국어] `v3.4.0` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.4.0`은 **Extenra `v3.3.0`**에서 프레임워크 표준으로 제공된 **Tier-2 `segmented` 필 스위치(`[ 한국어 | EN ]`)**와 **호스트 중앙 전역 언어(`ctx.i18n.onDidChange`) 실시간 동기화**를 적용한 마이너 릴리즈입니다 (`compatibility.minHostVersion: "3.3.0"`).
+
+### 2. 주요 변경 사항
+- **Tier-2 `segmented` 언어 스위치 전환 (`src/adapters/antigravity/addon/ui-schemas.mjs`)**:
+  - 상태바 설정의 언어 선택(`set-lang-select`)을 기존 드롭다운(`select`)에서 Extenra `v3.3.0` 공용 `type: "segmented"` 컨트롤(`[{ value: "ko", label: "한국어" }, { value: "en", label: "EN" }]`)로 교체해 애드온 관리의 `.ah-lang-switch`와 동일한 필 스위치 디자인·접근성(`role="group"`, `aria-pressed`)으로 통일했습니다.
+- **호스트 중앙 전역 언어(`ctx.i18n.onDidChange`) 실시간 동기화 (`src/adapters/antigravity/addon/bootstrap.mjs`)**:
+  - 활성 상태바 및 대기 스텁 모두에서 `ctx.i18n.onDidChange(cb)`를 구독하고 `dispose()` 시 자동 해제합니다.
+  - 데스크톱 **애드온 관리** 또는 원격 웹 드로어 헤더의 `[ 한국어 | EN ]` 스위치를 전환하면 상태바 UI가 즉시 반영되고 연결된 Sidecar 설정에도 동기화되며, 15초 주기 설정 폴링이 호스트 언어를 되돌리지 않도록 보호했습니다.
+- **최소 호스트 버전 상향 (`addon-manifest.v3.json`)**:
+  - Tier-2 `segmented` 프리미티브 보장을 위해 `compatibility.minHostVersion`을 `"3.1.1"`에서 `"3.3.0"`으로 상향했습니다.
+
+### 3. 검증 근거
+- `node scripts/build-renderer.mjs`: **PASS** (`153,312 bytes`, `sha256: 1f90fb2bf83c721c4c85137e175bc35ea6e55e309411c654336199e5081b9c00`).
+- `extenra --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `version: "3.4.0"`, `minHostVersion: "3.3.0"`).
+- `@extenra/sdk v3.3.0` 패리티 테스트(`REQUIRE_ADDONS_SDK=1`): **PASS 3/3** (`.ag-segmented` 렌더링, 세그먼트 클릭 전환, `host.setLocale('en' -> 'ko')` 실시간 전파 검증 포함).
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, 실제 Headless Chromium Shadow DOM E2E 및 설치 드라이런 전 항목 **100% PASS**.
+
+---
+
 # Release Notes — `v3.3.1` (2026-11-26)
 
 > **Document Policy / 문서 작성 기준**

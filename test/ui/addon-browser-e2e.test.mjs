@@ -301,6 +301,11 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
             if (active !== ref.ctrl) ref.ctrl.value = val != null ? String(val) : '';
           } else if (node.type === 'select') {
             if (val != null) ref.ctrl.value = String(val);
+          } else if (node.type === 'segmented') {
+            const activeVal = val != null ? String(val) : '';
+            Array.from(ref.ctrl.childNodes).forEach((btn) => {
+              btn.setAttribute('aria-pressed', btn.getAttribute('data-ag-segment-value') === activeVal ? 'true' : 'false');
+            });
           } else if (node.type === 'toggle') {
             ref.ctrl.checked = Boolean(val);
           }
@@ -353,6 +358,26 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
             ctrl.addEventListener('change', () => {
               if (node.field) state[node.field] = ctrl.value;
               if (onChange) onChange({ field: node.field, value: ctrl.value, state });
+            });
+            wrapper.appendChild(ctrl);
+          } else if (node.type === 'segmented') {
+            wrapper = document.createElement('div');
+            ctrl = document.createElement('div');
+            ctrl.setAttribute('role', 'group');
+            ctrl.setAttribute('data-ag-segmented', '1');
+            const curVal = node.field && state[node.field] != null ? String(state[node.field]) : '';
+            (node.options || []).forEach((o) => {
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.setAttribute('data-ag-segment-value', o.value);
+              btn.setAttribute('aria-pressed', curVal === o.value ? 'true' : 'false');
+              btn.textContent = o.label;
+              btn.addEventListener('click', () => {
+                if (node.field) state[node.field] = o.value;
+                Array.from(ctrl.childNodes).forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+                if (onChange) onChange({ field: node.field, value: o.value, state });
+              });
+              ctrl.appendChild(btn);
             });
             wrapper.appendChild(ctrl);
           } else if (node.type === 'toggle') {
@@ -468,7 +493,7 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
 
       window.addonHost = {
         apiVersion: 3,
-        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.3.1', trustLevel: 'trusted' },
+        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.4.0', trustLevel: 'trusted' },
         env: { surface: 'desktop', layoutMode: 'desktop', capabilities: { hasLocalLoopback: false, hasNetHttps: false, hasSettingsBridge: false } },
         theme: { getMode: () => 'dark', getTokenCss: () => ':host { --ag-accent: #38bdf8; }', onDidChange: () => () => {} },
         i18n: { getLocale: () => 'ko', onDidChange: () => () => {} },
@@ -728,7 +753,11 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
       'In-place Global Limits Delete button must retain focus across 2+ live poll ticks',
     );
     await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"gm-back-settings-btn\"]').click()");
-    await waitFor("Boolean(window.__e2eShadows.settings?.querySelector('[data-ag-node-id=\"set-lang-select\"]'))");
+    await waitFor("Boolean(window.__e2eShadows.settings?.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"en\"]'))");
+    await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"en\"]').click()");
+    await waitFor("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"en\"]')?.getAttribute('aria-pressed') === 'true'");
+    await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"ko\"]').click()");
+    await waitFor("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"ko\"]')?.getAttribute('aria-pressed') === 'true'");
 
     // 7. Disconnect indicator visible even when stale snapshot exists
     failSnapshots = true;

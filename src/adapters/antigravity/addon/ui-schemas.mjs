@@ -677,12 +677,12 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
       title: tr.langLabel,
       children: [
         {
-          type: 'select',
+          type: 'segmented',
           id: 'set-lang-select',
           field: 'locale',
           options: [
             { value: 'ko', label: '한국어' },
-            { value: 'en', label: 'English' },
+            { value: 'en', label: 'EN' },
           ],
         },
       ],

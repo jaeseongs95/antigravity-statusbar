@@ -1,12 +1,12 @@
-# Antigravity Statusbar (v3.3.1)
+# Antigravity Statusbar (v3.4.0)
 
 공식 **Antigravity 네이티브 플러그인 (`AddonManifest.v3` API-First 신뢰 승인 상태바 + `host.statusbar` 제공자 + Native Host `v3.1.1` 중앙 원격 브리지 + 헤드리스 네이티브 Sidecar)** 입니다. 데스크톱 채팅 입력창 아래 및 원격 웹(`antigravity-remote-web`)에서 실시간 컨텍스트 사용량, 서브에이전트 모델 배지, 프롬프트 캐시 적중률, 로컬 시각 기반 5시간·주간 계정 한도, 4단계 컨텍스트 한도(`현재 세션 > 모델별 전역 > 일괄 전역 > 호스트 기본값`), 작업 중단 없는 가드된 자동 압축·자동 재개, 토큰 상세 내역, 원클릭 `/compact`를 제공합니다.
 
 [English README (README.md)](./README.md)
 
-## v3.3.1 아키텍처 (`AddonManifest.v3` API-First + Extenra `v3.2.1` 연계 UI/UX 개선)
+## v3.4.0 아키텍처 (`AddonManifest.v3` API-First + Extenra `v3.3.0` 세그먼트 UI·중앙 i18n 연동)
 
-**v3.3.1**은 [Extenra](https://github.com/jaeseongs95/extenra)(구 `antigravity-addons`) **`>= 3.1.1`** (`AddonManifest.v3` + `AddonContextV3`) 표준에서 최소 권한 `trustLevel: "trusted"`로 동작하며, 인라인 상태바 중복 알림·줄바꿈 정렬, 설정 폼 가독성, 중첩 모달 없는 인플레이스 전역 한도 전환, 버튼 행 정렬을 개선했습니다.
+**v3.4.0**은 [Extenra](https://github.com/jaeseongs95/extenra)(구 `antigravity-addons`) **`>= 3.3.0`** (`AddonManifest.v3` + `AddonContextV3`) 표준에서 최소 권한 `trustLevel: "trusted"`로 동작하며, 호스트 공용 Tier-2 `segmented` `[ 한국어 | EN ]` 언어 스위치와 데스크톱 애드온 관리·원격 웹 드로어 전역 언어(`ctx.i18n.onDidChange`) 실시간 동기화를 적용했습니다.
 
 - **3-Tier API-First UI (수동 오버레이 DOM·좌표 계산 제거)**:
   - **Tier 1**: 통합 설정 페이지(`ctx.ui.registerSettingsPage` — Desktop Settings 인라인 본문 및 Remote Web 공용), 명령(`ctx.ui.registerCommand`), 토스트 알림(`ctx.ui.showToast`).
@@ -31,7 +31,7 @@
 
 ## 설치 방법
 
-Antigravity Desktop에 [`antigravity-addons`](https://github.com/jaeseongs95/antigravity-addons) `>= 3.1.1`이 설치되어 있어야 합니다.
+Antigravity Desktop에 [Extenra](https://github.com/jaeseongs95/extenra)(구 `antigravity-addons`) `>= 3.3.0`이 설치되어 있어야 합니다.
 
 ```bash
 git clone https://github.com/jaeseongs95/antigravity-statusbar.git

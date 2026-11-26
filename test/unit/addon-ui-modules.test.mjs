@@ -629,7 +629,13 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-prompt-count').text, '5 / 1,000');
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-compact-prompt').rows, 4);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-sec').title, i18n.t().langLabel);
-  assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-select').label, undefined, 'Language select must not duplicate section title');
+  const langNode = findSchemaNode(desktopSettings.tree, 'set-lang-select');
+  assert.equal(langNode?.type, 'segmented', 'Language selector must use Extenra v3.3.0 Tier-2 segmented primitive');
+  assert.equal(langNode?.label, undefined, 'Language segmented control must not duplicate section title');
+  assert.deepEqual(langNode?.options, [
+    { value: 'ko', label: '한국어' },
+    { value: 'en', label: 'EN' },
+  ]);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-global-actions')?.type, 'row');
 
   const remoteSettings = schemas.buildSettingsPageSpec({
@@ -990,8 +996,16 @@ test('TC-UNIT-06: bootstrap.mjs picks visible input box, provides host.statusbar
   let styleRemoved = false;
   let slotUnmounted = false;
   const fakeHost = createFakeV3HostPort({ surface: 'desktop' });
+  const localeListeners = new Set();
   const hostPort = {
     ...fakeHost.hostPort,
+    hostI18n: {
+      getLocale: () => 'ko',
+      onDidChange(cb) {
+        localeListeners.add(cb);
+        return () => localeListeners.delete(cb);
+      },
+    },
     mountSlot(parentEl) {
       parentEl.appendChild(slotEl);
       return slotEl;
@@ -1041,9 +1055,15 @@ test('TC-UNIT-06: bootstrap.mjs picks visible input box, provides host.statusbar
   assert.deepEqual(fakeHost.services.get('host.statusbar').opts, { allowedCallers: ['*'] });
   assert.equal(fakeHost.commands.has('open-settings'), true);
   assert.equal(fakeHost.commands.has('compact-now'), true);
+  assert.equal(localeListeners.size, 1, 'Must subscribe to hostPort.hostI18n.onDidChange');
+  for (const cb of localeListeners) cb('en');
+  assert.equal(i18n.getLocale(), 'en', 'Host global locale broadcast must switch statusbar locale immediately');
+  for (const cb of localeListeners) cb('ko');
+  assert.equal(i18n.getLocale(), 'ko');
 
   assert.equal(disposers.length, 1);
   disposers[0]();
+  assert.equal(localeListeners.size, 0, 'dispose() must unsubscribe hostI18n.onDidChange');
   assert.equal(aborted, true);
   assert.equal(slotUnmounted, true);
   assert.equal(styleRemoved, true);
