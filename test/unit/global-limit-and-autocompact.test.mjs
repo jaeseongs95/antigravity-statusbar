@@ -434,8 +434,11 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
   };
   let activePopup = null;
   let activeModal = null;
+  const toasts = [];
   const hostPort = {
-    showToast() {},
+    showToast(opts) {
+      toasts.push(opts);
+    },
     openPopup(opts) {
       const rec = {
         opts,
@@ -608,11 +611,18 @@ test('TC-GLOBAL-04 & TC-GLOBAL-05: Global Limit Modal (all-models + per-model + 
   const clampedFb = findNode(activePopup.tree, 'ctx-feedback').text;
   assert.ok(clampedFb.includes('128.0K'), `Expected fresh 128.0K clamped toast, got: ${clampedFb}`);
 
-  // A-3: Auto-compact failure surfaces in statusbar note
+  // A-3: Auto-compact failure surfaces via host toast without duplicating inline statusbar note
   currentAutoErr = { code: 'COMPACTION_FAILED', message: 'RPC timeout', at: 999999 };
   await ctrl.refreshSnapshot({ waitForFresh: true });
-  const noteText = barView.barEl.querySelector('.agy-inline-status-note').textContent;
-  assert.ok(noteText.includes('RPC timeout'));
+  assert.ok(
+    toasts.some((t) => t.variant === 'danger' && String(t.message || '').includes('RPC timeout')),
+    'Auto-compact failure must emit danger toast',
+  );
+  assert.equal(
+    barView.barEl.querySelector('.agy-inline-status-note').textContent,
+    '',
+    'Inline status note must remain empty when host toast is emitted',
+  );
 
   ctrl.destroy();
 });

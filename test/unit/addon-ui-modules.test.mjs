@@ -420,6 +420,7 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   assert.equal(fill.style.width, '75%');
   assert.equal(fill.classList.contains('warn'), true);
   assert.equal(badge.style.display, 'none');
+  assert.equal(view.compactBtn.style.display, '');
   assert.equal(view.compactBtn.title, '/compact 핵심만');
 
   view.renderSnapshot({
@@ -442,6 +443,7 @@ test('TC-UNIT-03: bar-view.mjs renders thresholds (warn/danger/unclamped>100%), 
   assert.ok(view.ctxBtn.textContent.includes('117%'));
   assert.equal(badge.textContent, i18n.t().autoCompacting);
   assert.equal(view.compactBtn.disabled, true);
+  assert.equal(view.compactBtn.style.display, 'none', 'Must hide redundant disabled ellipsis compactBtn when compaction badge is shown');
 
   // host.statusbar delegated items (left & right, badge, tooltip, trusted click payload, untrusted click rejected)
   const delegatedClicks = [];
@@ -625,6 +627,10 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-url'), null);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-token'), null);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-prompt-count').text, '5 / 1,000');
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-compact-prompt').rows, 4);
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-sec').title, i18n.t().langLabel);
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-select').label, undefined, 'Language select must not duplicate section title');
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-global-actions')?.type, 'row');
 
   const remoteSettings = schemas.buildSettingsPageSpec({
     isRemoteWeb: true,
@@ -645,7 +651,7 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
   assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-connect-btn'), null);
   assert.equal(findSchemaNode(remoteSettings.tree, 'set-remote-disconnect-btn'), null);
 
-  // 3. Global Limit Modal schema
+  // 3. Global Limit Modal schema (button row alignment + optional back-to-settings header)
   const modalSpec = schemas.buildGlobalLimitModalSpec({
     defaultCustomLimit: 200000,
     defaultLimitInput: '200000',
@@ -656,6 +662,19 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
   assert.equal(modalSpec.state.hasSessionOverride, true);
   assert.equal(modalSpec.state.hasCurrentModel, true);
   assert.ok(findSchemaNode(modalSpec.tree, 'gm-override-alert').text.includes('256.0K'));
+  assert.equal(findSchemaNode(modalSpec.tree, 'gm-back-row'), null);
+  const modelActionsRow = findSchemaNode(modalSpec.tree, 'gm-model-actions');
+  assert.equal(modelActionsRow?.type, 'row', 'Model Save button must be wrapped in a row matching All-Models Default actions');
+  assert.equal(modelActionsRow?.children?.[0]?.id, 'gm-model-save-btn');
+  assert.equal(findSchemaNode(modalSpec.tree, 'gm-override-actions')?.type, 'row');
+  assert.equal(findSchemaNode(modalSpec.tree, 'gm-model-pick-actions')?.type, 'row');
+
+  const subviewSpec = schemas.buildGlobalLimitModalSpec({
+    defaultCustomLimit: 200000,
+    showBackToSettings: true,
+  });
+  assert.equal(findSchemaNode(subviewSpec.tree, 'gm-back-row')?.type, 'row');
+  assert.equal(findSchemaNode(subviewSpec.tree, 'gm-back-settings-btn')?.actionId, 'back-to-settings');
 });
 
 test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty drafts across polls, validates limit bounds, drives Tier 1/2 overlays & toasts, and cleans up on destroy', async () => {
@@ -808,12 +827,40 @@ test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty drafts 
     sentRequests.some((r) => r.pathname === '/api/settings/update' && r.body.compactPrompt === '핵심만'),
   );
 
-  // COMPACTION_IN_PROGRESS error emits localized note & danger toast
+  // Opening Global Context Limits from Settings switches in-place (NO nested modal-on-modal) and supports Back
+  settingsPage.spec.onAction({ actionId: 'open-global-limits' });
+  assert.equal(fakeHost.getModal(), null, 'Must NOT open a nested second modal over Settings');
+  assert.equal(settingsPage.tree.id, 'gm-root');
+  assert.ok(findSchemaNode(settingsPage.tree, 'gm-back-settings-btn'));
+  settingsPage.spec.onAction({ actionId: 'back-to-settings' });
+  assert.equal(settingsPage.tree.id, 'set-root');
+
+  // COMPACTION_IN_PROGRESS emits danger toast WITHOUT duplicate inline status note when host toast is available
   compactError = { code: 'COMPACTION_IN_PROGRESS', message: 'busy' };
   barView.compactBtn.click();
   await flush();
-  assert.equal(barView.barEl.querySelector('.agy-inline-status-note').textContent, i18n.t().compactInProgress);
+  assert.equal(barView.barEl.querySelector('.agy-inline-status-note').textContent, '');
   assert.ok(fakeHost.toasts.some((t) => t.variant === 'danger' && t.message === i18n.t().compactInProgress));
+
+  // Fallback path without hostPort.showToast still surfaces inline status note
+  const fallbackBarView = createBarView({ doc, i18n });
+  const fallbackHost = { ...fakeHost.hostPort, showToast: undefined };
+  const fallbackCtrl = createBarController({
+    api,
+    i18n,
+    addons,
+    barView: fallbackBarView,
+    uiSchemas,
+    hostPort: fallbackHost,
+    sharedState,
+    onSettingsChanged() {},
+    onBurstRequested() {},
+  });
+  fallbackCtrl.setTargetView(view1);
+  fallbackBarView.compactBtn.click();
+  await flush();
+  assert.equal(fallbackBarView.barEl.querySelector('.agy-inline-status-note').textContent, i18n.t().compactInProgress);
+  fallbackCtrl.destroy();
 
   ctrl.destroy();
   assert.equal(fakeHost.getPopup(), null);
@@ -1355,6 +1402,9 @@ test('TC-UNIT-07: api-client, i18n dictionary symmetry, and slim v3 styles check
   assert.equal(STATUSBAR_STYLE_ID, 'statusbar-main');
   assert.ok(STATUSBAR_STYLES.includes('.agy-inline-statusbar'));
   assert.ok(STATUSBAR_STYLES.includes('--ag-accent'));
+  assert.ok(STATUSBAR_STYLES.includes('margin-left: auto;'));
+  assert.ok(STATUSBAR_STYLES.includes('justify-content: flex-end;'));
+  assert.ok(STATUSBAR_STYLES.includes('.agy-inline-status-note:empty'));
   assert.equal(STATUSBAR_STYLES.includes('.agy-inline-popover'), false);
 
   const koI18n = createInlineI18n('ko');

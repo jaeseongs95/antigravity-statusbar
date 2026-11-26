@@ -230,6 +230,7 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
     modelLimitInput = '',
     modelPreset = '',
     sessionOverrideLimit = null,
+    showBackToSettings = false,
     feedback = '',
     feedbackIsErr = false,
   } = {}) {
@@ -291,10 +292,28 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
       }
     }
 
-    const tree = {
-      type: 'stack',
-      id: 'gm-root',
-      children: [
+    const rootChildren = [];
+    if (showBackToSettings) {
+      rootChildren.push({
+        type: 'row',
+        id: 'gm-back-row',
+        children: [
+          {
+            type: 'button',
+            id: 'gm-back-settings-btn',
+            label: tr.backToSettings,
+            actionId: 'back-to-settings',
+          },
+          {
+            type: 'heading',
+            id: 'gm-subview-heading',
+            level: 3,
+            text: tr.globalModalTitle,
+          },
+        ],
+      });
+    }
+    rootChildren.push(
         { type: 'text', id: 'gm-priority-hint', text: tr.priorityHint, tone: 'muted' },
         {
           type: 'section',
@@ -312,10 +331,16 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
                 : '',
             },
             {
-              type: 'button',
-              id: 'gm-clear-session-btn',
-              label: tr.clearSessionLimit,
-              actionId: 'clear-session-limit',
+              type: 'row',
+              id: 'gm-override-actions',
+              children: [
+                {
+                  type: 'button',
+                  id: 'gm-clear-session-btn',
+                  label: tr.clearSessionLimit,
+                  actionId: 'clear-session-limit',
+                },
+              ],
             },
           ],
         },
@@ -370,11 +395,17 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
           children: [
             { type: 'text', id: 'gm-model-hint', text: tr.modelLimitsCardHint, tone: 'muted' },
             {
-              type: 'button',
-              id: 'gm-use-current-model-btn',
-              label: tr.useCurrentModel,
-              actionId: 'use-current-model',
-              disabledWhen: { field: 'hasCurrentModel', eq: false },
+              type: 'row',
+              id: 'gm-model-pick-actions',
+              children: [
+                {
+                  type: 'button',
+                  id: 'gm-use-current-model-btn',
+                  label: tr.useCurrentModel,
+                  actionId: 'use-current-model',
+                  disabledWhen: { field: 'hasCurrentModel', eq: false },
+                },
+              ],
             },
             {
               type: 'input',
@@ -401,11 +432,17 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
               submitActionId: 'save-model-limit',
             },
             {
-              type: 'button',
-              id: 'gm-model-save-btn',
-              label: tr.save,
-              variant: 'primary',
-              actionId: 'save-model-limit',
+              type: 'row',
+              id: 'gm-model-actions',
+              children: [
+                {
+                  type: 'button',
+                  id: 'gm-model-save-btn',
+                  label: tr.save,
+                  variant: 'primary',
+                  actionId: 'save-model-limit',
+                },
+              ],
             },
             { type: 'divider', id: 'gm-models-div' },
             {
@@ -422,7 +459,12 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
           variant: feedbackIsErr ? 'danger' : 'info',
           visibleWhen: { field: 'hasFeedback', eq: true },
         },
-      ],
+    );
+
+    const tree = {
+      type: 'stack',
+      id: 'gm-root',
+      children: rootChildren,
     };
 
     const state = {
@@ -501,10 +543,16 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
       });
     }
     globalSecChildren.push({
-      type: 'button',
-      id: 'set-open-global-btn',
-      label: tr.globalLimitSettingsBtn,
-      actionId: 'open-global-limits',
+      type: 'row',
+      id: 'set-global-actions',
+      children: [
+        {
+          type: 'button',
+          id: 'set-open-global-btn',
+          label: tr.globalLimitSettingsBtn,
+          actionId: 'open-global-limits',
+        },
+      ],
     });
 
     sections.push({
@@ -530,7 +578,7 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
           id: 'set-compact-prompt',
           label: tr.compactPromptTitle,
           field: 'compactPrompt',
-          rows: 3,
+          rows: 4,
           placeholder: tr.compactPromptPlaceholder,
         },
         {
@@ -631,7 +679,6 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
         {
           type: 'select',
           id: 'set-lang-select',
-          label: tr.langLabel,
           field: 'locale',
           options: [
             { value: 'ko', label: '한국어' },

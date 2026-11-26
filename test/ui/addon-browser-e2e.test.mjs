@@ -379,26 +379,46 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
           return wrapper;
         }
 
-        function reconcile(node) {
+        function collectIds(node, outSet) {
+          if (!node || typeof node !== 'object') return;
+          if (node.id) outSet.add(node.id);
+          if (Array.isArray(node.children)) node.children.forEach((ch) => collectIds(ch, outSet));
+        }
+
+        function reconcile(node, seenIds) {
           if (node.id && refs.has(node.id) && refs.get(node.id).type === node.type) {
             const ref = refs.get(node.id);
+            seenIds.add(node.id);
             patchNode(ref, node);
             if (ref.mountEl && Array.isArray(node.children)) {
-              node.children.forEach((ch) => {
-                const el = reconcile(ch);
+              const desired = node.children.map((ch) => reconcile(ch, seenIds));
+              Array.from(ref.mountEl.childNodes).forEach((child) => {
+                if (!desired.includes(child) && child !== ref.mountEl.firstChild) ref.mountEl.removeChild(child);
+              });
+              desired.forEach((el) => {
                 if (el.parentNode !== ref.mountEl) ref.mountEl.appendChild(el);
               });
             }
             return ref.wrapper;
           }
-          return buildNode(node);
+          const built = buildNode(node);
+          collectIds(node, seenIds);
+          return built;
         }
 
         container.appendChild(buildNode(initTree));
         return {
           update(nextTree, nextState) {
             state = Object.assign({}, nextState || {});
-            reconcile(nextTree);
+            const seenIds = new Set();
+            const nextRoot = reconcile(nextTree, seenIds);
+            if (nextRoot !== container.firstChild) {
+              while (container.firstChild) container.removeChild(container.firstChild);
+              container.appendChild(nextRoot);
+            }
+            Array.from(refs.keys()).forEach((oldId) => {
+              if (!seenIds.has(oldId)) refs.delete(oldId);
+            });
           },
           getElementById(id) {
             return refs.has(id) ? refs.get(id).wrapper : null;
@@ -686,22 +706,29 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
     assert.equal(desktopSettingsText.includes('원격 Sidecar 연결'), false);
     assert.equal(desktopSettingsText.includes('원격 호스트 브리지'), false);
 
-    // 6. Tier-2 Global Limits Modal: Delete button retains focus across 2+ live poll ticks via ID in-place patching
+    // 6. Tier-1 Settings -> Global Limits switches IN-PLACE (zero modal-on-modal), retains Delete focus across 2+ polls, and navigates Back
     await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-open-global-btn\"]').click()");
-    await waitFor("Boolean(window.__e2eShadows.modal?.querySelector('[data-ag-node-id=\"gm-models-list\"] button'))");
+    await waitFor("Boolean(window.__e2eShadows.settings?.querySelector('[data-ag-node-id=\"gm-models-list\"] button'))");
+    assert.equal(
+      await evalExpr("window.__e2eShadows.modal === null"),
+      true,
+      'Opening Global Context Limits from Settings must switch in-place without opening a nested second modal',
+    );
     await evalExpr(`(() => {
-      const delBtn = Array.from(window.__e2eShadows.modal.querySelectorAll('[data-ag-node-id="gm-models-list"] button'))
+      const delBtn = Array.from(window.__e2eShadows.settings.querySelectorAll('[data-ag-node-id="gm-models-list"] button'))
         .find((b) => b.textContent === '삭제');
       window.__focusedDelBtn = delBtn;
       delBtn.focus();
     })()`);
-    assert.equal(await evalExpr("window.__e2eShadows.modal.activeElement === window.__focusedDelBtn"), true);
+    assert.equal(await evalExpr("window.__e2eShadows.settings.activeElement === window.__focusedDelBtn"), true);
     await new Promise((r) => setTimeout(r, 2_300));
     assert.equal(
-      await evalExpr("window.__e2eShadows.modal.activeElement === window.__focusedDelBtn && window.__focusedDelBtn.isConnected"),
+      await evalExpr("window.__e2eShadows.settings.activeElement === window.__focusedDelBtn && window.__focusedDelBtn.isConnected"),
       true,
-      'Tier-2 modal Delete button must retain focus across 2+ live poll ticks',
+      'In-place Global Limits Delete button must retain focus across 2+ live poll ticks',
     );
+    await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"gm-back-settings-btn\"]').click()");
+    await waitFor("Boolean(window.__e2eShadows.settings?.querySelector('[data-ag-node-id=\"set-lang-select\"]'))");
 
     // 7. Disconnect indicator visible even when stale snapshot exists
     failSnapshots = true;
