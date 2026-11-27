@@ -1,6 +1,6 @@
 {
   "name": "antigravity-statusbar",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "Official Antigravity Native Plugin (AddonManifest.v3 API-First Statusbar + Headless Native Sidecar) for real-time context usage, prompt cache hit rate, 5h/weekly quota, 4-tier context limits, guarded auto-compact & auto-resume, editable compaction prompt, and host.statusbar delegation.",
   "type": "module",
   "engines": {

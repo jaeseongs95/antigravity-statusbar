@@ -51,6 +51,23 @@ function queryDeep(root, selector) {
   return null;
 }
 
+function findDeepByClass(root, className) {
+  if (!root) return null;
+  if (typeof root.className === 'string' && root.className.split(/\s+/).includes(className)) {
+    return root;
+  }
+  if (root.shadowRoot) {
+    const inShadow = findDeepByClass(root.shadowRoot, className);
+    if (inShadow) return inShadow;
+  }
+  const nodes = Array.isArray(root.childNodes) ? root.childNodes : [];
+  for (const child of nodes) {
+    const found = findDeepByClass(child, className);
+    if (found) return found;
+  }
+  return null;
+}
+
 function appendConversationInputBox(doc, sessionId) {
   const view = doc.createElement('div');
   view.setAttribute('data-testid', 'conversation-view');
@@ -268,46 +285,64 @@ test('TC-V3-PARITY-01 (Desktop): @antigravity-addons/sdk createTestHost({ surfac
     peerItemHandle.dispose();
     assert.equal(queryDeep(host.doc.body, '[data-status-plugin-id="peer-translator"]'), null);
 
-    // 3. Tier-1 Unified Settings Page registered & Desktop hides Remote Host Bridge section
+    // 3. Tier-1 Unified Settings Page registered with Extenra v3.3.2+ header locale switch & dynamic getTitle
     const pages = host.getSettingsPages();
-    assert.ok(pages.some((p) => p.pluginId === 'antigravity-statusbar' && p.id === 'settings'));
+    const statusbarPageMeta = pages.find((p) => p.pluginId === 'antigravity-statusbar' && p.id === 'settings');
+    assert.ok(statusbarPageMeta);
+    assert.equal(statusbarPageMeta.title, '상태바');
+    assert.equal(statusbarPageMeta.showLocaleSwitch, true);
     const settingsHandle = mountedApp.runtime.openSettings();
     assert.ok(settingsHandle, 'openSettings must open Tier-1 registered settings page');
     assert.equal(settingsHandle.getElementById('set-remote-bridge-sec'), null, 'Desktop settings page must NOT render Remote Host Bridge section');
     assert.equal(settingsHandle.getElementById('set-remote-url'), null);
     assert.equal(settingsHandle.getElementById('set-remote-token'), null);
+    assert.equal(settingsHandle.getElementById('set-lang-sec'), null, 'Settings body must NOT render redundant bottom language section');
+    assert.equal(settingsHandle.getElementById('set-lang-select'), null, 'Settings body must NOT render duplicate language control');
     const globalSummaryEl = settingsHandle.getElementById('set-global-summary');
     assert.ok(globalSummaryEl, 'Desktop settings page must show live global limits summary');
     assert.ok(globalSummaryEl.textContent.includes('200.0K'));
     assert.ok(globalSummaryEl.textContent.includes('1'));
     assert.ok(settingsHandle.getElementById('set-autocompact-toggle'));
-    const langSegEl = settingsHandle.getElementById('set-lang-select');
-    assert.ok(langSegEl, 'Settings must render Extenra v3.3.0 Tier-2 segmented language control');
-    assert.equal(langSegEl.getAttribute('data-ag-segmented'), '1');
-    assert.equal(langSegEl.getAttribute('role'), 'group');
-    const koSegBtn = langSegEl.childNodes.find((b) => b.getAttribute?.('data-ag-segment-value') === 'ko');
-    const enSegBtn = langSegEl.childNodes.find((b) => b.getAttribute?.('data-ag-segment-value') === 'en');
-    assert.equal(koSegBtn?.textContent, '한국어');
-    assert.equal(enSegBtn?.textContent, 'EN');
-    assert.equal(koSegBtn?.getAttribute('aria-pressed'), 'true');
-    assert.equal(enSegBtn?.getAttribute('aria-pressed'), 'false');
-    // Clicking EN in segmented switch updates UI to English
-    enSegBtn.click();
+
+    // Extenra v3.3.2+ host-owned header [한국어|EN] switch & dynamic getTitle sync
+    const headerTitleEl = findDeepByClass(settingsHandle.element, 'ag-ui-title');
+    assert.equal(headerTitleEl?.textContent, '상태바');
+    const headerLangSwitch = queryDeep(settingsHandle.element, '[data-addon-host-control="locale-switch"]');
+    assert.ok(headerLangSwitch, 'Extenra v3.3.2+ Settings header must mount host-owned [한국어|EN] locale switch');
+    const headerKoBtn = queryDeep(headerLangSwitch, '[data-addon-host-lang="ko"]');
+    const headerEnBtn = queryDeep(headerLangSwitch, '[data-addon-host-lang="en"]');
+    assert.equal(headerKoBtn?.textContent, '한국어');
+    assert.equal(headerEnBtn?.textContent, 'EN');
+    assert.equal(headerKoBtn?.getAttribute('aria-pressed'), 'true');
+    assert.equal(headerEnBtn?.getAttribute('aria-pressed'), 'false');
+
+    // Clicking EN in the host header updates global host locale, Settings header title, and body schema
+    headerEnBtn.click();
     assert.equal(mountedApp.i18n.getLocale(), 'en');
-    assert.equal(enSegBtn.getAttribute('aria-pressed'), 'true');
-    koSegBtn.click();
+    assert.equal(headerTitleEl?.textContent, 'Statusbar');
+    assert.equal(headerEnBtn.getAttribute('aria-pressed'), 'true');
+    assert.equal(headerKoBtn.getAttribute('aria-pressed'), 'false');
+    assert.ok(
+      netCalls.some((c) => c.pathname === '/api/settings/update' && c.body?.locale === 'en'),
+      'Header locale change must sync persisted locale to Sidecar',
+    );
+    // Clicking 한국어 in the host header switches back cleanly
+    headerKoBtn.click();
     assert.equal(mountedApp.i18n.getLocale(), 'ko');
-    assert.equal(koSegBtn.getAttribute('aria-pressed'), 'true');
-    // Extenra v3.3.0 centralized host.setLocale('en' -> 'ko') broadcasts via ctx.i18n.onDidChange
+    assert.equal(headerTitleEl?.textContent, '상태바');
+    assert.equal(headerKoBtn.getAttribute('aria-pressed'), 'true');
+    assert.equal(headerEnBtn.getAttribute('aria-pressed'), 'false');
+
+    // External host.setLocale('en' -> 'ko') broadcast (e.g. from Addon Manager) stays synchronized
     if (typeof host.setLocale === 'function') {
       host.setLocale('en');
       assert.equal(mountedApp.i18n.getLocale(), 'en');
-      assert.equal(enSegBtn.getAttribute('aria-pressed'), 'true');
-      assert.equal(koSegBtn.getAttribute('aria-pressed'), 'false');
+      assert.equal(headerTitleEl?.textContent, 'Statusbar');
+      assert.equal(headerEnBtn.getAttribute('aria-pressed'), 'true');
       host.setLocale('ko');
       assert.equal(mountedApp.i18n.getLocale(), 'ko');
-      assert.equal(koSegBtn.getAttribute('aria-pressed'), 'true');
-      assert.equal(enSegBtn.getAttribute('aria-pressed'), 'false');
+      assert.equal(headerTitleEl?.textContent, '상태바');
+      assert.equal(headerKoBtn.getAttribute('aria-pressed'), 'true');
     }
     const compactPromptEl = settingsHandle.getElementById('set-compact-prompt');
     assert.equal(compactPromptEl?.getAttribute('rows'), '4');
@@ -316,7 +351,8 @@ test('TC-V3-PARITY-01 (Desktop): @antigravity-addons/sdk createTestHost({ surfac
     assert.ok(settingsHandle.getElementById('gm-back-settings-btn'), 'Settings must switch in-place to Global Limits with Back button');
     assert.equal(settingsHandle.getElementById('gm-model-actions')?.className, 'ag-row');
     settingsHandle.getElementById('gm-back-settings-btn')?.click();
-    assert.ok(settingsHandle.getElementById('set-lang-select'), 'Back button must restore main Settings view');
+    assert.ok(settingsHandle.getElementById('set-open-global-btn'), 'Back button must restore main Settings view');
+    assert.equal(settingsHandle.getElementById('set-lang-select'), null);
     settingsHandle.close();
 
     // 4. Tier-2 Context Popup via ui.openPopup + in-place update preserving focused input + <=640px mobile sheet
