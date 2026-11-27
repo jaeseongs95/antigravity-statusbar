@@ -1,3 +1,59 @@
+# Release Notes — `v3.4.1` (2026-11-27)
+
+> **Document Policy / 문서 작성 기준**
+> - This single release note contains both the **English** and **Korean (한국어)** editions inline (never separated by external links).
+> - Maintain a formal, objective technical tone throughout both editions.
+
+---
+
+## [English] `v3.4.1` Release Notes
+
+### 1. Summary
+`antigravity-statusbar` `v3.4.1` aligns with **Extenra `v3.3.2+`** (verified against **`v3.3.3`**) by delegating Settings language switching to Extenra's host-owned top-right header `[ 한국어 | EN ]` toggle, removing the duplicate bottom language section, adding dynamic `getTitle()` / `OverlayHandle.setTitle()` localization, and fixing a boot-time race where stale Sidecar `settings.locale` overwrote the host's authoritative `ctx.i18n.getLocale()`.
+
+### 2. Key Changes
+- **Removed Duplicate Bottom Language Section (`src/adapters/antigravity/addon/ui-schemas.mjs`, `bar-controller.mjs`)**:
+  - Removed the redundant `set-lang-sec` / `set-lang-select` card from the bottom of the Settings body now that Extenra `v3.3.2+` renders the unified `[ 한국어 | EN ]` switcher directly in the Settings header (`.ag-inline-header` / `.ag-ui-header`).
+- **Extenra `v3.3.2+` Dynamic Header Title & Locale Switch Integration (`src/adapters/antigravity/addon/bar-controller.mjs`)**:
+  - Passes `showLocaleSwitch: true` and dynamic `getTitle: () => i18n.t().settingsTitle` to `ctx.ui.registerSettingsPage`, so the Settings header title and Desktop sidebar tab automatically update between `상태바` and `Statusbar` on locale switch.
+  - Calls `OverlayHandle.setTitle()` when updating open Context Popup and Global Context Limits modals on locale changes.
+- **Host-Authoritative Boot Locale Precedence Fix (`src/adapters/antigravity/addon/bootstrap.mjs`)**:
+  - Fixed a bug where initial `/api/settings/get` polling could overwrite Extenra Host's `ctx.i18n.getLocale()` (e.g., header showing `EN` while the body reverted to stale Sidecar `ko`). When `ctx.i18n.getLocale()` is available, the host locale is now strictly authoritative and lazily syncs mismatched Sidecar `locale` back via `/api/settings/update`.
+- **Manifest Minimum Host Requirement (`addon-manifest.v3.json`)**:
+  - Raised `compatibility.minHostVersion` from `"3.3.0"` to `"3.3.2"`.
+
+### 3. Verification
+- `node scripts/build-renderer.mjs`: **PASS** (`153,812 bytes`, `sha256: b79fd348840271ebb77407bce3c517fcea1770c73aed2f641acfef6994328559`).
+- `extenra --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `version: "3.4.1"`, `minHostVersion: "3.3.2"`).
+- `@extenra/sdk v3.3.3` parity tests (`REQUIRE_ADDONS_SDK=1`): **PASS 3/3** (host header `[data-addon-host-control="locale-switch"]`, `getTitle()` dynamic title `상태바` ↔ `Statusbar`, zero duplicate body language section, and `host.setLocale()` broadcast).
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, real Headless Chromium Shadow DOM E2E, and installer dry-run **100% PASS**.
+
+---
+
+## [한국어] `v3.4.1` 릴리즈 노트
+
+### 1. 개요
+`antigravity-statusbar` `v3.4.1`은 **Extenra `v3.3.2+`**(**`v3.3.3`** 기준 검증 완료) 최신 스펙에 맞춰 설정 페이지 본문 하단의 중복 언어 선택 섹션을 제거하고, 호스트 공용 상단 헤더 `[ 한국어 | EN ]` 토글·동적 제목(`getTitle()` / `OverlayHandle.setTitle()`)을 연동했으며, 초기 부팅 시 구 Sidecar `locale`이 호스트 전역 언어를 덮어쓰던 결함을 수정한 패치 릴리즈입니다 (`compatibility.minHostVersion: "3.3.2"`).
+
+### 2. 주요 변경 사항
+- **본문 하단 중복 언어 선택 섹션 제거 (`src/adapters/antigravity/addon/ui-schemas.mjs`, `bar-controller.mjs`)**:
+  - Extenra `v3.3.2+`가 설정 헤더(`.ag-inline-header` / `.ag-ui-header`) 우측에 공용 `[ 한국어 | EN ]` 토글을 직접 제공함에 따라 본문 하단의 중복 `set-lang-sec` / `set-lang-select` 카드를 제거했습니다.
+- **Extenra `v3.3.2+` 동적 헤더 제목 및 오버레이 제목 동기화 (`src/adapters/antigravity/addon/bar-controller.mjs`)**:
+  - `ctx.ui.registerSettingsPage`에 `showLocaleSwitch: true`와 `getTitle: () => i18n.t().settingsTitle`을 전달해 언어 전환 시 설정 헤더 제목과 데스크톱 설정 사이드바 탭 라벨이 `상태바` ↔ `Statusbar`로 즉시 갱신됩니다.
+  - 열려 있는 컨텍스트 팝업 및 전역 한도 모달에도 `OverlayHandle.setTitle()`을 연동했습니다.
+- **부팅 시 호스트 전역 언어 우선권 결함 수정 (`src/adapters/antigravity/addon/bootstrap.mjs`)**:
+  - 초기 `/api/settings/get` 폴링 응답의 오래된 Sidecar `locale`이 Extenra 호스트 `ctx.i18n.getLocale()`을 덮어써 헤더(`EN`)와 본문(`한국어`) 언어가 어긋나던 결함을 수정했습니다. 호스트 i18n이 활성화된 경우 호스트 로케일을 단일 진실 원천으로 유지하고 불일치 시 Sidecar에 역동기화합니다.
+- **최소 호스트 버전 상향 (`addon-manifest.v3.json`)**:
+  - `compatibility.minHostVersion`을 `"3.3.0"`에서 `"3.3.2"`로 상향했습니다.
+
+### 3. 검증 근거
+- `node scripts/build-renderer.mjs`: **PASS** (`153,812 bytes`, `sha256: b79fd348840271ebb77407bce3c517fcea1770c73aed2f641acfef6994328559`).
+- `extenra --validate addon-manifest.v3.json`: **PASS** (`ok: true`, `version: "3.4.1"`, `minHostVersion: "3.3.2"`).
+- `@extenra/sdk v3.3.3` 패리티 테스트(`REQUIRE_ADDONS_SDK=1`): **PASS 3/3** (호스트 헤더 `[data-addon-host-control="locale-switch"]` 클릭 전환, 동적 `getTitle()` `상태바` ↔ `Statusbar`, 본문 중복 언어 섹션 부재, `host.setLocale()` 전파 검증).
+- 2-OS GitHub Actions CI (`ubuntu-latest` + `windows-latest`, Node 20): static, unit, integration, security, 실제 Headless Chromium Shadow DOM E2E 및 설치 드라이런 전 항목 **100% PASS**.
+
+---
+
 # Release Notes — `v3.4.0` (2026-11-26)
 
 > **Document Policy / 문서 작성 기준**

@@ -62,7 +62,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
   assert.equal(manifest.pluginId, 'antigravity-statusbar');
   assert.equal(manifest.displayName, 'Antigravity Statusbar');
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(manifest.version, '3.4.0');
+  assert.equal(manifest.version, '3.4.1');
   assert.equal(manifest.trustLevel, 'trusted');
   assert.deepEqual(manifest.settingsBridge, {
     fileName: DEFAULT_SETTINGS_BRIDGE_FILE,
@@ -88,7 +88,7 @@ test('TC-ADDON-01: addon-manifest.v3.json conforms strictly to AddonManifest.v3 
     surfaces: ['desktop', 'remote-web'],
     hostProfile: 'antigravity-desktop',
     hostProfiles: ['antigravity-desktop', 'antigravity-remote-web'],
-    minHostVersion: '3.3.0',
+    minHostVersion: '3.3.2',
   });
   assert.deepEqual(manifest.capabilities, ['renderer']);
   assert.deepEqual(manifest.entry, {

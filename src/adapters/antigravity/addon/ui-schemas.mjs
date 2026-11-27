@@ -491,7 +491,6 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
     autoCompact = true,
     compactPrompt = '',
     addonsList = [],
-    locale = 'ko',
     feedback = '',
     feedbackIsErr = false,
   } = {}) {
@@ -672,23 +671,6 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
     });
 
     sections.push({
-      type: 'section',
-      id: 'set-lang-sec',
-      title: tr.langLabel,
-      children: [
-        {
-          type: 'segmented',
-          id: 'set-lang-select',
-          field: 'locale',
-          options: [
-            { value: 'ko', label: '한국어' },
-            { value: 'en', label: 'EN' },
-          ],
-        },
-      ],
-    });
-
-    sections.push({
       type: 'alert',
       id: 'set-feedback',
       text: feedback || '',
@@ -706,7 +688,6 @@ export function createDeclarativeUiSchemas({ i18n, presets }) {
       isRemoteWeb: Boolean(isRemoteWeb),
       autoCompact: Boolean(autoCompact),
       compactPrompt: String(compactPrompt || ''),
-      locale: locale === 'en' ? 'en' : 'ko',
       hasFeedback: Boolean(feedback),
     };
 

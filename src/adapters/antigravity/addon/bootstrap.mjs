@@ -51,7 +51,8 @@ export function startAddonStatusbar({
   let unsubscribeTheme = null;
   let unsubscribeI18n = null;
   let unsubscribeRemoteBridge = null;
-  let hostLocaleOverride = null;
+  let hasHostLocaleAuthority = false;
+  let lastSyncedHostLocaleToSidecar = null;
   let statusbarServiceHandle = null;
   const hostDisposables = [];
   let currentSlotEl = null;
@@ -128,11 +129,14 @@ export function startAddonStatusbar({
     return null;
   }
 
-  // Respect host i18n locale on initial boot before Sidecar settings override it
+  // Extenra v3.3.2+ host i18n (header [한국어|EN] switch) is the single source of truth for UI locale
   if (hostPort.hostI18n && typeof hostPort.hostI18n.getLocale === 'function') {
     try {
       const hostLoc = normalizeHostUiLocale(hostPort.hostI18n.getLocale());
-      if (hostLoc) i18n.setLocale(hostLoc);
+      if (hostLoc) {
+        hasHostLocaleAuthority = true;
+        i18n.setLocale(hostLoc);
+      }
     } catch {}
   }
 
@@ -158,12 +162,24 @@ export function startAddonStatusbar({
   function applySettingsPayload(settings, { fromUser = false } = {}) {
     if (!settings || typeof settings !== 'object') return;
     if (settings.locale === 'ko' || settings.locale === 'en') {
-      if (fromUser) {
-        hostLocaleOverride = null;
-        i18n.setLocale(settings.locale);
-      } else if (hostLocaleOverride) {
-        if (settings.locale === hostLocaleOverride) {
-          hostLocaleOverride = null;
+      if (hasHostLocaleAuthority) {
+        // Never allow stale Sidecar settings.locale to revert Extenra Host's authoritative locale.
+        // Align Sidecar's persisted locale with the host locale once per mismatch.
+        const activeHostLocale = i18n.getLocale();
+        if (
+          !fromUser &&
+          settings.locale !== activeHostLocale &&
+          lastSyncedHostLocaleToSidecar !== activeHostLocale &&
+          canPollSidecar()
+        ) {
+          lastSyncedHostLocaleToSidecar = activeHostLocale;
+          api
+            .post('/api/settings/update', { locale: activeHostLocale }, hostPort.lifecycleSignal || undefined)
+            .catch(() => {
+              if (lastSyncedHostLocaleToSidecar === activeHostLocale) {
+                lastSyncedHostLocaleToSidecar = null;
+              }
+            });
         }
       } else {
         i18n.setLocale(settings.locale);
@@ -768,20 +784,25 @@ export function startAddonStatusbar({
     }
   }
 
-  // Subscribe to Extenra v3.3.0 centralized host global locale changes (Desktop Addon Manager & Remote Web drawer)
+  // Subscribe to Extenra v3.3.2+ centralized host global locale changes (Settings header, Addon Manager & Remote Web drawer)
   if (hostPort.hostI18n && typeof hostPort.hostI18n.onDidChange === 'function') {
     try {
       const unsub = hostPort.hostI18n.onDidChange((nextLocale) => {
         if (disposed) return;
         const normalized = normalizeHostUiLocale(nextLocale);
         if (!normalized) return;
-        hostLocaleOverride = normalized;
+        hasHostLocaleAuthority = true;
+        lastSyncedHostLocaleToSidecar = normalized;
         i18n.setLocale(normalized);
         controller.render();
         if (canPollSidecar()) {
           api
             .post('/api/settings/update', { locale: normalized }, hostPort.lifecycleSignal || undefined)
-            .catch(() => {});
+            .catch(() => {
+              if (lastSyncedHostLocaleToSidecar === normalized) {
+                lastSyncedHostLocaleToSidecar = null;
+              }
+            });
         }
       });
       if (typeof unsub === 'function') {

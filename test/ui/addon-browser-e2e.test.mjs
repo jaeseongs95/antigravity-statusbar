@@ -266,6 +266,13 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
       let popoverShadow = null;
       let modalShadow = null;
       let settingsShadow = null;
+      let currentHostLocale = 'ko';
+      const i18nListeners = new Set();
+      function setHostLocale(next) {
+        if (next !== 'ko' && next !== 'en') return;
+        currentHostLocale = next;
+        Array.from(i18nListeners).forEach((cb) => { try { cb(next); } catch {} });
+      }
       const abortCtrl = new AbortController();
 
       function evalCond(cond, state) {
@@ -308,19 +315,22 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
             });
           } else if (node.type === 'toggle') {
             ref.ctrl.checked = Boolean(val);
+          } else if (node.type === 'section' && ref.titleEl && node.title !== undefined) {
+            ref.titleEl.textContent = String(node.title);
           }
         }
 
         function buildNode(node) {
           let wrapper = null;
           let ctrl = null;
+          let titleEl = null;
           let mountEl = null;
           if (node.type === 'stack' || node.type === 'row' || node.type === 'section') {
             wrapper = document.createElement(node.type === 'section' ? 'section' : 'div');
             if (node.title) {
-              const h = document.createElement('div');
-              h.textContent = node.title;
-              wrapper.appendChild(h);
+              titleEl = document.createElement('div');
+              titleEl.textContent = node.title;
+              wrapper.appendChild(titleEl);
             }
             mountEl = wrapper;
           } else if (node.type === 'text' || node.type === 'badge' || node.type === 'alert') {
@@ -395,7 +405,7 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
           }
           if (node.id) {
             wrapper.setAttribute('data-ag-node-id', node.id);
-            refs.set(node.id, { type: node.type, wrapper, ctrl, mountEl });
+            refs.set(node.id, { type: node.type, wrapper, ctrl, titleEl, mountEl });
           }
           applyFlags(wrapper, ctrl, node);
           if (mountEl && Array.isArray(node.children)) {
@@ -458,6 +468,42 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
         const host = isModal ? document.createElement('div') : el;
         if (isModal) el.appendChild(host);
         const sr = host.attachShadow({ mode: 'open' });
+        let titleEl = null;
+        let unsubHeaderLocale = null;
+        if (opts.title || opts.showLocaleSwitch) {
+          const header = document.createElement('div');
+          header.className = 'ag-ui-header';
+          titleEl = document.createElement('div');
+          titleEl.className = 'ag-ui-title';
+          titleEl.textContent = String(opts.title || '');
+          header.appendChild(titleEl);
+          if (opts.showLocaleSwitch) {
+            const group = document.createElement('div');
+            group.setAttribute('role', 'group');
+            group.setAttribute('data-addon-host-control', 'locale-switch');
+            const btns = [];
+            const syncSwitch = (loc) => {
+              btns.forEach(({ code, btn }) => btn.setAttribute('aria-pressed', loc === code ? 'true' : 'false'));
+              if (titleEl && typeof opts.getTitle === 'function') {
+                titleEl.textContent = String(opts.getTitle() || '');
+              }
+            };
+            [['ko', '한국어'], ['en', 'EN']].forEach(([code, label]) => {
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.setAttribute('data-addon-host-lang', code);
+              btn.textContent = label;
+              btn.addEventListener('click', () => setHostLocale(code));
+              btns.push({ code, btn });
+              group.appendChild(btn);
+            });
+            syncSwitch(currentHostLocale);
+            i18nListeners.add(syncSwitch);
+            unsubHeaderLocale = () => i18nListeners.delete(syncSwitch);
+            header.appendChild(group);
+          }
+          sr.appendChild(header);
+        }
         const body = document.createElement('div');
         sr.appendChild(body);
         document.body.appendChild(el);
@@ -465,12 +511,14 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
         const renderer = createMiniSchemaRenderer(body, opts.tree, opts.state, opts.onChange, opts.onAction);
         if (isModal && typeof el.showModal === 'function') { try { el.showModal(); } catch {} }
         const close = () => {
+          if (unsubHeaderLocale) { unsubHeaderLocale(); unsubHeaderLocale = null; }
           try { if (isModal && el.open) el.close(); } catch {}
           el.remove();
           setShadow(null);
           if (opts.onClose) opts.onClose();
         };
         el.addEventListener('close', () => {
+          if (unsubHeaderLocale) { unsubHeaderLocale(); unsubHeaderLocale = null; }
           el.remove();
           setShadow(null);
           if (opts.onClose) opts.onClose();
@@ -478,6 +526,9 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
         return {
           element: el,
           update: renderer.update,
+          setTitle(nextTitle) {
+            if (titleEl && typeof nextTitle === 'string') titleEl.textContent = nextTitle;
+          },
           getElementById: renderer.getElementById,
           close,
         };
@@ -493,10 +544,16 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
 
       window.addonHost = {
         apiVersion: 3,
-        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.4.0', trustLevel: 'trusted' },
+        meta: { pluginId: 'antigravity-statusbar', displayName: 'Antigravity Statusbar', version: '3.4.1', trustLevel: 'trusted' },
         env: { surface: 'desktop', layoutMode: 'desktop', capabilities: { hasLocalLoopback: false, hasNetHttps: false, hasSettingsBridge: false } },
         theme: { getMode: () => 'dark', getTokenCss: () => ':host { --ag-accent: #38bdf8; }', onDidChange: () => () => {} },
-        i18n: { getLocale: () => 'ko', onDidChange: () => () => {} },
+        i18n: {
+          getLocale: () => currentHostLocale,
+          onDidChange(cb) {
+            i18nListeners.add(cb);
+            return () => i18nListeners.delete(cb);
+          },
+        },
         ui: {
           showToast() {},
           registerCommand() { return { dispose() {} }; },
@@ -505,6 +562,9 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
             return {
               open() {
                 active = openOverlay('settings', {
+                  title: typeof spec.getTitle === 'function' ? spec.getTitle() : spec.title,
+                  getTitle: spec.getTitle,
+                  showLocaleSwitch: spec.showLocaleSwitch !== false,
                   tree: spec.getSchema ? spec.getSchema() : spec.schema,
                   state: spec.getState ? spec.getState() : spec.state,
                   onChange: spec.onChange,
@@ -753,11 +813,16 @@ test('TC-P0-02 (v3 API-First): real Headless Chromium Shadow DOM E2E verifies 99
       'In-place Global Limits Delete button must retain focus across 2+ live poll ticks',
     );
     await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"gm-back-settings-btn\"]').click()");
-    await waitFor("Boolean(window.__e2eShadows.settings?.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"en\"]'))");
-    await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"en\"]').click()");
-    await waitFor("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"en\"]')?.getAttribute('aria-pressed') === 'true'");
-    await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"ko\"]').click()");
-    await waitFor("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"] [data-ag-segment-value=\"ko\"]')?.getAttribute('aria-pressed') === 'true'");
+    await waitFor("Boolean(window.__e2eShadows.settings?.querySelector('[data-ag-node-id=\"set-open-global-btn\"]'))");
+    assert.equal(
+      await evalExpr("window.__e2eShadows.settings.querySelector('[data-ag-node-id=\"set-lang-select\"]') === null"),
+      true,
+      'Settings body must omit duplicate language selector (delegated to Extenra v3.3.2+ header toggle)',
+    );
+    await evalExpr("window.__e2eShadows.settings.querySelector('[data-addon-host-control=\"locale-switch\"] [data-addon-host-lang=\"en\"]').click()");
+    await waitFor("window.__e2eShadows.settings.querySelector('.ag-ui-title')?.textContent === 'Statusbar' && window.__e2eShadows.settings.textContent.includes('Compaction')");
+    await evalExpr("window.__e2eShadows.settings.querySelector('[data-addon-host-control=\"locale-switch\"] [data-addon-host-lang=\"ko\"]').click()");
+    await waitFor("window.__e2eShadows.settings.querySelector('.ag-ui-title')?.textContent === '상태바' && window.__e2eShadows.settings.textContent.includes('컴팩션 설정')");
 
     // 7. Disconnect indicator visible even when stale snapshot exists
     failSnapshots = true;

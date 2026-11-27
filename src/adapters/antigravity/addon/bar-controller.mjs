@@ -485,7 +485,6 @@ export function createBarController({
       autoCompact: sharedState.autoCompactEnabled,
       compactPrompt: state.settingsDraft.compactPrompt,
       addonsList: getCombinedAddonsForSettings(),
-      locale: i18n.getLocale(),
       feedback: state.settingsDraft.feedback,
       feedbackIsErr: state.settingsDraft.feedbackIsErr,
     });
@@ -496,6 +495,9 @@ export function createBarController({
     try {
       const { tree, state: nextState } = buildCurrentContextPopupSpec();
       state.contextPopupHandle.update(tree, nextState);
+      if (typeof state.contextPopupHandle.setTitle === 'function') {
+        state.contextPopupHandle.setTitle(`${i18n.t().settingsTitle} · ${i18n.t().tabContext}`);
+      }
     } catch {}
   }
 
@@ -505,6 +507,9 @@ export function createBarController({
       try {
         const { tree, state: nextState } = buildCurrentGlobalModalSpec({ showBackToSettings: false });
         state.globalModalHandle.update(tree, nextState);
+        if (typeof state.globalModalHandle.setTitle === 'function') {
+          state.globalModalHandle.setTitle(i18n.t().globalModalTitle);
+        }
       } catch {}
     }
     if (state.settingsPageOpen && state.settingsSubView === 'global-limits') {
@@ -721,6 +726,10 @@ export function createBarController({
     const reg = hostPort.registerSettingsPage({
       id: 'settings',
       title: i18n.t().settingsTitle,
+      getTitle() {
+        return i18n.t().settingsTitle;
+      },
+      showLocaleSwitch: true,
       order: 50,
       width: 520,
       schema: initial.tree,
@@ -748,8 +757,6 @@ export function createBarController({
           state.settingsDraft.compactPrompt = String(value ?? '');
           state.settingsDraft.feedback = '';
           updateSettingsPageInPlace();
-        } else if (field === 'locale') {
-          applyLocale(String(value || 'ko'));
         }
       },
       onAction(ev) {
@@ -1260,16 +1267,6 @@ export function createBarController({
     } catch (err) {
       setSettingsFeedback(err?.message || 'Error', true);
     }
-  }
-
-  async function applyLocale(next) {
-    if (next !== 'ko' && next !== 'en') return;
-    i18n.setLocale(next);
-    render();
-    try {
-      const updated = await api.post('/api/settings/update', { locale: next });
-      if (typeof onSettingsChanged === 'function') onSettingsChanged(updated);
-    } catch {}
   }
 
   barView.ctxBtn.addEventListener('click', () => {

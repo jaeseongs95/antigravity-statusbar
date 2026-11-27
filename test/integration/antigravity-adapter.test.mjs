@@ -871,14 +871,14 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
     const preserved = await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8');
     assert.equal(preserved, '{"locale":"ko"}');
     const manifest = JSON.parse(await fs.readFile(path.join(destDir, 'plugin.json'), 'utf8'));
-    assert.equal(manifest.version, '3.4.0');
+    assert.equal(manifest.version, '3.4.1');
     const addonManifest = JSON.parse(
       await fs.readFile(path.join(destDir, 'addon-manifest.v3.json'), 'utf8'),
     );
     assert.equal(addonManifest.schemaVersion, 3);
     assert.equal(addonManifest.apiVersion, 3);
     assert.equal(addonManifest.pluginId, 'antigravity-statusbar');
-    assert.equal(addonManifest.version, '3.4.0');
+    assert.equal(addonManifest.version, '3.4.1');
     assert.equal(addonManifest.trustLevel, 'trusted');
     assert.deepEqual(addonManifest.compatibility.surfaces, ['desktop', 'remote-web']);
     assert.deepEqual(addonManifest.compatibility.hostProfiles, [
@@ -886,7 +886,7 @@ test('R3-F3, NB3, NB4 & v3.2.0 trusted SHA-256 immutability: install-plugin writ
       'antigravity-remote-web',
     ]);
     assert.equal(addonManifest.compatibility.excludeHostProfiles, undefined);
-    assert.equal(addonManifest.compatibility.minHostVersion, '3.3.0');
+    assert.equal(addonManifest.compatibility.minHostVersion, '3.3.2');
     assert.deepEqual(addonManifest.permissions.net, {
       localLoopback: ['antigravity-sidecar'],
     });

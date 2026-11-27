@@ -621,21 +621,14 @@ test('TC-UNIT-04: ui-schemas.mjs builds valid Tier-2 declarative trees (Context 
       { id: 'p1', label: 'Plan', source: 'agent', enabled: true, runtime: false, delegated: false },
       { id: 'peer:mode', label: '번역', source: 'peer', enabled: true, runtime: true, delegated: true },
     ],
-    locale: 'ko',
   });
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-bridge-sec'), null, 'Desktop settings schema must omit Remote Host Bridge section');
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-url'), null);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-remote-token'), null);
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-prompt-count').text, '5 / 1,000');
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-compact-prompt').rows, 4);
-  assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-sec').title, i18n.t().langLabel);
-  const langNode = findSchemaNode(desktopSettings.tree, 'set-lang-select');
-  assert.equal(langNode?.type, 'segmented', 'Language selector must use Extenra v3.3.0 Tier-2 segmented primitive');
-  assert.equal(langNode?.label, undefined, 'Language segmented control must not duplicate section title');
-  assert.deepEqual(langNode?.options, [
-    { value: 'ko', label: '한국어' },
-    { value: 'en', label: 'EN' },
-  ]);
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-sec'), null, 'Redundant bottom language section must be omitted (delegated to Extenra v3.3.2+ header toggle)');
+  assert.equal(findSchemaNode(desktopSettings.tree, 'set-lang-select'), null, 'Redundant body language control must be omitted');
   assert.equal(findSchemaNode(desktopSettings.tree, 'set-global-actions')?.type, 'row');
 
   const remoteSettings = schemas.buildSettingsPageSpec({
@@ -822,10 +815,17 @@ test('TC-UNIT-05: bar-controller.mjs coalesces refreshes, protects dirty drafts 
     sentRequests.some((r) => r.pathname === '/api/settings/update' && r.body.defaultCustomLimit === null),
   );
 
-  // Open Tier-1 Settings Page & save compactPrompt
+  // Open Tier-1 Settings Page & verify Extenra v3.3.2+ header contract (showLocaleSwitch + dynamic getTitle) and compactPrompt save
   barView.settingsBtn.click();
   const settingsPage = fakeHost.getSettingsPage();
   assert.equal(settingsPage.openFlag, true);
+  assert.equal(settingsPage.spec.showLocaleSwitch, true);
+  assert.equal(typeof settingsPage.spec.getTitle, 'function');
+  assert.equal(settingsPage.spec.getTitle(), '상태바');
+  i18n.setLocale('en');
+  assert.equal(settingsPage.spec.getTitle(), 'Statusbar');
+  i18n.setLocale('ko');
+  assert.equal(settingsPage.spec.getTitle(), '상태바');
   settingsPage.spec.onChange({ field: 'compactPrompt', value: '핵심만' });
   settingsPage.spec.onAction({ actionId: 'save-compact-prompt' });
   await flush();
@@ -997,10 +997,11 @@ test('TC-UNIT-06: bootstrap.mjs picks visible input box, provides host.statusbar
   let slotUnmounted = false;
   const fakeHost = createFakeV3HostPort({ surface: 'desktop' });
   const localeListeners = new Set();
+  let currentHostLocale = 'en';
   const hostPort = {
     ...fakeHost.hostPort,
     hostI18n: {
-      getLocale: () => 'ko',
+      getLocale: () => currentHostLocale,
       onDidChange(cb) {
         localeListeners.add(cb);
         return () => localeListeners.delete(cb);
@@ -1025,10 +1026,18 @@ test('TC-UNIT-06: bootstrap.mjs picks visible input box, provides host.statusbar
   };
 
   let aborted = false;
+  const apiPosts = [];
   const api = {
     isConnected: () => true,
     abortAll() { aborted = true; },
-    async post() { return {}; },
+    async post(pathname, body) {
+      apiPosts.push({ pathname, body });
+      if (pathname === '/api/settings/get') {
+        // Stale Sidecar locale ('ko') must NEVER overwrite Extenra Host's authoritative 'en' locale on boot
+        return { locale: 'ko', autoCompact: true, customButtons: [], disabledRuntimeAddonIds: [] };
+      }
+      return {};
+    },
   };
   const i18n = createInlineI18n('ko');
   const addons = createAddonRegistry({ api, onChange() {} });
@@ -1049,6 +1058,7 @@ test('TC-UNIT-06: bootstrap.mjs picks visible input box, provides host.statusbar
     pollConfig: { normalPollMs: 60000, quotaPollMs: 60000 },
   });
 
+  await flush(30);
   assert.equal(slotEl.parentNode, bVis);
   assert.equal(win.statusbarAddons, addons.publicApi);
   assert.ok(fakeHost.services.has('host.statusbar'), 'Must provide host.statusbar service');
@@ -1056,10 +1066,17 @@ test('TC-UNIT-06: bootstrap.mjs picks visible input box, provides host.statusbar
   assert.equal(fakeHost.commands.has('open-settings'), true);
   assert.equal(fakeHost.commands.has('compact-now'), true);
   assert.equal(localeListeners.size, 1, 'Must subscribe to hostPort.hostI18n.onDidChange');
-  for (const cb of localeListeners) cb('en');
-  assert.equal(i18n.getLocale(), 'en', 'Host global locale broadcast must switch statusbar locale immediately');
+  assert.equal(i18n.getLocale(), 'en', 'Boot-time stale Sidecar locale must NOT overwrite Extenra Host locale');
+  assert.ok(
+    apiPosts.some((p) => p.pathname === '/api/settings/update' && p.body?.locale === 'en'),
+    'Must sync authoritative host locale back to Sidecar on mismatch',
+  );
+  currentHostLocale = 'ko';
   for (const cb of localeListeners) cb('ko');
-  assert.equal(i18n.getLocale(), 'ko');
+  assert.equal(i18n.getLocale(), 'ko', 'Host global locale broadcast must switch statusbar locale immediately');
+  currentHostLocale = 'en';
+  for (const cb of localeListeners) cb('en');
+  assert.equal(i18n.getLocale(), 'en');
 
   assert.equal(disposers.length, 1);
   disposers[0]();
